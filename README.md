@@ -1,5 +1,7 @@
 # AI Town 🏠💻💌
 
+This fork adds independent federated towns while preserving the original pixel world and simulation. See [federation setup](docs/FEDERATION.md), [network acceptance](docs/FEDERATION-NETWORK-ACCEPTANCE.zh-CN.md), and [local verification and current limits](docs/FEDERATION-VALIDATION.zh-CN.md).
+
 [Live Demo](https://www.convex.dev/ai-town)
 
 [Join our community Discord: AI Stack Devs](https://discord.gg/PQUmTBTGmT)

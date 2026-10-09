@@ -42,3 +42,7 @@ dist
 
 convex-local*
 convex_local*
+
+# Local browser verification artifacts
+.playwright-cli/
+output/

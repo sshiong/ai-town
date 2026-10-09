@@ -2,6 +2,8 @@ import { v } from 'convex/values';
 import { Id } from '../_generated/dataModel';
 import { ActionCtx, internalQuery } from '../_generated/server';
 import { LLMMessage, chatCompletion } from '../util/llm';
+import { chatConfigForResident } from '../models/profiles';
+import { activeRoute } from '../models/embeddings';
 import * as memory from './memory';
 import { api, internal } from '../_generated/api';
 import * as embeddingsCache from './embeddingsCache';
@@ -26,9 +28,11 @@ export async function startConversationMessage(
       conversationId,
     },
   );
+  const route = await activeRoute(ctx);
   const embedding = await embeddingsCache.fetch(
     ctx,
     `${player.name} is talking to ${otherPlayer.name}`,
+    { route, inputMode: 'query' },
   );
 
   const memories = await memory.searchMemories(
@@ -36,6 +40,8 @@ export async function startConversationMessage(
     player.id as GameId<'players'>,
     embedding,
     Number(process.env.NUM_MEMORIES_TO_SEARCH) || NUM_MEMORIES_TO_SEARCH,
+    worldId,
+    route.space._id,
   );
 
   const memoryWithOtherPlayer = memories.find(
@@ -62,11 +68,14 @@ export async function startConversationMessage(
     { role: 'user', content: lastPrompt },
   ];
 
-  const { content } = await chatCompletion({
-    messages,
-    max_tokens: 300,
-    stop: stopWords(otherPlayer.name, player.name),
-  });
+  const { content } = await chatCompletion(
+    {
+      messages,
+      max_tokens: 300,
+      stop: stopWords(otherPlayer.name, player.name),
+    },
+    await chatConfigForResident(ctx, worldId, playerId),
+  );
   return trimContentPrefx(content, lastPrompt);
 }
 
@@ -95,11 +104,20 @@ export async function continueConversationMessage(
   );
   const now = Date.now();
   const started = new Date(conversation.created);
+  const route = await activeRoute(ctx);
   const embedding = await embeddingsCache.fetch(
     ctx,
     `What do you think about ${otherPlayer.name}?`,
+    { route, inputMode: 'query' },
   );
-  const memories = await memory.searchMemories(ctx, player.id as GameId<'players'>, embedding, 3);
+  const memories = await memory.searchMemories(
+    ctx,
+    player.id as GameId<'players'>,
+    embedding,
+    3,
+    worldId,
+    route.space._id,
+  );
   const prompt = [
     `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
     `The conversation started at ${started.toLocaleString()}. It's now ${now.toLocaleString()}.`,
@@ -128,11 +146,14 @@ export async function continueConversationMessage(
   const lastPrompt = `${player.name} to ${otherPlayer.name}:`;
   llmMessages.push({ role: 'user', content: lastPrompt });
 
-  const { content } = await chatCompletion({
-    messages: llmMessages,
-    max_tokens: 300,
-    stop: stopWords(otherPlayer.name, player.name),
-  });
+  const { content } = await chatCompletion(
+    {
+      messages: llmMessages,
+      max_tokens: 300,
+      stop: stopWords(otherPlayer.name, player.name),
+    },
+    await chatConfigForResident(ctx, worldId, playerId),
+  );
   return trimContentPrefx(content, lastPrompt);
 }
 
@@ -177,11 +198,14 @@ export async function leaveConversationMessage(
   const lastPrompt = `${player.name} to ${otherPlayer.name}:`;
   llmMessages.push({ role: 'user', content: lastPrompt });
 
-  const { content } = await chatCompletion({
-    messages: llmMessages,
-    max_tokens: 300,
-    stop: stopWords(otherPlayer.name, player.name),
-  });
+  const { content } = await chatCompletion(
+    {
+      messages: llmMessages,
+      max_tokens: 300,
+      stop: stopWords(otherPlayer.name, player.name),
+    },
+    await chatConfigForResident(ctx, worldId, playerId),
+  );
   return trimContentPrefx(content, lastPrompt);
 }
 

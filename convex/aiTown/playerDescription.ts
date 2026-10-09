@@ -6,6 +6,9 @@ export const serializedPlayerDescription = {
   name: v.string(),
   description: v.string(),
   character: v.string(),
+  originTownId: v.optional(v.string()),
+  originTownName: v.optional(v.string()),
+  visitId: v.optional(v.string()),
 };
 export type SerializedPlayerDescription = ObjectType<typeof serializedPlayerDescription>;
 
@@ -14,6 +17,9 @@ export class PlayerDescription {
   name: string;
   description: string;
   character: string;
+  originTownId?: string;
+  originTownName?: string;
+  visitId?: string;
 
   constructor(serialized: SerializedPlayerDescription) {
     const { playerId, name, description, character } = serialized;
@@ -21,6 +27,9 @@ export class PlayerDescription {
     this.name = name;
     this.description = description;
     this.character = character;
+    this.originTownId = serialized.originTownId;
+    this.originTownName = serialized.originTownName;
+    this.visitId = serialized.visitId;
   }
 
   serialize(): SerializedPlayerDescription {
@@ -30,6 +39,9 @@ export class PlayerDescription {
       name,
       description,
       character,
+      originTownId: this.originTownId,
+      originTownName: this.originTownName,
+      visitId: this.visitId,
     };
   }
 }

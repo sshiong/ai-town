@@ -16,6 +16,7 @@ import { fetchEmbedding } from './util/llm';
 import { chatCompletion } from './util/llm';
 import { startConversationMessage } from './agent/conversation';
 import { GameId } from './aiTown/ids';
+import { assertFederationAdmin } from './federation/auth';
 
 // Clear all of the tables except for the embeddings cache.
 const excludedTables: Array<TableNames> = ['embeddingsCache'];
@@ -60,13 +61,26 @@ export const kick = internalMutation({
 });
 
 export const stopAllowed = query({
-  handler: async () => {
-    return !process.env.STOP_NOT_ALLOWED;
+  handler: async (ctx) => {
+    const town = await ctx.db.query('federationIdentity').unique();
+    return !process.env.STOP_NOT_ALLOWED && !town?.enabled;
   },
 });
 
 export const stop = mutation({
-  handler: async (ctx) => {
+  args: { adminToken: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    const town = await ctx.db.query('federationIdentity').unique();
+    if (town?.enabled) {
+      assertFederationAdmin(args.adminToken ?? '');
+      const live = await ctx.db
+        .query('visitLedger')
+        .filter((q) =>
+          q.and(q.neq(q.field('state'), 'COMPLETED'), q.neq(q.field('state'), 'REJECTED')),
+        )
+        .first();
+      if (live) throw new Error('END_VISITS_BEFORE_STOPPING');
+    }
     if (process.env.STOP_NOT_ALLOWED) throw new Error('Stop not allowed');
     const { worldStatus, engine } = await getDefaultWorld(ctx.db);
     if (worldStatus.status === 'inactive' || worldStatus.status === 'stoppedByDeveloper') {
@@ -83,7 +97,10 @@ export const stop = mutation({
 });
 
 export const resume = mutation({
-  handler: async (ctx) => {
+  args: { adminToken: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    const town = await ctx.db.query('federationIdentity').unique();
+    if (town?.enabled) assertFederationAdmin(args.adminToken ?? '');
     const { worldStatus, engine } = await getDefaultWorld(ctx.db);
     if (worldStatus.status === 'running') {
       if (!engine.running) {

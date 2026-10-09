@@ -25,6 +25,7 @@ export default function Game() {
   const worldStatus = useQuery(api.world.defaultWorldStatus);
   const worldId = worldStatus?.worldId;
   const engineId = worldStatus?.engineId;
+  const presence = useQuery(api.federation.runtime.worldPresence, worldId ? { worldId } : 'skip');
 
   const game = useServerGame(worldId);
 
@@ -37,7 +38,7 @@ export default function Game() {
   const scrollViewRef = useRef<HTMLDivElement>(null);
 
   if (!worldId || !engineId || !game) {
-    return null;
+    return <div className="admin-panel font-body text-brown-100" role="status">{worldStatus === null ? 'No world exists yet. Initialize the town backend to open the map.' : 'Loading the town map…'}</div>;
   }
   return (
     <>
@@ -70,6 +71,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           className="flex flex-col overflow-y-auto shrink-0 px-4 py-6 sm:px-6 lg:w-96 xl:pr-6 border-t-8 sm:border-t-0 sm:border-l-8 border-brown-900  bg-brown-800 text-brown-100"
           ref={scrollViewRef}
         >
+          {!!presence?.travelers.length && <section className="admin-map-presence" aria-label="Traveling residents"><h3>Residents away</h3><ul>{presence.travelers.map(resident => <li key={resident.agentGlobalId}><strong>{resident.name}</strong> · {resident.state}{resident.lastError && <p>{resident.lastError}</p>}</li>)}</ul></section>}
           <PlayerDetails
             worldId={worldId}
             engineId={engineId}

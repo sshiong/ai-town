@@ -1,5 +1,7 @@
 import { httpRouter } from 'convex/server';
 import { handleReplicateWebhook } from './music';
+import { registerFederationRoutes } from './federation/transport';
+import { registerPairingRoutes } from './federation/peers';
 
 const http = httpRouter();
 http.route({
@@ -7,4 +9,6 @@ http.route({
   method: 'POST',
   handler: handleReplicateWebhook,
 });
+registerFederationRoutes(http);
+registerPairingRoutes(http);
 export default http;

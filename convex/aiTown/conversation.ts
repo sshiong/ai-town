@@ -21,6 +21,13 @@ export class Conversation {
     messageUuid: string;
     since: number;
   };
+  federationTurn?: {
+    playerId: GameId<'players'>;
+    eventId: string;
+    turnId: string;
+    deadline: number;
+    expectedNumMessages: number;
+  };
   lastMessage?: {
     author: GameId<'players'>;
     timestamp: number;
@@ -43,10 +50,15 @@ export class Conversation {
       timestamp: lastMessage.timestamp,
     };
     this.numMessages = numMessages;
+    this.federationTurn = serialized.federationTurn && {
+      ...serialized.federationTurn,
+      playerId: parseGameId('players', serialized.federationTurn.playerId),
+    };
     this.participants = parseMap(participants, ConversationMembership, (m) => m.playerId);
   }
 
   tick(game: Game, now: number) {
+    if (this.federationTurn && this.federationTurn.deadline <= now) delete this.federationTurn;
     if (this.isTyping && this.isTyping.since + TYPING_TIMEOUT < now) {
       delete this.isTyping;
     }
@@ -219,6 +231,7 @@ export class Conversation {
       isTyping,
       lastMessage,
       numMessages,
+      federationTurn: this.federationTurn,
       participants: serializeMap(this.participants),
     };
   }
@@ -242,6 +255,15 @@ export const serializedConversation = {
     }),
   ),
   numMessages: v.number(),
+  federationTurn: v.optional(
+    v.object({
+      playerId,
+      eventId: v.string(),
+      turnId: v.string(),
+      deadline: v.number(),
+      expectedNumMessages: v.number(),
+    }),
+  ),
   participants: v.array(v.object(serializedConversationMembership)),
 };
 export type SerializedConversation = ObjectType<typeof serializedConversation>;

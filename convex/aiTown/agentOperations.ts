@@ -11,7 +11,7 @@ import {
 import { assertNever } from '../util/assertNever';
 import { serializedAgent } from './agent';
 import { ACTIVITIES, ACTIVITY_COOLDOWN, CONVERSATION_COOLDOWN } from '../constants';
-import { api, internal } from '../_generated/api';
+import { internal } from '../_generated/api';
 import { sleep } from '../util/sleep';
 import { serializedPlayer } from './player';
 
@@ -32,7 +32,7 @@ export const agentRememberConversation = internalAction({
       args.conversationId as GameId<'conversations'>,
     );
     await sleep(Math.random() * 1000);
-    await ctx.runMutation(api.aiTown.main.sendInput, {
+    await ctx.runMutation(internal.aiTown.main.sendAgentInput, {
       worldId: args.worldId,
       name: 'finishRememberConversation',
       args: {
@@ -114,7 +114,7 @@ export const agentDoSomething = internalAction({
     if (!player.pathfinding) {
       if (recentActivity || justLeftConversation) {
         await sleep(Math.random() * 1000);
-        await ctx.runMutation(api.aiTown.main.sendInput, {
+        await ctx.runMutation(internal.aiTown.main.sendAgentInput, {
           worldId: args.worldId,
           name: 'finishDoSomething',
           args: {
@@ -128,7 +128,7 @@ export const agentDoSomething = internalAction({
         // TODO: have LLM choose the activity & emoji
         const activity = ACTIVITIES[Math.floor(Math.random() * ACTIVITIES.length)];
         await sleep(Math.random() * 1000);
-        await ctx.runMutation(api.aiTown.main.sendInput, {
+        await ctx.runMutation(internal.aiTown.main.sendAgentInput, {
           worldId: args.worldId,
           name: 'finishDoSomething',
           args: {
@@ -157,7 +157,7 @@ export const agentDoSomething = internalAction({
     // TODO: We hit a lot of OCC errors on sending inputs in this file. It's
     // easy for them to get scheduled at the same time and line up in time.
     await sleep(Math.random() * 1000);
-    await ctx.runMutation(api.aiTown.main.sendInput, {
+    await ctx.runMutation(internal.aiTown.main.sendAgentInput, {
       worldId: args.worldId,
       name: 'finishDoSomething',
       args: {

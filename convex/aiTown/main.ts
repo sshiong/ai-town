@@ -1,11 +1,19 @@
 import { ConvexError, v } from 'convex/values';
-import { DatabaseReader, MutationCtx, internalAction, mutation, query } from '../_generated/server';
+import {
+  DatabaseReader,
+  MutationCtx,
+  internalAction,
+  internalMutation,
+  mutation,
+  query,
+} from '../_generated/server';
 import { insertInput } from './insertInput';
 import { Game } from './game';
 import { internal } from '../_generated/api';
 import { sleep } from '../util/sleep';
 import { Id } from '../_generated/dataModel';
 import { ENGINE_ACTION_DURATION } from '../constants';
+import { validatePublicInput } from '../federation/publicInput';
 
 export async function createEngine(ctx: MutationCtx) {
   const now = Date.now();
@@ -136,8 +144,19 @@ export const sendInput = mutation({
     args: v.any(),
   },
   handler: async (ctx, args) => {
+    await validatePublicInput(ctx, args.worldId, args.name, args.args);
     return await insertInput(ctx, args.worldId, args.name as any, args.args);
   },
+});
+
+/** Only server workers may submit AI operation completions. */
+export const sendAgentInput = internalMutation({
+  args: {
+    worldId: v.id('worlds'),
+    name: v.union(v.literal('finishRememberConversation'), v.literal('finishDoSomething')),
+    args: v.any(),
+  },
+  handler: async (ctx, args) => await insertInput(ctx, args.worldId, args.name, args.args),
 });
 
 export const inputStatus = query({

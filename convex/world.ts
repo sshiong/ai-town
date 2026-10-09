@@ -11,6 +11,7 @@ import {
 import { playerId } from './aiTown/ids';
 import { kickEngine, startEngine, stopEngine } from './aiTown/main';
 import { engineInsertInput } from './engine/abstractGame';
+import { validatePublicInput } from './federation/publicInput';
 
 export const defaultWorldStatus = query({
   handler: async (ctx) => {
@@ -61,6 +62,18 @@ export const stopInactiveWorlds = internalMutation({
     const cutoff = Date.now() - IDLE_WORLD_TIMEOUT;
     const worlds = await ctx.db.query('worldStatus').collect();
     for (const worldStatus of worlds) {
+      const federated = await ctx.db
+        .query('visitLedger')
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('worldId'), worldStatus.worldId),
+            q.neq(q.field('state'), 'COMPLETED'),
+            q.neq(q.field('state'), 'CANCELLED'),
+          ),
+        )
+        .first();
+      const town = await ctx.db.query('federationIdentity').unique();
+      if ((town?.enabled && town.mode === 'ACTIVE') || federated) continue;
       if (cutoff < worldStatus.lastViewed || worldStatus.status !== 'running') {
         continue;
       }
@@ -175,6 +188,12 @@ export const sendWorldInput = mutation({
     // if (!identity) {
     //   throw new Error(`Not logged in`);
     // }
+    const worldStatus = await ctx.db
+      .query('worldStatus')
+      .filter((q) => q.eq(q.field('engineId'), args.engineId))
+      .unique();
+    if (!worldStatus) throw new Error('WORLD_NOT_FOUND');
+    await validatePublicInput(ctx, worldStatus.worldId, args.name, args.args);
     return await engineInsertInput(ctx, args.engineId, args.name as any, args.args);
   },
 });

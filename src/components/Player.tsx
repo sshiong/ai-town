@@ -30,6 +30,7 @@ export const Player = ({
   historicalTime?: number;
 }) => {
   const playerCharacter = game.playerDescriptions.get(player.id)?.character;
+  const description = game.playerDescriptions.get(player.id);
   if (!playerCharacter) {
     throw new Error(`Player ${player.id} has no character`);
   }
@@ -59,9 +60,9 @@ export const Player = ({
   );
   const isThinking =
     !isSpeaking &&
-    !![...game.world.agents.values()].find(
+    (!!(player.remoteVisitor?.pendingTurn && player.remoteVisitor.pendingTurn.deadline > (historicalTime ?? Date.now())) || !![...game.world.agents.values()].find(
       (a) => a.playerId === player.id && !!a.inProgressOperation,
-    );
+    ));
   const tileDim = game.worldMap.tileDim;
   const historicalFacing = { dx: historicalLocation.dx, dy: historicalLocation.dy };
   return (
@@ -79,6 +80,7 @@ export const Player = ({
             : undefined
         }
         isViewer={isViewer}
+        visitorLabel={player.remoteVisitor ? `From ${description?.originTownName ?? player.remoteVisitor.homeTownName}` : undefined}
         textureUrl={character.textureUrl}
         spritesheetData={character.spritesheetData}
         speed={character.speed}

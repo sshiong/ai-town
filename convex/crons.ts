@@ -15,6 +15,18 @@ crons.interval(
 
 crons.interval('restart dead worlds', { seconds: 60 }, internal.world.restartDeadWorlds);
 
+crons.interval(
+  'federation transport and recovery',
+  { seconds: 10 },
+  internal.federation.transport.tick,
+);
+crons.interval('remote decision deadlines', { seconds: 10 }, internal.federation.decision.recover);
+crons.interval(
+  'federation engine receipts',
+  { seconds: 10 },
+  internal.federation.runtime.reconcileEngineJobs,
+);
+
 crons.daily('vacuum old entries', { hourUTC: 4, minuteUTC: 20 }, internal.crons.vacuumOldEntries);
 
 export default crons;
@@ -29,12 +41,7 @@ const TablesToVacuum: TableNames[] = [
   // the beginning of time
   'inputs',
 
-  // We can keep memories without their embeddings for inspection, but we won't
-  // retrieve them when searching memories via vector search.
-  'memories',
-  // We can vacuum fewer tables without serious consequences, but the only
-  // one that will cause issues over time is having >>100k vectors.
-  'memoryEmbeddings',
+  // Long-term memories and their active vectors are never age-vacuumed.
 ];
 
 export const vacuumOldEntries = internalMutation({

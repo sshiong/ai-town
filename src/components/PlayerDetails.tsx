@@ -148,6 +148,11 @@ export default function PlayerDetails({
           </h2>
         </a>
       </div>
+      {player.remoteVisitor && <div className="visitor-detail">
+        <span className="admin-badge">Visiting</span>
+        <p>Home: {playerDescription?.originTownName ?? player.remoteVisitor.homeTownName}</p>
+        <small>Thinking runs in their home town.</small>
+      </div>}
       {canInvite && (
         <a
           className={

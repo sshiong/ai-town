@@ -183,3 +183,67 @@ p[contenteditable='true']:empty::before {
 .shape-top-left-corner {
   clip-path: polygon(0 0, 100% 0, 0 100%);
 }
+
+/* The administration panel shares the town's existing pixel frames and palette. */
+.federation-overlay { position: fixed; inset: 0; z-index: 30; background: rgba(23, 20, 33, .88); display: grid; place-items: center; padding: 24px; }
+.federation-modal { width: min(1100px, 100%); max-height: calc(100dvh - 48px); overflow: auto; background: #23263a; color: #f5e6cc; border: 8px solid #171421; outline: none; box-shadow: 0 8px 0 #12111c; }
+.admin-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; padding: 24px 28px; background: #3a2d35; border-bottom: 4px solid #171421; }
+.admin-header h1 { font-size: clamp(28px, 4vw, 44px); line-height: 1; color: #fec742; }
+.admin-eyebrow { color: #d6b59a; font-size: 12px; margin-bottom: 8px; }
+.admin-close { font-size: 30px; line-height: 1; padding: 4px 10px; color: #f5e6cc; }
+.admin-tabs { display: flex; gap: 4px; flex-wrap: wrap; padding: 12px 20px; background: #171421; }
+.admin-tabs button { padding: 10px 14px; color: #d6b59a; border-bottom: 3px solid transparent; min-height: 44px; }
+.admin-tabs button[aria-pressed='true'] { color: #fec742; background: #33334b; border-bottom-color: #dd7c42; }
+.admin-panel { padding: 24px 28px 32px; }
+.admin-panel h2 { font-size: 24px; color: #ffe2a2; margin-bottom: 12px; }
+.admin-panel h3 { font-size: 18px; color: #ffe2a2; margin: 28px 0 12px; }
+.admin-panel p { line-height: 1.55; overflow-wrap: anywhere; }
+.admin-muted, .admin-field small { color: #c8b6a8; font-size: 12px; }
+.admin-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 18px 0; }
+.admin-field { display: flex; flex-direction: column; gap: 7px; font-size: 14px; min-width: 0; }
+.admin-field input, .admin-field select, .admin-field textarea { width: 100%; background: #171421; color: #f5e6cc; border: 2px solid #715258; border-radius: 0; padding: 10px 12px; min-height: 44px; }
+.admin-field input:focus, .admin-field select:focus, .admin-field textarea:focus { outline: 2px solid #fec742; outline-offset: 2px; }
+.admin-check { display: flex; align-items: center; gap: 10px; font-size: 14px; line-height: 1.5; min-height: 44px; }
+.admin-check input { width: 18px; height: 18px; accent-color: #fec742; }
+.admin-form-actions { grid-column: 1 / -1; }
+.admin-button { font-size: 14px; color: #f5e6cc; background: #6e4841; height: auto; min-height: 44px; border-width: 10px; line-height: 1.3; }
+.admin-button span { transform: none; padding: 0 6px; }
+.admin-button:disabled { opacity: .45; cursor: not-allowed; }
+.admin-button-danger { background: #8e3744; }
+.admin-button:focus-visible, .admin-tabs button:focus-visible, .admin-close:focus-visible, .admin-disclosure summary:focus-visible { outline: 2px solid #fec742; outline-offset: 3px; }
+.admin-toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+.admin-list { padding: 0; list-style: none; }
+.admin-list > li { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 18px 0; border-bottom: 2px solid #4f3c46; }
+.admin-list code, .admin-facts code { display: block; overflow-wrap: anywhere; font-size: 12px; color: #c8b6a8; line-height: 1.6; }
+.admin-peer { width: 100%; }
+.admin-badge { display: inline-block; font-size: 11px; border: 1px solid #987458; color: #ffe2a2; padding: 3px 7px; margin: 4px 2px; overflow-wrap: anywhere; }
+.admin-inline-form { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin: 14px 0; }
+.admin-inline-form .admin-field { flex: 1 1 240px; }
+.admin-feedback { margin: 12px 0; font-size: 13px; }
+.admin-error { color: #ffb7a9; border-left: 3px solid #d06a65; padding-left: 12px; }
+.admin-success { color: #c4dea2; }
+.admin-warning { padding: 14px; border: 2px solid #9f6743; background: #493439; color: #ffdaa3; font-size: 13px; margin: 20px 0; }
+.admin-empty { padding: 20px 0; color: #c8b6a8; font-size: 13px; }
+.admin-facts { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 12px; margin: 24px 0; font-size: 13px; }
+.admin-disclosure { margin-top: 28px; border-top: 3px solid #715258; padding-top: 16px; }
+.admin-disclosure summary { color: #ffe2a2; padding: 6px 0; cursor: pointer; }
+.admin-residents { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.admin-residents form { display: grid; gap: 12px; border-bottom: 2px solid #4f3c46; padding: 16px 0; }
+.admin-unlock { max-width: 640px; margin: auto; }
+.admin-unlock form { display: grid; gap: 12px; margin-top: 24px; }
+.admin-report { background: #171421; padding: 16px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 300px; overflow: auto; }
+.deployment-screen { min-height: 100dvh; display: grid; place-items: center; padding: 24px; color: #f5e6cc; }
+.deployment-screen .federation-modal { width: min(700px, 100%); }
+.deployment-screen h1 { font-size: clamp(36px, 7vw, 64px); margin-bottom: 24px; }
+.deployment-screen p { margin: 16px 0; }
+.admin-doc-link { display: inline-block; color: #fec742; text-decoration: underline; padding: 12px 0; }
+.town-connection { position: relative; z-index: 40; padding: 12px 20px; background: #493439; color: #ffdaa3; border-bottom: 3px solid #171421; font-size: 13px; }
+.admin-recovery { background: #23263a; color: #f5e6cc; }
+.admin-recovery p { margin: 12px 0; }
+.admin-map-presence { border-bottom: 2px solid #715258; padding-bottom: 16px; margin-bottom: 20px; font-size: 12px; }
+.admin-map-presence h3 { color: #ffe2a2; margin-bottom: 8px; }
+.admin-map-presence li { padding: 6px 0; }
+.visitor-detail { margin-top: 16px; color: #ffe2a2; font-size: 13px; }
+.travel-notice { position: absolute; bottom: 12px; left: 12px; max-width: calc(100% - 24px); background: #23263a; border: 3px solid #171421; color: #ffe2a2; font-size: 12px; padding: 10px 12px; pointer-events: none; }
+@media (max-width: 640px) { .federation-overlay { padding: 8px; } .federation-modal { max-height: calc(100dvh - 16px); border-width: 4px; } .admin-header, .admin-panel { padding: 18px 16px; } .admin-form, .admin-residents { grid-template-columns: 1fr; } .admin-facts { grid-template-columns: 1fr; gap: 6px; } .admin-facts dd { margin-bottom: 10px; } .admin-tabs { padding: 8px; } .admin-tabs button { font-size: 12px; padding: 10px; } .admin-list > li { flex-direction: column; } }
+@media (prefers-reduced-motion: reduce) { .game-progress-bar-progress { animation: none; } }

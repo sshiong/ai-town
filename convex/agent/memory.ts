@@ -2,7 +2,11 @@ import { v } from 'convex/values';
 import { ActionCtx, DatabaseReader, internalMutation, internalQuery } from '../_generated/server';
 import { Doc, Id } from '../_generated/dataModel';
 import { internal } from '../_generated/api';
-import { LLMMessage, chatCompletion, fetchEmbedding } from '../util/llm';
+import { LLMMessage, chatCompletion, ChatConfig } from '../util/llm';
+import { chatConfigForResident } from '../models/profiles';
+import { activeRoute, ensureEmbeddingSpace } from '../models/embeddings';
+import { cosineSimilarity, validateVector } from '../models/compatibility';
+import * as embeddingsCache from './embeddingsCache';
 import { asyncMap } from '../util/asyncMap';
 import { GameId, agentId, conversationId, playerId } from '../aiTown/ids';
 import { SerializedPlayer } from '../aiTown/player';
@@ -58,18 +62,25 @@ export async function rememberConversation(
     });
   }
   llmMessages.push({ role: 'user', content: 'Summary:' });
-  const { content } = await chatCompletion({
-    messages: llmMessages,
-    max_tokens: 500,
-  });
+  const chatConfig = await chatConfigForResident(ctx, worldId, playerId);
+  const { content } = await chatCompletion(
+    {
+      messages: llmMessages,
+      max_tokens: 500,
+    },
+    chatConfig,
+  );
   const description = `Conversation with ${otherPlayer.name} at ${new Date(
     data.conversation._creationTime,
   ).toLocaleString()}: ${content}`;
-  const importance = await calculateImportance(description);
-  const { embedding } = await fetchEmbedding(description);
+  const importance = await calculateImportance(description, chatConfig);
+  const route = await activeRoute(ctx);
+  const embedding = await embeddingsCache.fetch(ctx, description, { route, inputMode: 'document' });
   authors.delete(player.id as GameId<'players'>);
   await ctx.runMutation(selfInternal.insertMemory, {
     agentId,
+    worldId,
+    embeddingSpaceId: route.space._id,
     playerId: player.id,
     description,
     importance,
@@ -78,6 +89,9 @@ export async function rememberConversation(
       type: 'conversation',
       conversationId,
       playerIds: [...authors],
+      participants: otherPlayer.globalIdentity
+        ? [{ ...otherPlayer.globalIdentity, name: otherPlayer.name }]
+        : [],
     },
     embedding,
   });
@@ -147,10 +161,26 @@ export const loadConversation = internalQuery({
     if (!otherPlayerDescription) {
       throw new Error(`Player description for ${otherPlayerId} not found`);
     }
+    const otherBinding = await ctx.db
+      .query('residentModelBindings')
+      .withIndex('resident', (q) => q.eq('worldId', args.worldId).eq('playerId', otherPlayerId))
+      .unique();
+    const localIdentity = await ctx.db.query('federationIdentity').unique();
+    const globalIdentity = otherPlayer.remoteVisitor
+      ? {
+          agentGlobalId: otherPlayer.remoteVisitor.agentGlobalId,
+          homeTownId: otherPlayer.remoteVisitor.homeTownId,
+        }
+      : otherBinding?.agentGlobalId && localIdentity
+        ? {
+            agentGlobalId: otherBinding.agentGlobalId,
+            homeTownId: localIdentity.townId,
+          }
+        : undefined;
     return {
       player: { ...player, name: playerDescription.name },
       conversation,
-      otherPlayer: { ...otherPlayer, name: otherPlayerDescription.name },
+      otherPlayer: { ...otherPlayer, name: otherPlayerDescription.name, globalIdentity },
     };
   },
 });
@@ -160,18 +190,97 @@ export async function searchMemories(
   playerId: GameId<'players'>,
   searchEmbedding: number[],
   n: number = 3,
+  worldId?: Id<'worlds'>,
+  spaceId?: Id<'embeddingSpaces'>,
 ) {
-  const candidates = await ctx.vectorSearch('memoryEmbeddings', 'embedding', {
-    vector: searchEmbedding,
-    filter: (q) => q.eq('playerId', playerId),
-    limit: n * MEMORY_OVERFETCH,
+  if (!worldId) throw new Error('MEMORY_WORLD_REQUIRED');
+  const route = spaceId
+    ? await ctx.runQuery(internal.models.embeddings.getRoute, { spaceId })
+    : await activeRoute(ctx);
+  validateVector(searchEmbedding, route.profile.dimensions);
+  const vectors = await ctx.runQuery(selfInternal.getSpaceVectors, {
+    worldId,
+    playerId,
+    spaceId: route.space._id,
   });
-  const rankedMemories = await ctx.runMutation(selfInternal.rankAndTouchMemories, {
+  const candidates = vectors
+    .map((vector) => ({
+      memoryId: vector.memoryId,
+      _score: cosineSimilarity(searchEmbedding, vector.embedding),
+    }))
+    .sort((a, b) => b._score - a._score)
+    .slice(0, n * MEMORY_OVERFETCH);
+  const ranked = await ctx.runMutation(selfInternal.rankSpaceMemories, {
     candidates,
     n,
+    worldId,
+    playerId,
   });
-  return rankedMemories.map(({ memory }) => memory);
+  return ranked;
 }
+export const getSpaceVectors = internalQuery({
+  args: { worldId: v.id('worlds'), playerId, spaceId: v.id('embeddingSpaces') },
+  handler: async (ctx, args) => {
+    const vectors = await ctx.db
+      .query('modelMemoryVectors')
+      .withIndex('resident_space', (q) =>
+        q.eq('worldId', args.worldId).eq('playerId', args.playerId).eq('spaceId', args.spaceId),
+      )
+      .take(2001);
+    if (vectors.length > 2000)
+      throw new Error('MEMORY_VECTOR_BUDGET_EXCEEDED: archive or increase the search budget');
+    return vectors;
+  },
+});
+export const rankSpaceMemories = internalMutation({
+  args: {
+    worldId: v.id('worlds'),
+    playerId,
+    n: v.number(),
+    candidates: v.array(v.object({ memoryId: v.id('memories'), _score: v.number() })),
+  },
+  handler: async (ctx, args) => {
+    if (!Number.isInteger(args.n) || args.n < 1 || args.n > 100)
+      throw new Error('INVALID_MEMORY_SEARCH_LIMIT');
+    const now = Date.now();
+    const rows = [];
+    for (const candidate of args.candidates) {
+      const memory = await ctx.db.get(candidate.memoryId);
+      if (!memory || memory.worldId !== args.worldId || memory.playerId !== args.playerId)
+        throw new Error('MEMORY_OWNER_MISMATCH');
+      rows.push({
+        ...candidate,
+        memory,
+        recency: 0.99 ** Math.floor((now - memory.lastAccess) / 3600000),
+      });
+    }
+    if (!rows.length) {
+      // Text survives reindexing and provider outages; keep recent facts available while vectors catch up.
+      return await ctx.db
+        .query('memories')
+        .withIndex('resident', (q) => q.eq('worldId', args.worldId).eq('playerId', args.playerId))
+        .order('desc')
+        .take(args.n);
+    }
+    const relevanceRange = makeRange(rows.map((r) => r._score));
+    const importanceRange = makeRange(rows.map((r) => r.memory.importance));
+    const recencyRange = makeRange(rows.map((r) => r.recency));
+    rows.sort(
+      (a, b) =>
+        normalize(b._score, relevanceRange) +
+        normalize(b.memory.importance, importanceRange) +
+        normalize(b.recency, recencyRange) -
+        (normalize(a._score, relevanceRange) +
+          normalize(a.memory.importance, importanceRange) +
+          normalize(a.recency, recencyRange)),
+    );
+    const selected = rows.slice(0, args.n);
+    for (const { memory } of selected)
+      if (memory.lastAccess < now - MEMORY_ACCESS_THROTTLE)
+        await ctx.db.patch(memory._id, { lastAccess: now });
+    return selected.map((r) => r.memory);
+  },
+});
 
 function makeRange(values: number[]) {
   const min = Math.min(...values);
@@ -181,7 +290,7 @@ function makeRange(values: number[]) {
 
 function normalize(value: number, range: readonly [number, number]) {
   const [min, max] = range;
-  return (value - min) / (max - min);
+  return max === min ? 0 : (value - min) / (max - min);
 }
 
 export const rankAndTouchMemories = internalMutation({
@@ -243,19 +352,22 @@ export const loadMessages = internalQuery({
   },
 });
 
-async function calculateImportance(description: string) {
-  const { content: importanceRaw } = await chatCompletion({
-    messages: [
-      {
-        role: 'user',
-        content: `On the scale of 0 to 9, where 0 is purely mundane (e.g., brushing teeth, making bed) and 9 is extremely poignant (e.g., a break up, college acceptance), rate the likely poignancy of the following piece of memory.
+async function calculateImportance(description: string, config: ChatConfig) {
+  const { content: importanceRaw } = await chatCompletion(
+    {
+      messages: [
+        {
+          role: 'user',
+          content: `On the scale of 0 to 9, where 0 is purely mundane (e.g., brushing teeth, making bed) and 9 is extremely poignant (e.g., a break up, college acceptance), rate the likely poignancy of the following piece of memory.
       Memory: ${description}
       Answer on a scale of 0 to 9. Respond with number only, e.g. "5"`,
-      },
-    ],
-    temperature: 0.0,
-    max_tokens: 1,
-  });
+        },
+      ],
+      temperature: 0.0,
+      max_tokens: 1,
+    },
+    config,
+  );
 
   let importance = parseFloat(importanceRaw);
   if (isNaN(importance)) {
@@ -265,7 +377,7 @@ async function calculateImportance(description: string) {
     console.debug('Could not parse memory importance from: ', importanceRaw);
     importance = 5;
   }
-  return importance;
+  return Math.min(9, Math.max(0, importance));
 }
 
 const { embeddingId: _embeddingId, ...memoryFieldsWithoutEmbeddingId } = memoryFields;
@@ -277,14 +389,32 @@ export const insertMemory = internalMutation({
     ...memoryFieldsWithoutEmbeddingId,
   },
   handler: async (ctx, { agentId: _, embedding, ...memory }): Promise<void> => {
-    const embeddingId = await ctx.db.insert('memoryEmbeddings', {
+    if (!memory.worldId) throw new Error('MEMORY_WORLD_REQUIRED');
+    const spaceId = memory.embeddingSpaceId ?? (await ensureEmbeddingSpace(ctx));
+    const space = await ctx.db.get(spaceId);
+    const profile = space && (await ctx.db.get(space.profileId));
+    if (!profile) throw new Error('EMBEDDING_SPACE_NOT_FOUND');
+    validateVector(embedding, profile.dimensions);
+    const binding = await ctx.db
+      .query('residentModelBindings')
+      .withIndex('resident', (q) =>
+        q.eq('worldId', memory.worldId!).eq('playerId', memory.playerId),
+      )
+      .unique();
+    const memoryId = await ctx.db.insert('memories', {
+      ...memory,
+      agentGlobalId: binding?.agentGlobalId,
+      embeddingSpaceId: spaceId,
+    });
+    await ctx.db.insert('modelMemoryVectors', {
+      memoryId,
+      spaceId,
+      worldId: memory.worldId,
       playerId: memory.playerId,
+      agentGlobalId: binding?.agentGlobalId,
       embedding,
     });
-    await ctx.db.insert('memories', {
-      ...memory,
-      embeddingId,
-    });
+    await ctx.scheduler.runAfter(0, internal.models.embeddings.indexMemory, { memoryId });
   },
 });
 
@@ -292,6 +422,7 @@ export const insertReflectionMemories = internalMutation({
   args: {
     worldId: v.id('worlds'),
     playerId,
+    embeddingSpaceId: v.id('embeddingSpaces'),
     reflections: v.array(
       v.object({
         description: v.string(),
@@ -301,23 +432,34 @@ export const insertReflectionMemories = internalMutation({
       }),
     ),
   },
-  handler: async (ctx, { playerId, reflections }) => {
-    const lastAccess = Date.now();
+  handler: async (ctx, { worldId, playerId, embeddingSpaceId, reflections }) => {
+    const space = await ctx.db.get(embeddingSpaceId);
+    const profile = space && (await ctx.db.get(space.profileId));
+    if (!profile) throw new Error('EMBEDDING_SPACE_NOT_FOUND');
+    const binding = await ctx.db
+      .query('residentModelBindings')
+      .withIndex('resident', (q) => q.eq('worldId', worldId).eq('playerId', playerId))
+      .unique();
     for (const { embedding, relatedMemoryIds, ...rest } of reflections) {
-      const embeddingId = await ctx.db.insert('memoryEmbeddings', {
+      validateVector(embedding, profile.dimensions);
+      const memoryId = await ctx.db.insert('memories', {
+        worldId,
         playerId,
+        agentGlobalId: binding?.agentGlobalId,
+        embeddingSpaceId,
+        lastAccess: Date.now(),
+        ...rest,
+        data: { type: 'reflection', relatedMemoryIds },
+      });
+      await ctx.db.insert('modelMemoryVectors', {
+        memoryId,
+        spaceId: embeddingSpaceId,
+        worldId,
+        playerId,
+        agentGlobalId: binding?.agentGlobalId,
         embedding,
       });
-      await ctx.db.insert('memories', {
-        playerId,
-        embeddingId,
-        lastAccess,
-        ...rest,
-        data: {
-          type: 'reflection',
-          relatedMemoryIds,
-        },
-      });
+      await ctx.scheduler.runAfter(0, internal.models.embeddings.indexMemory, { memoryId });
     }
   },
 });
@@ -359,21 +501,29 @@ async function reflectOnMemories(
     'Example: [{insight: "...", statementIds: [1,2]}, {insight: "...", statementIds: [1]}, ...]',
   );
 
-  const { content: reflection } = await chatCompletion({
-    messages: [
-      {
-        role: 'user',
-        content: prompt.join('\n'),
-      },
-    ],
-  });
+  const chatConfig = await chatConfigForResident(ctx, worldId, playerId);
+  const route = await activeRoute(ctx);
+  const { content: reflection } = await chatCompletion(
+    {
+      messages: [
+        {
+          role: 'user',
+          content: prompt.join('\n'),
+        },
+      ],
+    },
+    chatConfig,
+  );
 
   try {
     const insights = JSON.parse(reflection) as { insight: string; statementIds: number[] }[];
     const memoriesToSave = await asyncMap(insights, async (item) => {
       const relatedMemoryIds = item.statementIds.map((idx: number) => memories[idx]._id);
-      const importance = await calculateImportance(item.insight);
-      const { embedding } = await fetchEmbedding(item.insight);
+      const importance = await calculateImportance(item.insight, chatConfig);
+      const embedding = await embeddingsCache.fetch(ctx, item.insight, {
+        route,
+        inputMode: 'document',
+      });
       console.debug('adding reflection memory...', item.insight);
       return {
         description: item.insight,
@@ -387,6 +537,7 @@ async function reflectOnMemories(
       worldId,
       playerId,
       reflections: memoriesToSave,
+      embeddingSpaceId: route.space._id,
     });
   } catch (e) {
     console.error('error saving or parsing reflection', e);
@@ -415,15 +566,14 @@ export const getReflectionMemories = internalQuery({
     }
     const memories = await ctx.db
       .query('memories')
-      .withIndex('playerId', (q) => q.eq('playerId', player.id))
+      .withIndex('resident', (q) => q.eq('worldId', args.worldId).eq('playerId', player.id))
       .order('desc')
       .take(args.numberOfItems);
 
     const lastReflection = await ctx.db
       .query('memories')
-      .withIndex('playerId_type', (q) =>
-        q.eq('playerId', args.playerId).eq('data.type', 'reflection'),
-      )
+      .withIndex('resident', (q) => q.eq('worldId', args.worldId).eq('playerId', args.playerId))
+      .filter((q) => q.eq(q.field('data.type'), 'reflection'))
       .order('desc')
       .first();
 

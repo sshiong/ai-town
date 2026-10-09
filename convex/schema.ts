@@ -4,6 +4,10 @@ import { agentTables } from './agent/schema';
 import { aiTownTables } from './aiTown/schema';
 import { conversationId, playerId } from './aiTown/ids';
 import { engineTables } from './engine/schema';
+import { federationTables } from './federation/schema';
+import { runtimeTables } from './federation/runtimeSchema';
+import { modelTables } from './models/schema';
+import { backupTables } from './federation/backupSchema';
 
 export default defineSchema({
   music: defineTable({
@@ -24,4 +28,8 @@ export default defineSchema({
   ...agentTables,
   ...aiTownTables,
   ...engineTables,
+  ...federationTables,
+  ...runtimeTables,
+  ...modelTables,
+  ...backupTables,
 });

@@ -160,13 +160,39 @@ export const loadInputs = internalQuery({
     max: v.number(),
   },
   handler: async (ctx, args) => {
-    return await ctx.db
+    const inputs = await ctx.db
       .query('inputs')
       .withIndex('byInputNumber', (q) =>
         q.eq('engineId', args.engineId).gt('number', args.processedInputNumber ?? -1),
       )
       .order('asc')
       .take(args.max);
+    return await Promise.all(
+      inputs.map(async (input) => {
+        if (input.name !== 'federationAction') return input;
+        const visitId = input.args?.visitId;
+        const ledger =
+          typeof visitId === 'string'
+            ? await ctx.db
+                .query('visitLedger')
+                .withIndex('visitId', (q) => q.eq('visitId', visitId))
+                .unique()
+            : null;
+        if (
+          ledger?.role === 'host' &&
+          ledger.state === 'ACTIVE' &&
+          ledger.leaseExpiry > Date.now() &&
+          ledger.agentAuthorityEpoch === input.args.agentAuthorityEpoch &&
+          ledger.visitLeaseVersion === input.args.visitLeaseVersion
+        )
+          return input;
+        // A fenced saveWorld transaction rolls back the engine cursor as well as
+        // side effects. On the next load, reject that stale input in the pure
+        // handler so its error result can commit and the world can advance.
+        // Preserve the persisted request and its original deadline for audit.
+        return { ...input, args: { ...input.args, deadline: 0 } };
+      }),
+    );
   },
 });
 

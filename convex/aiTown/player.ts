@@ -15,6 +15,8 @@ import { stopPlayer, findRoute, blocked, movePlayer } from './movement';
 import { inputHandler } from './inputHandler';
 import { characters } from '../../data/characters';
 import { PlayerDescription } from './playerDescription';
+import { remoteVisitor } from '../federation/presence';
+import { Infer as InferVisitor } from 'convex/values';
 
 const pathfinding = v.object({
   destination: point,
@@ -45,6 +47,7 @@ export type Activity = Infer<typeof activity>;
 export const serializedPlayer = {
   id: playerId,
   human: v.optional(v.string()),
+  remoteVisitor: v.optional(remoteVisitor),
   pathfinding: v.optional(pathfinding),
   activity: v.optional(activity),
 
@@ -60,6 +63,7 @@ export type SerializedPlayer = ObjectType<typeof serializedPlayer>;
 export class Player {
   id: GameId<'players'>;
   human?: string;
+  remoteVisitor?: InferVisitor<typeof remoteVisitor>;
   pathfinding?: Pathfinding;
   activity?: Activity;
 
@@ -73,6 +77,7 @@ export class Player {
     const { id, human, pathfinding, activity, lastInput, position, facing, speed } = serialized;
     this.id = parseGameId('players', id);
     this.human = human;
+    this.remoteVisitor = serialized.remoteVisitor;
     this.pathfinding = pathfinding;
     this.activity = activity;
     this.lastInput = lastInput;
@@ -82,6 +87,10 @@ export class Player {
   }
 
   tick(game: Game, now: number) {
+    if (this.remoteVisitor && this.remoteVisitor.leaseExpiry <= Math.max(now, Date.now())) {
+      this.leave(game, now);
+      return;
+    }
     if (this.human && this.lastInput < now - HUMAN_IDLE_TOO_LONG) {
       this.leave(game, now);
     }
@@ -253,6 +262,7 @@ export class Player {
     return {
       id,
       human,
+      remoteVisitor: this.remoteVisitor,
       pathfinding,
       activity,
       lastInput,

@@ -16,12 +16,15 @@ import InteractButton from './components/buttons/InteractButton.tsx';
 import FreezeButton from './components/FreezeButton.tsx';
 import { MAX_HUMAN_PLAYERS } from '../convex/constants.ts';
 import PoweredByConvex from './components/PoweredByConvex.tsx';
+import FederationManager from './components/federation/FederationManager.tsx';
 
 export default function Home() {
   const [helpModalOpen, setHelpModalOpen] = useState(false);
+  const [adminModalOpen, setAdminModalOpen] = useState(false);
   return (
     <main className="relative flex min-h-screen flex-col items-center justify-between font-body game-background">
       <PoweredByConvex />
+      <FederationManager isOpen={adminModalOpen} onClose={() => setAdminModalOpen(false)} />
 
       <ReactModal
         isOpen={helpModalOpen}
@@ -99,6 +102,9 @@ export default function Home() {
             <Button imgUrl={helpImg} onClick={() => setHelpModalOpen(true)}>
               Help
             </Button>
+            <button type="button" className="button text-white shadow-solid text-xl pointer-events-auto" onClick={() => setAdminModalOpen(true)}>
+              <span className="bg-clay-700">Town admin</span>
+            </button>
           </div>
           <a href="https://a16z.com">
             <img className="w-8 h-8 pointer-events-auto" src={a16zImg} alt="a16z" />

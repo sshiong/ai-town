@@ -16,6 +16,7 @@ export const Character = ({
   isViewer = false,
   speed = 0.1,
   onClick,
+  visitorLabel,
 }: {
   // Path to the texture packed image.
   textureUrl: string;
@@ -36,6 +37,7 @@ export const Character = ({
   // The speed of the animation. Can be tuned depending on the side and speed of the NPC.
   speed?: number;
   onClick: () => void;
+  visitorLabel?: string;
 }) => {
   const [spriteSheet, setSpriteSheet] = useState<Spritesheet>();
   useEffect(() => {
@@ -104,6 +106,9 @@ export const Character = ({
       {emoji && (
         <Text x={0} y={-24} scale={{ x: -0.8, y: 0.8 }} text={emoji} anchor={{ x: 0.5, y: 0.5 }} />
       )}
+      {visitorLabel && <Text x={0} y={-37} anchor={{ x: 0.5, y: 1 }} text={visitorLabel}
+        style={new PIXI.TextStyle({ fontFamily: 'VCR OSD Mono, monospace', fontSize: 10,
+          fill: 0xffe2a2, stroke: 0x171421, strokeThickness: 3, align: 'center' })} />}
     </Container>
   );
 };

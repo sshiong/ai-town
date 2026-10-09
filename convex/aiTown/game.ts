@@ -25,6 +25,13 @@ import { internal } from '../_generated/api';
 import { HistoricalObject } from '../engine/historicalObject';
 import { AgentDescription, serializedAgentDescription } from './agentDescription';
 import { parseMap, serializeMap } from '../util/object';
+import { tickRemoteVisitor } from '../federation/remoteTick';
+import {
+  syncResidentRuntimes,
+  commitPresenceJobs,
+  commitRemoteActions,
+  collectObservations,
+} from '../federation/runtime';
 
 const gameState = v.object({
   world: v.object(serializedWorld),
@@ -122,7 +129,11 @@ export class Game extends AbstractGame {
     const { _id, _creationTime, historicalLocations: _, ...world } = worldDoc;
     const playerDescriptions = playerDescriptionsDocs
       // Discard player descriptions for players that no longer exist.
-      .filter((d) => !!world.players.find((p) => p.id === d.playerId))
+      .filter(
+        (d) =>
+          !!world.players.find((p) => p.id === d.playerId) ||
+          !!world.agents.find((a) => a.playerId === d.playerId),
+      )
       .map(({ _id, _creationTime, worldId: _, ...doc }) => doc);
     const agentDescriptions = agentDescriptionsDocs
       .filter((a) => !!world.agents.find((p) => p.id === a.agentId))
@@ -187,6 +198,7 @@ export class Game extends AbstractGame {
     for (const conversation of this.world.conversations.values()) {
       conversation.tick(this, now);
     }
+    for (const player of this.world.players.values()) tickRemoteVisitor(this, now, player);
     for (const agent of this.world.agents.values()) {
       agent.tick(this, now);
     }
@@ -255,7 +267,10 @@ export class Game extends AbstractGame {
     const newWorld = diff.world;
     // Archive newly deleted players, conversations, and agents.
     for (const player of existingWorld.players) {
-      if (!newWorld.players.some((p) => p.id === player.id)) {
+      if (
+        !newWorld.players.some((p) => p.id === player.id) &&
+        !newWorld.agents.some((a) => a.playerId === player.id && a.travelVisitId)
+      ) {
         await ctx.db.insert('archivedPlayers', { worldId, ...player });
       }
     }
@@ -340,6 +355,11 @@ export class Game extends AbstractGame {
         await ctx.db.insert('maps', { worldId, ...worldMap });
       }
     }
+    if (newWorld.agents.some((a) => !existingWorld.agents.some((old) => old.id === a.id)))
+      await syncResidentRuntimes(ctx, worldId);
+    await commitPresenceJobs(ctx);
+    await commitRemoteActions(ctx);
+    await collectObservations(ctx, worldId);
     // Start the desired agent operations.
     for (const operation of diff.agentOperations) {
       await runAgentOperation(ctx, operation.name, operation.args);
