@@ -23,6 +23,11 @@ export const dataTables = [
   'modelAudits',
   'federationAgentRuntimes',
   'deploymentRecords',
+  'storagePolicies',
+  'federationActionFacts',
+  'federationEventFacts',
+  'homeTravelTranscripts',
+  'homeTravelTranscriptPages',
 ] as const;
 export const snapshotTables = [
   'visitLedger',
@@ -36,6 +41,7 @@ export const snapshotTables = [
   'federationPendingActions',
   'transportSessions',
   'visitReservations',
+  'federationTranscriptJobs',
 ] as const;
 export type BackupRow = Record<string, any>;
 export type BackupBundle = {
@@ -164,7 +170,7 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
     }
   }
   if (count > 500) throw new Error('BACKUP_ATOMIC_RECORD_LIMIT');
-  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !bundle.sections[t]))
+  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages'].includes(t) && !bundle.sections[t]))
     throw new Error('INCOMPLETE_TOWN_BACKUP');
   const identities = bundle.sections.federationIdentity?.map(decodeRow) ?? [];
   if (identities.length !== 1 || identities[0].townId !== bundle.manifest.sourceTownId)
@@ -241,7 +247,7 @@ export function validateFields(value: any, validator: any): void {
 /** Exact ID mapping avoids rewriting arbitrary prose and retains foreign relationship identities. */
 export function remapValue(value: any, mapping: Record<string, string>, key = ''): any {
   if (typeof value === 'string')
-    return key === 'description' || key === 'text' || key === 'identity' || key === 'plan'
+    return key === 'description' || key === 'text' || key === 'messageText' || key === 'identity' || key === 'plan'
       ? value
       : (mapping[value] ?? value);
   if (value instanceof ArrayBuffer || value === null || typeof value !== 'object') return value;

@@ -30,7 +30,7 @@ export async function enqueueMessage(ctx: MutationCtx, args: EnqueueArgs): Promi
   }
   if (!['STREAM_NACK', 'SESSION_RESYNC'].includes(args.type)) {
     if (!envelope.visitId || !envelope.agentGlobalId || !envelope.agentAuthorityEpoch || !envelope.visitLeaseVersion) throw new Error('VISIT_AUTHORITY_REQUIRED');
-    envelope.streamId = args.streamId ?? (args.type === 'OBSERVATION' ? 'host-observations' : args.type === 'DECISION' ? 'home-actions' : args.type === 'ACTION_RESULT' ? 'host-results' : 'lease-control');
+    envelope.streamId = args.streamId ?? (args.type === 'CONVERSATION_ENDED' ? 'host-history' : args.type === 'OBSERVATION' ? 'host-observations' : args.type === 'DECISION' ? 'home-actions' : args.type === 'ACTION_RESULT' ? 'host-results' : 'lease-control');
     const key = streamKey(envelope, remote.townId);
     const cursor = await ctx.db.query('messageStreamCursors').withIndex('streamKey', (q) => q.eq('streamKey', key)).unique();
     envelope.sequence = cursor?.nextOutgoingSequence ?? 1;

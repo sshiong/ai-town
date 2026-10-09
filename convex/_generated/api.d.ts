@@ -14,6 +14,7 @@ import type * as agent_embeddingsCache from "../agent/embeddingsCache.js";
 import type * as agent_memory from "../agent/memory.js";
 import type * as agent_schema from "../agent/schema.js";
 import type * as agent_travelMemory from "../agent/travelMemory.js";
+import type * as agent_travelTranscript from "../agent/travelTranscript.js";
 import type * as aiTown_agent from "../aiTown/agent.js";
 import type * as aiTown_agentDescription from "../aiTown/agentDescription.js";
 import type * as aiTown_agentInputs from "../aiTown/agentInputs.js";
@@ -69,6 +70,7 @@ import type * as federation_security from "../federation/security.js";
 import type * as federation_storagePolicy from "../federation/storagePolicy.js";
 import type * as federation_storageSchema from "../federation/storageSchema.js";
 import type * as federation_store from "../federation/store.js";
+import type * as federation_transcripts from "../federation/transcripts.js";
 import type * as federation_transport from "../federation/transport.js";
 import type * as http from "../http.js";
 import type * as init from "../init.js";
@@ -109,6 +111,7 @@ import type * as world from "../world.js";
 "agent/memory": typeof agent_memory,
 "agent/schema": typeof agent_schema,
 "agent/travelMemory": typeof agent_travelMemory,
+"agent/travelTranscript": typeof agent_travelTranscript,
 "aiTown/agent": typeof aiTown_agent,
 "aiTown/agentDescription": typeof aiTown_agentDescription,
 "aiTown/agentInputs": typeof aiTown_agentInputs,
@@ -164,6 +167,7 @@ import type * as world from "../world.js";
 "federation/storagePolicy": typeof federation_storagePolicy,
 "federation/storageSchema": typeof federation_storageSchema,
 "federation/store": typeof federation_store,
+"federation/transcripts": typeof federation_transcripts,
 "federation/transport": typeof federation_transport,
 "http": typeof http,
 "init": typeof init,

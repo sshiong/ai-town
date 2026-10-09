@@ -14,7 +14,7 @@ import { internal } from '../_generated/api';
 import { assertFederationAdmin } from '../federation/auth';
 import { EmbeddingConfig, fetchEmbedding, getEmbeddingConfig } from '../util/llm';
 import { connectionFields } from './schema';
-import { embeddingFingerprint, verifiedCompatible, validateVector } from './compatibility';
+import { embeddingFingerprint, cosineSimilarity, validateVector } from './compatibility';
 import { audit, settings, validateConnection } from './profiles';
 import * as cache from '../agent/embeddingsCache';
 
@@ -154,10 +154,10 @@ export const planSwitch = query({
       ? await ctx.db.get(config.activeEmbeddingSpaceId)
       : null;
     const current = space ? await ctx.db.get(space.profileId) : null;
-    const compatible = !!current && verifiedCompatible(current, target);
     return {
-      compatibility: compatible ? 'VERIFIED_COMPATIBLE' : 'REBUILD_REQUIRED',
-      canReuse: compatible,
+      // Administrator supplied digests and revisions are claims, not verified provenance.
+      compatibility: 'REBUILD_REQUIRED',
+      canReuse: false,
       sourceFingerprint: current?.fingerprint ?? null,
       targetFingerprint: target.fingerprint,
       affectedMemories: (await ctx.db.query('memories').collect()).length,
@@ -385,7 +385,27 @@ export const validationSamples = internalQuery({
       .withIndex('space', (q) => q.eq('spaceId', args.spaceId))
       .take(3);
     return await Promise.all(
-      samples.map(async (vector) => ({ vector, memory: await ctx.db.get(vector.memoryId) })),
+      samples.map(async (vector) => ({
+        vector,
+        memory: await ctx.db.get(vector.memoryId),
+        candidates: await Promise.all(
+          (
+            await ctx.db
+              .query('modelMemoryVectors')
+              .withIndex('resident_space', (q) =>
+                q
+                  .eq('worldId', vector.worldId)
+                  .eq('playerId', vector.playerId)
+                  .eq('spaceId', args.spaceId),
+              )
+              .collect()
+          ).map(async (candidate) => ({
+            memoryId: candidate.memoryId,
+            embedding: candidate.embedding,
+            description: (await ctx.db.get(candidate.memoryId))?.description,
+          })),
+        ),
+      })),
     );
   },
 });
@@ -397,6 +417,18 @@ export const markValidated = internalMutation({
     await ctx.db.patch(args.spaceId, {
       validatedAt: Date.now(),
       validationSampleCount: args.sampleCount,
+      failure: undefined,
+    });
+  },
+});
+export const invalidateValidation = internalMutation({
+  args: { spaceId: v.id('embeddingSpaces'), failure: v.string() },
+  handler: async (ctx, args) => {
+    if (!(await ctx.db.get(args.spaceId))) return;
+    await ctx.db.patch(args.spaceId, {
+      validatedAt: undefined,
+      validationSampleCount: undefined,
+      failure: args.failure,
     });
   },
 });
@@ -410,19 +442,49 @@ export const validateSpace = action({
     const samples = await ctx.runQuery(internal.models.embeddings.validationSamples, {
       spaceId: args.spaceId,
     });
-    for (const sample of samples) {
-      if (!sample.memory) throw new Error('DANGLING_MEMORY_VECTOR');
-      const result = await cache.fetchBatch(ctx, [sample.memory.description], {
-        route,
-        inputMode: 'query',
+    try {
+      for (const sample of samples) {
+        if (!sample.memory) throw new Error('DANGLING_MEMORY_VECTOR');
+        // Validation must contact the endpoint, rather than reuse a prior query cache hit.
+        const result = await fetchEmbedding(
+          sample.memory.description,
+          profileEmbeddingConfig(route.profile),
+          'query',
+        );
+        validateVector(result.embedding, route.profile.dimensions);
+        const ranked = sample.candidates
+          .map((candidate) => {
+            validateVector(candidate.embedding, route.profile.dimensions);
+            return {
+              ...candidate,
+              score: cosineSimilarity(result.embedding, candidate.embedding),
+            };
+          })
+          .sort((a, b) => b.score - a.score);
+        const expected = ranked.find((candidate) => candidate.memoryId === sample.vector.memoryId);
+        if (
+          !expected ||
+          expected.score <= 0 ||
+          ranked.some(
+            (candidate) =>
+              candidate.description !== sample.memory!.description &&
+              candidate.score >= expected.score,
+          )
+        )
+          throw new Error('EMBEDDING_RETRIEVAL_SAMPLE_MISSED');
+      }
+      await ctx.runMutation(internal.models.embeddings.markValidated, {
+        spaceId: args.spaceId,
+        sampleCount: samples.length,
       });
-      validateVector(result.embeddings[0], route.profile.dimensions);
+      return { valid: true, sampleCount: samples.length };
+    } catch (error) {
+      await ctx.runMutation(internal.models.embeddings.invalidateValidation, {
+        spaceId: args.spaceId,
+        failure: String(error).slice(0, 500),
+      });
+      throw error;
     }
-    await ctx.runMutation(internal.models.embeddings.markValidated, {
-      spaceId: args.spaceId,
-      sampleCount: samples.length,
-    });
-    return { valid: true, sampleCount: samples.length };
   },
 });
 async function switchSpace(ctx: MutationCtx, spaceId: Id<'embeddingSpaces'>, operation: string) {

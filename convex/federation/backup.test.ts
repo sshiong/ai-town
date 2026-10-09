@@ -8,6 +8,8 @@ import { createIdentityKeys, digest } from './security';
 import { BackupBundle, decodeRow, encodeRow, validateBundle } from './backupHelpers';
 import { embeddingFingerprint } from '../models/compatibility';
 import { applyBackupData } from './backup';
+import { defaultStoragePolicy } from './storagePolicy';
+import { receiveConversationEnded } from '../agent/travelTranscript';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
@@ -643,4 +645,94 @@ test('same-town restore requires explicit source stop confirmation before rotati
     }),
   ).rejects.toThrow('RESTORE_SOURCE_STOP_REQUIRED');
   expect(await t.query((ctx) => ctx.db.query('federationIdentity').unique())).toEqual(before);
+});
+
+
+test('small signed archives restore storage policy and durable committed federation evidence', async () => {
+  const { t } = await town();
+  await t.run(async ctx => {
+    await ctx.db.insert('storagePolicies', { key: 'town', ...defaultStoragePolicy, historyBytes: 1234567, updatedAt: 1 });
+    await ctx.db.insert('federationActionFacts', {
+      actionId: 'action-durable', visitId: 'visit-past', turnId: 'turn-past', basedOnEventId: 'observation-past',
+      agentAuthorityEpoch: 3, visitLeaseVersion: 2, action: { type: 'say', text: 'Committed statement' },
+      result: { status: 'COMMITTED' }, occurredAt: 2,
+    });
+    await ctx.db.insert('federationEventFacts', { messageId: 'receipt-past', visitId: 'visit-past',
+      fromTownId: 'town:foreign', type: 'ACTION_RESULT', payload: { status: 'COMMITTED' }, receivedAt: 2 });
+  });
+  const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(bundle.sections.federationActionFacts).toHaveLength(1);
+  expect(bundle.sections.federationEventFacts).toHaveLength(1);
+  await t.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'restore', sourceStopped: true });
+  const restored = await t.run(async ctx => ({
+    policy: await ctx.db.query('storagePolicies').unique(),
+    action: await ctx.db.query('federationActionFacts').unique(),
+    event: await ctx.db.query('federationEventFacts').unique(),
+  }));
+  expect(restored.policy?.historyBytes).toBe(1234567);
+  expect(restored.action?.actionId).toBe('action-durable');
+  expect(restored.event?.messageId).toBe('receipt-past');
+});
+
+
+test('resident export ignores more than 500 unrelated town memories without truncating its own canonical history', async () => {
+  const { t, worldId, agentGlobalId } = await town();
+  await t.run(async ctx => {
+    for (let i = 0; i < 505; i++) await ctx.db.insert('memories', {
+      worldId, playerId: 'p:99', agentGlobalId: 'town:original/agent:other',
+      description: `Unrelated memory ${i}`, importance: 1, lastAccess: 1,
+      data: { type: 'travel', eventId: `unrelated-${i}`, visitId: 'other-visit', hostTownId: 'town:foreign', participants: [], occurredAt: 1 },
+    });
+    await ctx.db.insert('memories', { worldId, playerId: 'p:0', agentGlobalId,
+      description: 'My new memory beyond the unrelated town history', importance: 2, lastAccess: 2,
+      data: { type: 'travel', eventId: 'resident-tail', visitId: 'old-visit', hostTownId: 'town:foreign', participants: [], occurredAt: 2 },
+    });
+  });
+  const bundle = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  const memories: Record<string, any>[] = bundle.sections.memories.map(decodeRow);
+  expect(memories).toHaveLength(3);
+  expect(memories.every(m => m.agentGlobalId === agentGlobalId)).toBe(true);
+  expect(memories.some(m => m.description === 'My new memory beyond the unrelated town history')).toBe(true);
+  expect(bundle.sections.messages.map(decodeRow)[0].text).toBe('Hello Ava');
+});
+
+
+test('canonical completed travel transcripts and relationship evidence survive signed restore and resident merge', async () => {
+  const { t, worldId, agentGlobalId } = await town();
+  await t.run(async ctx => {
+    const ledgerId = await ctx.db.insert('visitLedger', { visitId: 'visit-transcript', agentGlobalId, homeTownId: 'town:original', hostTownId: 'town:foreign',
+      homeDeploymentEpoch: 4, hostDeploymentEpoch: 2, agentAuthorityEpoch: 2, visitLeaseVersion: 1, leaseExpiry: 1, fencingToken: 'fence',
+      role: 'home', state: 'COMPLETED', worldId, homePlayerId: 'p:0', profile: {}, createdAt: 1, updatedAt: 1 });
+    await receiveConversationEnded(ctx, (await ctx.db.get(ledgerId))!, { eventId: 'transcript-page-0', transcriptId: 'foreign-conversation',
+      federationConversationId: 'town:foreign/world/c:1', endedAt: 3, pageNumber: 0, finalPage: true,
+      participants: [{ playerId: 'p:9', agentGlobalId, name: 'Ada', homeTownId: 'town:original' },
+        { playerId: 'p:0', agentGlobalId: 'town:foreign/ava', name: 'Ava', homeTownId: 'town:foreign' }],
+      messages: [{ messageId: 'raw-self', text: 'p:0', author: 'p:9', occurredAt: 1 },
+        { messageId: 'raw-other', text: 'I remember our visit.', author: 'p:0', occurredAt: 2 }] });
+  });
+  const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  await t.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'restore', sourceStopped: true });
+  const check = async () => t.run(async ctx => {
+    const transcripts = await ctx.db.query('homeTravelTranscripts').collect(), pages = await ctx.db.query('homeTravelTranscriptPages').collect();
+    const memories = await ctx.db.query('memories').collect();
+    for (const transcript of transcripts) {
+      expect(transcript.state).toBe('COMPLETE');
+      expect(memories.some(m => m._id === transcript.endMemoryId)).toBe(true);
+      const ownPages = pages.filter(p => p.agentGlobalId === transcript.agentGlobalId);
+      expect(ownPages).toHaveLength(1);
+      expect(ownPages[0].messages[0].text).toBe('p:0');
+      expect(ownPages[0].memoryIds.every(id => memories.some(m => m._id === id))).toBe(true);
+      const relation = memories.find(m => m.agentGlobalId === transcript.agentGlobalId && m.data.type === 'relationship');
+      expect(relation?.data).toMatchObject({ agentGlobalId: 'town:foreign/ava', evidenceMemoryIds: [transcript.endMemoryId] });
+      expect(memories.find(m => m._id === ownPages[0].memoryIds[0])?.data).toMatchObject({ messageText: 'p:0' });
+    }
+    return transcripts;
+  });
+  expect(await check()).toHaveLength(1);
+  const restoredWorld = (await t.run(ctx => ctx.db.query('worlds').unique()))!;
+  const resident = await t.action(action('federation/backup:exportResident'), { adminToken, worldId: restoredWorld._id, playerId: 'p:0' });
+  await t.action(action('federation/backup:importBackup'), { adminToken, bundle: resident, mode: 'merge', targetWorldId: restoredWorld._id });
+  const both = await check();
+  expect(both).toHaveLength(2);
+  expect(new Set(both.map(tr => tr.agentGlobalId)).size).toBe(2);
 });

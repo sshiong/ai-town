@@ -66,14 +66,27 @@ Add Chat and Embedding profiles independently. Enter only the server environment
 credential. The page reports whether that credential is available and offers a real provider
 connection test, which can consume provider credits.
 
-The first saved Chat profile becomes `main`. Changing `main` affects new residents. Existing
+Saving a Chat profile does not select it as `main`. Run **Test connection** successfully, then
+choose **Set main**; a nonempty response is required. Changing `main` affects new residents. Existing
 residents retain their stored binding unless an administrator changes that resident with an audit
 reason. Model failure does not authorize sending private memory to another provider.
 
 Before building a new Embedding index, use **Review switch** to inspect source and target
 fingerprints and affected memories. Equal dimensions do not prove compatibility. Build, validate and
-activate are separate operations; activation requires completed validation. The previous index
+activate are separate operations; validation calls the live query endpoint and requires expected
+memories to rank above different texts in the same resident/space namespace. Matching
+administrator-supplied weights metadata alone cannot authorize cross-profile index reuse.
+Activation requires completed validation. The previous index
 remains available for rollback. Building does not delete canonical memory text or relationships.
+
+Completed visitor conversations send the entire committed transcript Home in bounded UTF-8 pages.
+Each page waits for a committed acknowledgement; transport expiry renews the same immutable
+history receipt. Missing or conflicting pages cannot produce a completed transcript, social edge
+or summary. Own utterances and the other participant's messages are retained. A stable global
+identity distinguishes returning visitors and namesakes; temporary Host player IDs do not.
+Summaries and reflection use the resident's fixed model after raw facts are saved, retry separately,
+and explicitly label excerpts of large transcripts. Canonical text remains usable while the
+independent Embedding provider is unavailable.
 
 ## Export, import and recovery
 

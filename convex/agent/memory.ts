@@ -1,5 +1,11 @@
 import { v } from 'convex/values';
-import { ActionCtx, DatabaseReader, internalMutation, internalQuery } from '../maintenanceFunctions';
+import {
+  ActionCtx,
+  MutationCtx,
+  DatabaseReader,
+  internalMutation,
+  internalQuery,
+} from '../maintenanceFunctions';
 import { Doc, Id } from '../_generated/dataModel';
 import { internal } from '../_generated/api';
 import { LLMMessage, chatCompletion, ChatConfig } from '../util/llm';
@@ -24,6 +30,79 @@ export type MemoryType = Memory['data']['type'];
 export type MemoryOfType<T extends MemoryType> = Omit<Memory, 'data'> & {
   data: Extract<Memory['data'], { type: T }>;
 };
+
+/** Global identities outlive Host presence IDs and distinguish namesakes from other towns. */
+export function concernsParticipant(
+  memory: Pick<Memory, 'data'>,
+  localPlayerId: string,
+  agentGlobalId?: string,
+): boolean {
+  const data = memory.data;
+  if (data.type === 'travel') {
+    return !!agentGlobalId && data.participants.some((p) => p.agentGlobalId === agentGlobalId);
+  }
+  if (data.type === 'conversation') {
+    if (data.participants?.length) {
+      return !!agentGlobalId && data.participants.some((p) => p.agentGlobalId === agentGlobalId);
+    }
+    return data.playerIds.includes(localPlayerId);
+  }
+  if (data.type === 'relationship') {
+    return data.agentGlobalId
+      ? data.agentGlobalId === agentGlobalId
+      : data.playerId === localPlayerId;
+  }
+  return false;
+}
+
+/** The edge records a committed encounter; subjective summaries never replace its evidence. */
+export async function recordSocialEncounter(
+  ctx: MutationCtx,
+  args: { worldId: Id<'worlds'>; playerId: string; participant: { agentGlobalId: string; name: string; homeTownId: string }; evidenceMemoryId: Id<'memories'>; occurredAt: number },
+) {
+  const evidence = await ctx.db.get(args.evidenceMemoryId);
+  if (!evidence || evidence.worldId !== args.worldId || evidence.playerId !== args.playerId)
+    throw new Error('SOCIAL_MEMORY_EVIDENCE_OWNER_MISMATCH');
+  if (!concernsParticipant(evidence, '', args.participant.agentGlobalId))
+    throw new Error('SOCIAL_MEMORY_EVIDENCE_PARTICIPANT_MISMATCH');
+  const existing = await ctx.db.query('memories').withIndex('residentRelationship', (q) =>
+    q.eq('worldId', args.worldId).eq('playerId', args.playerId).eq('data.type', 'relationship').eq('data.agentGlobalId', args.participant.agentGlobalId)).unique();
+  if (existing?.data.type === 'relationship' && existing.data.evidenceMemoryIds?.includes(args.evidenceMemoryId)) return existing._id;
+  const old = existing?.data.type === 'relationship' ? existing.data : undefined;
+  const count = (old?.encounterCount ?? 0) + 1;
+  const description = `I have shared ${count} confirmed conversation${count === 1 ? '' : 's'} with ${args.participant.name} (${args.participant.agentGlobalId}, from ${args.participant.homeTownId}).`;
+  const fields = {
+    worldId: args.worldId, playerId: args.playerId, agentGlobalId: evidence.agentGlobalId,
+    description, importance: 5, lastAccess: Math.max(existing?.lastAccess ?? 0, args.occurredAt),
+    data: { type: 'relationship' as const, agentGlobalId: args.participant.agentGlobalId, homeTownId: args.participant.homeTownId,
+      evidenceMemoryIds: [...(old?.evidenceMemoryIds ?? []), args.evidenceMemoryId],
+      encounterCount: count, firstMetAt: Math.min(old?.firstMetAt ?? args.occurredAt, args.occurredAt), lastMetAt: Math.max(old?.lastMetAt ?? 0, args.occurredAt) },
+  };
+  const memoryId = existing ? existing._id : await ctx.db.insert('memories', fields);
+  if (existing) {
+    await ctx.db.patch(memoryId, fields);
+    // A changed social description must be embedded again in every space.
+    const vectors = await ctx.db.query('modelMemoryVectors').withIndex('memory_space', q => q.eq('memoryId', memoryId)).collect();
+    for (const vector of vectors) await ctx.db.delete(vector._id);
+  }
+  await ctx.scheduler.runAfter(0, internal.models.embeddings.indexMemory, { memoryId });
+  return memoryId;
+}
+
+export const participantMemories = internalQuery({
+  args: { worldId: v.id('worlds'), playerId, agentGlobalId: v.string() },
+  handler: async (ctx, args) => {
+    const relationship = await ctx.db.query('memories').withIndex('residentRelationship', (q) =>
+      q.eq('worldId', args.worldId).eq('playerId', args.playerId).eq('data.type', 'relationship').eq('data.agentGlobalId', args.agentGlobalId)).unique();
+    if (!relationship || relationship.data.type !== 'relationship') return [];
+    const evidence = [];
+    for (const id of (relationship.data.evidenceMemoryIds ?? []).slice(-3)) {
+      const row = await ctx.db.get(id);
+      if (row && row.worldId === args.worldId && row.playerId === args.playerId) evidence.push(row);
+    }
+    return [relationship, ...evidence];
+  },
+});
 
 export async function rememberConversation(
   ctx: ActionCtx,
@@ -218,6 +297,18 @@ export async function searchMemories(
   });
   return ranked;
 }
+export const canonicalMemories = internalQuery({
+  args: { worldId: v.id('worlds'), playerId, n: v.number() },
+  handler: async (ctx, args) => {
+    if (!Number.isSafeInteger(args.n) || args.n < 1 || args.n > 100)
+      throw new Error('INVALID_MEMORY_SEARCH_LIMIT');
+    return await ctx.db
+      .query('memories')
+      .withIndex('resident', (q) => q.eq('worldId', args.worldId).eq('playerId', args.playerId))
+      .order('desc')
+      .take(args.n);
+  },
+});
 export const getSpaceVectors = internalQuery({
   args: { worldId: v.id('worlds'), playerId, spaceId: v.id('embeddingSpaces') },
   handler: async (ctx, args) => {
@@ -414,6 +505,12 @@ export const insertMemory = internalMutation({
       agentGlobalId: binding?.agentGlobalId,
       embedding,
     });
+    if (memory.data.type === 'conversation') {
+      for (const participant of memory.data.participants ?? []) {
+        await recordSocialEncounter(ctx, { worldId: memory.worldId, playerId: memory.playerId,
+          participant, evidenceMemoryId: memoryId, occurredAt: memory.lastAccess });
+      }
+    }
     await ctx.scheduler.runAfter(0, internal.models.embeddings.indexMemory, { memoryId });
   },
 });
@@ -464,7 +561,7 @@ export const insertReflectionMemories = internalMutation({
   },
 });
 
-async function reflectOnMemories(
+export async function reflectOnMemories(
   ctx: ActionCtx,
   worldId: Id<'worlds'>,
   playerId: GameId<'players'>,
@@ -553,7 +650,9 @@ export const getReflectionMemories = internalQuery({
     if (!world) {
       throw new Error(`World ${args.worldId} not found`);
     }
-    const player = world.players.find((p) => p.id === args.playerId);
+    const player =
+      world.players.find((p) => p.id === args.playerId) ??
+      world.agents.find((a) => a.playerId === args.playerId)?.suspendedPlayer;
     if (!player) {
       throw new Error(`Player ${args.playerId} not found`);
     }

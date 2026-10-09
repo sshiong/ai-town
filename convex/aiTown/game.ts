@@ -26,6 +26,7 @@ import { HistoricalObject } from '../engine/historicalObject';
 import { AgentDescription, serializedAgentDescription } from './agentDescription';
 import { parseMap, serializeMap } from '../util/object';
 import { tickRemoteVisitor } from '../federation/remoteTick';
+import { captureEndedConversation } from '../federation/transcripts';
 import {
   syncResidentRuntimes,
   commitPresenceJobs,
@@ -276,13 +277,15 @@ export class Game extends AbstractGame {
     }
     for (const conversation of existingWorld.conversations) {
       if (!newWorld.conversations.some((c) => c.id === conversation.id)) {
+        const endedAt = Date.now();
+        await captureEndedConversation(ctx, worldId, existingWorld, conversation, endedAt);
         const participants = conversation.participants.map((p) => p.playerId);
         const archivedConversation = {
           worldId,
           id: conversation.id,
           created: conversation.created,
           creator: conversation.creator,
-          ended: Date.now(),
+          ended: endedAt,
           lastMessage: conversation.lastMessage,
           numMessages: conversation.numMessages,
           participants,
@@ -300,7 +303,7 @@ export class Game extends AbstractGame {
               conversationId: conversation.id,
               player1,
               player2,
-              ended: Date.now(),
+              ended: endedAt,
             });
           }
         }

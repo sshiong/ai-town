@@ -76,10 +76,7 @@ export const saveChatProfile = mutation({
       stopWords: stopWords ?? [],
       createdAt: Date.now(),
     });
-    const config = await settings(ctx);
-    if (!config) await ctx.db.insert('modelSettings', { key: 'town', mainChatProfileId: id });
-    else if (!config.mainChatProfileId || (await ctx.db.get(config.mainChatProfileId))?.legacy)
-      await ctx.db.patch(config._id, { mainChatProfileId: id });
+    if (!(await settings(ctx))) await ctx.db.insert('modelSettings', { key: 'town' });
     await audit(ctx, 'CREATE_CHAT_PROFILE', id, id, 'Administrator saved profile');
     return id;
   },
@@ -89,6 +86,20 @@ export const setMain = mutation({
   handler: async (ctx, args) => {
     assertFederationAdmin(args.adminToken);
     if (!(await ctx.db.get(args.chatProfileId))) throw new Error('CHAT_PROFILE_NOT_FOUND');
+    const health = await ctx.db
+      .query('modelAudits')
+      .filter((q) =>
+        q.and(
+          q.eq(q.field('subject'), args.chatProfileId),
+          q.or(
+            q.eq(q.field('operation'), 'PROBE_CHAT_SUCCESS'),
+            q.eq(q.field('operation'), 'PROBE_CHAT_FAILED'),
+          ),
+        ),
+      )
+      .order('desc')
+      .first();
+    if (health?.operation !== 'PROBE_CHAT_SUCCESS') throw new Error('CHAT_PROFILE_NOT_VALIDATED');
     const config = await settings(ctx);
     if (config) await ctx.db.patch(config._id, { mainChatProfileId: args.chatProfileId });
     else
@@ -133,8 +144,11 @@ export async function bindResident(
   }
   const config = await settings(ctx);
   let chatProfileId = config?.mainChatProfileId;
+  if (chatProfileId && !(await ctx.db.get(chatProfileId)))
+    throw new Error('MAIN_CHAT_PROFILE_MISSING');
   if (!chatProfileId) {
     const profiles = await ctx.db.query('chatProfiles').collect();
+    if (profiles.some((p) => !p.legacy)) throw new Error('MAIN_CHAT_PROFILE_MISSING');
     chatProfileId = profiles.find((p) => p.legacy)?._id;
     if (!chatProfileId) {
       const chat = getChatConfig();
@@ -295,18 +309,51 @@ export const profileById = internalQuery({
     return profile;
   },
 });
+export const recordChatProbe = internalMutation({
+  args: { chatProfileId: v.id('chatProfiles'), ok: v.boolean() },
+  handler: async (ctx, args) => {
+    if (!(await ctx.db.get(args.chatProfileId))) throw new Error('CHAT_PROFILE_NOT_FOUND');
+    await audit(
+      ctx,
+      args.ok ? 'PROBE_CHAT_SUCCESS' : 'PROBE_CHAT_FAILED',
+      args.chatProfileId,
+      args.chatProfileId,
+      args.ok ? 'Availability probe returned nonempty output' : 'Availability probe failed',
+    );
+  },
+});
 export const probeChat = action({
-  args: { adminToken: v.string(), chatProfileId: v.id('chatProfiles') },
+  args: {
+    adminToken: v.string(),
+    chatProfileId: v.id('chatProfiles'),
+    timeoutMs: v.optional(v.number()),
+  },
   handler: async (ctx, args): Promise<{ ok: true; model: string; ms: number }> => {
     assertFederationAdmin(args.adminToken);
+    const timeoutMs = args.timeoutMs ?? 90_000;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 90_000)
+      throw new Error('INVALID_CHAT_PROBE_TIMEOUT');
     const profile = await ctx.runQuery(internal.models.profiles.profileById, {
       chatProfileId: args.chatProfileId,
     });
-    const response = await chatCompletion(
-      { messages: [{ role: 'user', content: 'Reply OK.' }], max_tokens: 256 },
-      profileChatConfig(profile),
-    );
-    if (!response.content.trim()) throw new Error('EMPTY_CHAT_RESPONSE');
-    return { ok: true, model: profile.model, ms: response.ms };
+    try {
+      const response = await chatCompletion(
+        { messages: [{ role: 'user', content: 'Reply OK.' }], max_tokens: 256 },
+        profileChatConfig(profile),
+        { deadline: Date.now() + timeoutMs },
+      );
+      if (!response.content.trim()) throw new Error('EMPTY_CHAT_RESPONSE');
+      await ctx.runMutation(internal.models.profiles.recordChatProbe, {
+        chatProfileId: args.chatProfileId,
+        ok: true,
+      });
+      return { ok: true, model: profile.model, ms: response.ms };
+    } catch (error) {
+      await ctx.runMutation(internal.models.profiles.recordChatProbe, {
+        chatProfileId: args.chatProfileId,
+        ok: false,
+      });
+      throw error;
+    }
   },
 });

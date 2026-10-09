@@ -36,7 +36,7 @@ npm test -- --runInBand convex/federation/transport.test.ts convex/federation/ru
 npx tsc --noEmit
 ```
 
-整体联调已在两个独立 Linux Convex 部署完成隔离 CA 的真实 HTTPS 配对、双向 Ready、旅行 Active、Home 思考、Host 发言、Home 记忆保存、自动清理与同一 Player ID 安全返乡。另已通过本机 Qwen 的真实模型探测和 1024 维 Embedding 配置验证与激活。claw 模型返回不支持该模型的 400，仍待确认可用模型。上述为整体联调记录；不等同于生产部署或实际公网可达性验收。
+整体联调已在两个独立 Linux Convex 部署完成隔离 CA 的真实 HTTPS 配对、双向 Ready、旅行 Active、Home 思考、Host 发言、Home 记忆保存、自动清理与同一 Player ID 安全返乡。另已通过本机 Qwen 的真实模型探测和 1024 维 Embedding 配置验证与激活。claw 早期返回 400；用户启用模型后简单请求已成功，但旅行决策仍有空正文/超时，最后一次服务连通性检查仍 TCP 超时。确定性测试服务与管理员驱动的链路成功不能当作 claw 自主交流通过。上述为整体联调记录；不等同于生产部署或实际公网可达性验收。
 
 ## 明文 HTTP 保持关闭
 
@@ -49,3 +49,11 @@ v1.7 第 21.5 与 31.4 节明确允许这一交付边界：安全库条件不满
 Ready 只证明时间窗口内经过认证的双向 Direct 路由，不证明任意 NAT 拓扑自动可通，也不验证 LLM 可用性。当前没有 WSS、Relay、NAT 打洞、VPN 配置或自动路径选择。管理员需自行提供双向可达的 HTTPS 端点、匹配证书与网络路由。
 
 安全返乡依赖可信节点遵守到期拒绝、持久授权账本、标准证书认证与有限时钟偏差假设。复制私钥的恶意双活节点或无限制时钟漂移不能由本地租约算法无条件排除；没有新增外部仲裁服务或区块链共识。
+
+
+## 本轮补充故障证据
+
+真实 Docker Host 强停后 Home 等待最后租约及安全期返乡、Home 旅行中重启无双重身体均已通过。
+完成对话新增独立分页历史流与持久 ACK 等待；真实最后页 ACK 丢失后幂等重试通过。
+这些管理员驱动的引擎检查没有改模型绑定，也不代替真实 claw 自主交流验收。
+完整最新记录见 `FEDERATION-VALIDATION.zh-CN.md`；其余未验证项继续保留。

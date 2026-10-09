@@ -12,6 +12,28 @@ import { NUM_MEMORIES_TO_SEARCH } from '../constants';
 
 const selfInternal = internal.agent.conversation;
 
+export async function recallConversationMemories(
+  ctx: ActionCtx,
+  worldId: Id<'worlds'>,
+  playerId: GameId<'players'>,
+  searchText: string,
+  n: number,
+  otherGlobalId?: string,
+) {
+  const social = otherGlobalId
+    ? await ctx.runQuery(internal.agent.memory.participantMemories, { worldId, playerId, agentGlobalId: otherGlobalId })
+    : [];
+  const combine = (memories: memory.Memory[]) => [...new Map([...social, ...memories].map(m => [m._id, m])).values()];
+  try {
+    const route = await activeRoute(ctx);
+    const embedding = await embeddingsCache.fetch(ctx, searchText, { route, inputMode: 'query' });
+    return combine(await memory.searchMemories(ctx, playerId, embedding, n, worldId, route.space._id));
+  } catch (error) {
+    console.warn('CONVERSATION_MEMORY_CANONICAL_FALLBACK', String(error).slice(0, 300));
+    return combine(await ctx.runQuery(internal.agent.memory.canonicalMemories, { worldId, playerId, n }));
+  }
+}
+
 export async function startConversationMessage(
   ctx: ActionCtx,
   worldId: Id<'worlds'>,
@@ -28,24 +50,17 @@ export async function startConversationMessage(
       conversationId,
     },
   );
-  const route = await activeRoute(ctx);
-  const embedding = await embeddingsCache.fetch(
+  const memories = await recallConversationMemories(
     ctx,
-    `${player.name} is talking to ${otherPlayer.name}`,
-    { route, inputMode: 'query' },
-  );
-
-  const memories = await memory.searchMemories(
-    ctx,
-    player.id as GameId<'players'>,
-    embedding,
-    Number(process.env.NUM_MEMORIES_TO_SEARCH) || NUM_MEMORIES_TO_SEARCH,
     worldId,
-    route.space._id,
+    player.id as GameId<'players'>,
+    `${player.name} is talking to ${otherPlayer.name}`,
+    Number(process.env.NUM_MEMORIES_TO_SEARCH) || NUM_MEMORIES_TO_SEARCH,
+    otherPlayer.globalIdentity?.agentGlobalId,
   );
 
-  const memoryWithOtherPlayer = memories.find(
-    (m) => m.data.type === 'conversation' && m.data.playerIds.includes(otherPlayerId),
+  const memoryWithOtherPlayer = memories.find((m) =>
+    memory.concernsParticipant(m, otherPlayerId, otherPlayer.globalIdentity?.agentGlobalId),
   );
   const prompt = [
     `You are ${player.name}, and you just started a conversation with ${otherPlayer.name}.`,
@@ -104,19 +119,13 @@ export async function continueConversationMessage(
   );
   const now = Date.now();
   const started = new Date(conversation.created);
-  const route = await activeRoute(ctx);
-  const embedding = await embeddingsCache.fetch(
+  const memories = await recallConversationMemories(
     ctx,
-    `What do you think about ${otherPlayer.name}?`,
-    { route, inputMode: 'query' },
-  );
-  const memories = await memory.searchMemories(
-    ctx,
-    player.id as GameId<'players'>,
-    embedding,
-    3,
     worldId,
-    route.space._id,
+    player.id as GameId<'players'>,
+    `What do you think about ${otherPlayer.name}?`,
+    3,
+    otherPlayer.globalIdentity?.agentGlobalId,
   );
   const prompt = [
     `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
@@ -338,6 +347,21 @@ export const queryPromptData = internalQuery({
       throw new Error(`Agent description for ${agent.id} not found`);
     }
     const otherAgent = world.agents.find((a) => a.playerId === args.otherPlayerId);
+    const otherBinding = await ctx.db
+      .query('residentModelBindings')
+      .withIndex('resident', (q) =>
+        q.eq('worldId', args.worldId).eq('playerId', args.otherPlayerId),
+      )
+      .unique();
+    const localIdentity = await ctx.db.query('federationIdentity').unique();
+    const globalIdentity = otherPlayer.remoteVisitor
+      ? {
+          agentGlobalId: otherPlayer.remoteVisitor.agentGlobalId,
+          homeTownId: otherPlayer.remoteVisitor.homeTownId,
+        }
+      : otherBinding?.agentGlobalId && localIdentity
+        ? { agentGlobalId: otherBinding.agentGlobalId, homeTownId: localIdentity.townId }
+        : undefined;
     let otherAgentDescription;
     if (otherAgent) {
       otherAgentDescription = await ctx.db
@@ -374,14 +398,18 @@ export const queryPromptData = internalQuery({
     }
     return {
       player: { name: playerDescription.name, ...player },
-      otherPlayer: { name: otherPlayerDescription.name, ...otherPlayer },
+      otherPlayer: { name: otherPlayerDescription.name, ...otherPlayer, globalIdentity },
       conversation,
       agent: { identity: agentDescription.identity, plan: agentDescription.plan, ...agent },
-      otherAgent: otherAgent && {
-        identity: otherAgentDescription!.identity,
-        plan: otherAgentDescription!.plan,
-        ...otherAgent,
-      },
+      otherAgent: otherAgent
+        ? {
+            identity: otherAgentDescription!.identity,
+            plan: otherAgentDescription!.plan,
+            ...otherAgent,
+          }
+        : otherPlayer.remoteVisitor
+          ? { identity: otherPlayerDescription.description, plan: '' }
+          : null,
       lastConversation,
     };
   },

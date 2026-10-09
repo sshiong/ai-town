@@ -98,6 +98,11 @@ export function modelEndpoint(url: string, path: string) {
 const AuthHeaders = (config: { apiKey?: string }): Record<string, string> =>
   config.apiKey ? { Authorization: 'Bearer ' + config.apiKey } : {};
 
+export interface ChatRequestOptions {
+  /** Absolute deadline for the entire request, including retries and backoff. */
+  deadline?: number;
+}
+
 // Overload for non-streaming
 export async function chatCompletion(
   body: Omit<CreateChatCompletionRequest, 'model'> & {
@@ -106,6 +111,7 @@ export async function chatCompletion(
     stream?: false | null | undefined;
   },
   configOverride?: ChatConfig,
+  options?: ChatRequestOptions,
 ): Promise<{ content: string; retries: number; ms: number }>;
 // Overload for streaming
 export async function chatCompletion(
@@ -121,6 +127,7 @@ export async function chatCompletion(
     model?: CreateChatCompletionRequest['model'];
   },
   configOverride?: ChatConfig,
+  options?: ChatRequestOptions,
 ) {
   const config = configOverride ?? getChatConfig();
   body.model = body.model ?? config.chatModel;
@@ -128,48 +135,77 @@ export async function chatCompletion(
   const stopWords = body.stop ? (typeof body.stop === 'string' ? [body.stop] : body.stop) : [];
   if (config.stopWords) stopWords.push(...config.stopWords);
   if (stopWords.length) body.stop = [...new Set(stopWords)];
-  const {
-    result: content,
-    retries,
-    ms,
-  } = await retryWithBackoff(async () => {
-    const result = await fetch(modelEndpoint(config.url, '/v1/chat/completions'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...AuthHeaders(config),
-      },
+  const controller = options?.deadline === undefined ? undefined : new AbortController();
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  if (controller) {
+    if (!Number.isSafeInteger(options!.deadline)) throw new Error('INVALID_CHAT_DEADLINE');
+    const remaining = options!.deadline! - Date.now();
+    if (remaining <= 0) throw new Error('CHAT_REQUEST_DEADLINE');
+    if (remaining > 2_147_483_647) throw new Error('INVALID_CHAT_DEADLINE');
+    deadlineTimer = setTimeout(() => controller.abort(), remaining);
+  }
+  try {
+    const {
+      result: content,
+      retries,
+      ms,
+    } = await retryWithBackoff(async () => {
+      const result = await fetch(modelEndpoint(config.url, '/v1/chat/completions'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...AuthHeaders(config),
+        },
 
-      body: JSON.stringify(body),
-    });
-    if (!result.ok) {
-      const error = await result.text();
-      console.error({ error });
-      if (result.status === 404 && config.provider === 'ollama') {
-        await tryPullOllama(body.model!, error, config.url);
+        body: JSON.stringify(body),
+        signal: controller?.signal,
+      });
+      if (!result.ok) {
+        const error = await result.text();
+        console.error({ error });
+        if (result.status === 404 && config.provider === 'ollama') {
+          await tryPullOllama(body.model!, error, config.url);
+        }
+        throw {
+          retry: result.status === 429 || result.status >= 500,
+          error: new Error(`Chat completion failed with code ${result.status}: ${error}`),
+        };
       }
-      throw {
-        retry: result.status === 429 || result.status >= 500,
-        error: new Error(`Chat completion failed with code ${result.status}: ${error}`),
-      };
-    }
-    if (body.stream) {
-      return new ChatCompletionContent(result.body!, stopWords);
-    } else {
-      const json = (await result.json()) as CreateChatCompletionResponse;
-      const content = json.choices[0].message?.content;
-      if (content === undefined) {
-        throw new Error('Unexpected result from OpenAI: ' + JSON.stringify(json));
+      if (body.stream) {
+        return new ChatCompletionContent(result.body!, stopWords);
+      } else {
+        const json = (await result.json()) as CreateChatCompletionResponse;
+        const choice = json.choices?.[0];
+        const content = choice?.message?.content;
+        if (typeof content !== 'string' || !content.trim()) {
+          // Reasoning is provider metadata, never a resident's executable action.
+          // Keep diagnostics useful without persisting prompts, reasoning, or credentials.
+          throw new Error(
+            'EMPTY_CHAT_RESPONSE: ' +
+              JSON.stringify({
+                model: typeof json.model === 'string' ? json.model.slice(0, 256) : undefined,
+                finishReason: choice?.finish_reason,
+                completionTokens: json.usage?.completion_tokens,
+                reasoningTokens: json.usage?.completion_tokens_details?.reasoning_tokens,
+                reasoningChars: choice?.message?.reasoning_content?.length,
+              }),
+          );
+        }
+        return content;
       }
-      return content;
-    }
-  });
+    }, controller?.signal);
 
-  return {
-    content,
-    retries,
-    ms,
-  };
+    return {
+      content,
+      retries,
+      ms,
+    };
+  } catch (error) {
+    if (controller?.signal.aborted) throw new Error('CHAT_REQUEST_DEADLINE');
+    throw error;
+  } finally {
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+  }
 }
 
 export async function tryPullOllama(model: string, error: string, url = getChatConfig().url) {
@@ -294,12 +330,15 @@ type RetryError = { retry: boolean; error: any };
 
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<{ retries: number; result: T; ms: number }> {
   let i = 0;
   for (; i <= RETRY_BACKOFF.length; i++) {
     try {
+      if (signal?.aborted) throw new Error('CHAT_REQUEST_DEADLINE');
       const start = Date.now();
       const result = await fn();
+      if (signal?.aborted) throw new Error('CHAT_REQUEST_DEADLINE');
       const ms = Date.now() - start;
       return { result, retries: i, ms };
     } catch (e) {
@@ -310,9 +349,21 @@ export async function retryWithBackoff<T>(
             `Attempt ${i + 1} failed, waiting ${RETRY_BACKOFF[i]}ms to retry...`,
             Date.now(),
           );
-          await new Promise((resolve) =>
-            setTimeout(resolve, RETRY_BACKOFF[i] + RETRY_JITTER * Math.random()),
-          );
+          await new Promise<void>((resolve, reject) => {
+            const abort = () => {
+              clearTimeout(timer);
+              reject(new Error('CHAT_REQUEST_DEADLINE'));
+            };
+            const timer = setTimeout(
+              () => {
+                signal?.removeEventListener('abort', abort);
+                resolve();
+              },
+              RETRY_BACKOFF[i] + RETRY_JITTER * Math.random(),
+            );
+            signal?.addEventListener('abort', abort, { once: true });
+            if (signal?.aborted) abort();
+          });
           continue;
         }
       }
@@ -371,7 +422,8 @@ interface CreateChatCompletionResponse {
     index?: number;
     message?: {
       role: 'system' | 'user' | 'assistant';
-      content: string;
+      content: string | null;
+      reasoning_content?: string;
     };
     finish_reason?: string;
   }[];
@@ -381,6 +433,7 @@ interface CreateChatCompletionResponse {
     prompt_tokens: number;
 
     total_tokens: number;
+    completion_tokens_details?: { reasoning_tokens?: number };
   };
 }
 

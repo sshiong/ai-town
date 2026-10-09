@@ -48,7 +48,7 @@ afterEach(() => {
 test('same dimensions and model name are not embedding compatibility evidence; caches isolate modes and spaces', () => {
   expect(verifiedCompatible(profile, profile)).toBe(false);
   const evidence = { ...profile, immutableRevision: 'r1', weightsDigest: 'a'.repeat(64) };
-  expect(verifiedCompatible(evidence, { ...evidence, url: 'https://another.example' })).toBe(true);
+  expect(verifiedCompatible(evidence, { ...evidence, url: 'https://another.example' })).toBe(false);
   expect(verifiedCompatible(evidence, { ...evidence, documentPrefix: 'changed' })).toBe(false);
   expect(embeddingFingerprint(profile)).not.toBe(
     embeddingFingerprint({ ...profile, dimensions: 3 }),
@@ -68,6 +68,11 @@ test('main applies only to new residents; explicit resident bindings and global 
     ctx.db.insert('worlds', { nextId: 2, players: [], agents: [], conversations: [] }),
   );
   const adminToken = process.env.FEDERATION_ADMIN_TOKEN!;
+  jest
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(
+      async () => new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] })),
+    );
   const first = await t.mutation(mutation('models/profiles:saveChatProfile'), {
     adminToken,
     name: 'First',
@@ -75,6 +80,11 @@ test('main applies only to new residents; explicit resident bindings and global 
     url: 'https://one.example',
     model: 'one',
   });
+  await t.action(makeFunctionReference<'action'>('models/profiles:probeChat'), {
+    adminToken,
+    chatProfileId: first,
+  });
+  await t.mutation(mutation('models/profiles:setMain'), { adminToken, chatProfileId: first });
   await t.run((ctx) => bindResident(ctx, worldId, 'p:0' as never, 'town:test/agent:0'));
   const second = await t.mutation(mutation('models/profiles:saveChatProfile'), {
     adminToken,
@@ -82,6 +92,10 @@ test('main applies only to new residents; explicit resident bindings and global 
     provider: 'custom',
     url: 'https://two.example',
     model: 'two',
+  });
+  await t.action(makeFunctionReference<'action'>('models/profiles:probeChat'), {
+    adminToken,
+    chatProfileId: second,
   });
   await t.mutation(mutation('models/profiles:setMain'), { adminToken, chatProfileId: second });
   await t.run((ctx) => bindResident(ctx, worldId, 'p:1' as never, 'town:test/agent:1'));
@@ -152,9 +166,12 @@ test('embedding switch requires complete coverage and validation, with old vecto
   await expect(
     t.mutation(mutation('models/embeddings:activateSpace'), { adminToken, spaceId: ids.next }),
   ).rejects.toThrow('EMBEDDING_SPACE_NOT_VALIDATED');
-  await t.mutation(mutation('models/embeddings:markValidated'), {
+  jest
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(new Response(JSON.stringify({ data: [{ index: 0, embedding: [0, 1] }] })));
+  await t.action(makeFunctionReference<'action'>('models/embeddings:validateSpace'), {
+    adminToken,
     spaceId: ids.next,
-    sampleCount: 1,
   });
   await t.mutation(mutation('models/embeddings:activateSpace'), { adminToken, spaceId: ids.next });
   expect((await t.query(query('models/embeddings:getRoute'), {})).space._id).toBe(ids.next);
@@ -689,4 +706,235 @@ test('Chat availability probe rejects a successful HTTP response without usable 
     model: 'reasoning',
   });
   expect(JSON.parse(request.mock.calls[0][1]!.body as string).max_tokens).toBe(256);
+});
+
+test('empty Chat output reports safe provider metadata without executing or exposing reasoning', async () => {
+  const request = jest.spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        model: 'actual-provider-model',
+        choices: [
+          {
+            finish_reason: 'length',
+            message: { content: null, reasoning_content: 'secret reasoning' },
+          },
+        ],
+        usage: { completion_tokens: 350, completion_tokens_details: { reasoning_tokens: 350 } },
+      }),
+    ),
+  );
+  const error = await chatCompletion(
+    { messages: [{ role: 'user', content: 'private prompt' }], max_tokens: 350 },
+    { provider: 'custom', url: 'https://chat.example', chatModel: 'claw', stopWords: [] },
+  ).catch((error: Error) => error);
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).toContain('EMPTY_CHAT_RESPONSE');
+  expect(String(error)).toContain('"model":"actual-provider-model"');
+  expect(String(error)).toContain('"finishReason":"length"');
+  expect(String(error)).toContain('"reasoningTokens":350');
+  expect(String(error)).not.toContain('secret reasoning');
+  expect(String(error)).not.toContain('private prompt');
+  expect(JSON.parse(request.mock.calls[0][1]!.body as string).model).toBe('claw');
+});
+
+test('Chat deadline aborts a live request while keeping its bound model and stop words', async () => {
+  const request = jest.spyOn(globalThis, 'fetch').mockImplementation(
+    (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init!.signal!.addEventListener('abort', () => reject(new Error('provider cancelled')), {
+          once: true,
+        });
+      }),
+  );
+  const completion = chatCompletion(
+    { messages: [{ role: 'user', content: 'action' }] },
+    { provider: 'custom', url: 'https://chat.example', chatModel: 'claw', stopWords: ['END'] },
+    { deadline: Date.now() + 50 },
+  );
+  const rejected = expect(completion).rejects.toThrow('CHAT_REQUEST_DEADLINE');
+  await jest.advanceTimersByTimeAsync(50);
+  await rejected;
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(request.mock.calls[0][1]!.signal!.aborted).toBe(true);
+  expect(JSON.parse(request.mock.calls[0][1]!.body as string)).toMatchObject({
+    model: 'claw',
+    stop: ['END'],
+  });
+  expect(jest.getTimerCount()).toBe(0);
+});
+
+test('Chat deadline interrupts retry backoff and rejects expired requests before contacting provider', async () => {
+  jest.spyOn(console, 'error').mockImplementation(() => {});
+  jest.spyOn(console, 'log').mockImplementation(() => {});
+  const request = jest
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(new Response('Busy', { status: 503 }));
+  const config = {
+    provider: 'custom' as const,
+    url: 'https://chat.example',
+    chatModel: 'claw',
+    stopWords: [],
+  };
+  const completion = chatCompletion({ messages: [{ role: 'user', content: 'action' }] }, config, {
+    deadline: Date.now() + 50,
+  });
+  const rejected = expect(completion).rejects.toThrow('CHAT_REQUEST_DEADLINE');
+  await jest.advanceTimersByTimeAsync(50);
+  await rejected;
+  expect(request).toHaveBeenCalledTimes(1);
+  await expect(
+    chatCompletion({ messages: [{ role: 'user', content: 'action' }] }, config, {
+      deadline: Date.now(),
+    }),
+  ).rejects.toThrow('CHAT_REQUEST_DEADLINE');
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(jest.getTimerCount()).toBe(0);
+});
+
+test('saved Chat profiles require successful current probes for main and cannot trigger a legacy fallback', async () => {
+  const t = convexTest(schema, modules);
+  const adminToken = process.env.FEDERATION_ADMIN_TOKEN!;
+  const worldId = await t.run((ctx) =>
+    ctx.db.insert('worlds', { nextId: 1, players: [], agents: [], conversations: [] }),
+  );
+  const id = await t.mutation(mutation('models/profiles:saveChatProfile'), {
+    adminToken,
+    name: 'Selected',
+    provider: 'custom',
+    url: 'https://chat.example',
+    model: 'claw',
+  });
+  const state = await t.query(query('models/profiles:list'), { adminToken });
+  expect(state.settings?.mainChatProfileId).toBeUndefined();
+  await expect(
+    t.mutation(mutation('models/profiles:setMain'), { adminToken, chatProfileId: id }),
+  ).rejects.toThrow('CHAT_PROFILE_NOT_VALIDATED');
+  await expect(t.run((ctx) => bindResident(ctx, worldId, 'p:0' as never))).rejects.toThrow(
+    'MAIN_CHAT_PROFILE_MISSING',
+  );
+  const request = jest
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] })),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ choices: [{ message: { content: '' } }] })),
+    );
+  const probe = makeFunctionReference<'action'>('models/profiles:probeChat');
+  await t.action(probe, { adminToken, chatProfileId: id });
+  await t.mutation(mutation('models/profiles:setMain'), { adminToken, chatProfileId: id });
+  await t.run((ctx) => bindResident(ctx, worldId, 'p:0' as never));
+  await expect(t.action(probe, { adminToken, chatProfileId: id })).rejects.toThrow(
+    'EMPTY_CHAT_RESPONSE',
+  );
+  await expect(
+    t.mutation(mutation('models/profiles:setMain'), { adminToken, chatProfileId: id }),
+  ).rejects.toThrow('CHAT_PROFILE_NOT_VALIDATED');
+  expect(
+    (await t.query((ctx) => ctx.db.query('residentModelBindings').unique()))?.chatProfileId,
+  ).toBe(id);
+  expect(request).toHaveBeenCalledTimes(2);
+});
+
+test('embedding validation requires a live retrieval hit in the correct resident namespace', async () => {
+  const t = convexTest(schema, modules);
+  const adminToken = process.env.FEDERATION_ADMIN_TOKEN!;
+  const spaceId = await t.run(async (ctx) => {
+    const worldId = await ctx.db.insert('worlds', {
+      nextId: 2,
+      players: [],
+      agents: [],
+      conversations: [],
+    });
+    const profileId = await ctx.db.insert('embeddingProfiles', {
+      ...profile,
+      fingerprint: embeddingFingerprint(profile),
+      createdAt: 1,
+    });
+    const spaceId = await ctx.db.insert('embeddingSpaces', {
+      profileId,
+      fingerprint: embeddingFingerprint(profile),
+      status: 'READY',
+      createdAt: 1,
+      validatedAt: 1,
+    });
+    for (const [description, embedding, playerId] of [
+      ['Alpha', [1, 0], 'p:0'],
+      ['Beta', [0, 1], 'p:0'],
+      ['Other owner', [1, 0], 'p:1'],
+    ] as const) {
+      const memoryId = await ctx.db.insert('memories', {
+        worldId,
+        playerId,
+        description,
+        importance: 1,
+        lastAccess: 1,
+        data: { type: 'relationship', playerId: 'p:2' },
+      });
+      await ctx.db.insert('modelMemoryVectors', {
+        worldId,
+        playerId,
+        spaceId,
+        memoryId,
+        embedding: [...embedding],
+      });
+    }
+    return spaceId;
+  });
+  const request = jest.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { input: string[] };
+    return new Response(
+      JSON.stringify({
+        data: [{ index: 0, embedding: body.input[0].includes('Beta') ? [0, 1] : [1, 0] }],
+      }),
+    );
+  });
+  const validate = makeFunctionReference<'action'>('models/embeddings:validateSpace');
+  await expect(t.action(validate, { adminToken, spaceId })).resolves.toEqual({
+    valid: true,
+    sampleCount: 3,
+  });
+  request.mockImplementation(
+    async () => new Response(JSON.stringify({ data: [{ index: 0, embedding: [0, 1] }] })),
+  );
+  await expect(t.action(validate, { adminToken, spaceId })).rejects.toThrow(
+    'EMBEDDING_RETRIEVAL_SAMPLE_MISSED',
+  );
+  expect(
+    (await t.query(query('models/embeddings:getRoute'), { spaceId })).space.validatedAt,
+  ).toBeUndefined();
+  expect(request).toHaveBeenCalledTimes(4);
+});
+
+test('administrator asserted weights and revision cannot authorize cross profile vector reuse', async () => {
+  const t = convexTest(schema, modules);
+  const adminToken = process.env.FEDERATION_ADMIN_TOKEN!;
+  const targetProfileId = await t.run(async (ctx) => {
+    const fields = {
+      ...profile,
+      immutableRevision: 'revision',
+      weightsDigest: 'a'.repeat(64),
+      createdAt: 1,
+    };
+    const source = await ctx.db.insert('embeddingProfiles', {
+      ...fields,
+      fingerprint: embeddingFingerprint(fields),
+    });
+    const target = await ctx.db.insert('embeddingProfiles', {
+      ...fields,
+      url: 'https://other.example',
+      fingerprint: embeddingFingerprint({ ...fields, url: 'https://other.example' }),
+    });
+    const spaceId = await ctx.db.insert('embeddingSpaces', {
+      profileId: source,
+      fingerprint: 'source',
+      status: 'ACTIVE',
+      createdAt: 1,
+    });
+    await ctx.db.insert('modelSettings', { key: 'town', activeEmbeddingSpaceId: spaceId });
+    return target;
+  });
+  await expect(
+    t.query(query('models/embeddings:planSwitch'), { adminToken, targetProfileId }),
+  ).resolves.toMatchObject({ compatibility: 'REBUILD_REQUIRED', canReuse: false });
 });

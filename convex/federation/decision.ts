@@ -235,6 +235,7 @@ export const run = internalAction({
           max_tokens: 1500,
         },
         config,
+        { deadline: data.job.deadline },
       );
       await ctx.runMutation(internal.federation.decision.finish, {
         jobId,

@@ -26,7 +26,7 @@ type ConfirmedEvent = ObjectType<typeof confirmedEventFields> & {
   messageText?: string;
   authorGlobalId?: string;
 };
-async function persistConfirmedEvent(ctx: MutationCtx, args: ConfirmedEvent) {
+export async function persistConfirmedEvent(ctx: MutationCtx, args: ConfirmedEvent) {
   if (
     !args.description.trim() ||
     args.description.length > 16000 ||

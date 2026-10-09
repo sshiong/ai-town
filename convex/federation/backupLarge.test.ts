@@ -350,7 +350,7 @@ test('manifest must be signed, complete and ordered; exporting cancellation rele
   const incomplete = {
     ...archive.manifest,
     chunks: archive.manifest.chunks
-      .filter((c) => c.table !== largeTables[largeTables.length - 1])
+      .filter((c) => c.table !== 'memories')
       .map((c, index) => ({ ...c, index })),
   };
   await expect(

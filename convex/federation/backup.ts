@@ -10,13 +10,12 @@ import {
   MutationCtx,
   QueryCtx,
 } from '../maintenanceFunctions';
-import { Id, TableNames } from '../_generated/dataModel';
+import { Doc, Id, TableNames } from '../_generated/dataModel';
 import { blockedWithPositions } from '../aiTown/movement';
 import { WorldMap } from '../aiTown/worldMap';
 import { Point } from '../util/types';
 import { playerId } from '../aiTown/ids';
 import { requireAdmin, createIdentityKeys, sign } from './security';
-import { Doc } from '../_generated/dataModel';
 import { LEASE_SAFETY_MS, normalizeEndpoint } from './protocol';
 import { identity } from './store';
 import {
@@ -98,14 +97,59 @@ export const getResident = internalQuery({
     requireAdmin(args.adminToken);
     const local = await identity(ctx);
     if (!local) throw new Error('INITIALIZE_IDENTITY_FIRST');
-    const all = await collect(ctx.db);
-    const world = all.worlds.find((w) => w._id === args.worldId);
-    const agent = world?.agents.find((a: BackupRow) => a.playerId === args.playerId);
+    // A small resident archive must not first collect/truncate the whole town.
+    // Bound only this resident's canonical records; the final bundle cap still
+    // redirects residents with large histories to the paginated archive format.
+    const world = await ctx.db.get(args.worldId);
+    const agent = world?.agents.find((a) => a.playerId === args.playerId);
     if (!world || !agent) throw new Error('RESIDENT_NOT_FOUND');
+    const binding = await ctx.db.query('residentModelBindings')
+      .withIndex('resident', q => q.eq('worldId', args.worldId).eq('playerId', args.playerId)).unique();
+    if (!binding) throw new Error('RESIDENT_BINDING_MISSING');
+    const history = await ctx.db.query('participatedTogether')
+      .withIndex('playerHistory', q => q.eq('worldId', args.worldId).eq('player1', args.playerId)).take(501);
+    const archived: BackupRow[] = [];
+    const messages: BackupRow[] = [];
+    for (const conversationId of new Set(history.map(h => h.conversationId))) {
+      const conversation = await ctx.db.query('archivedConversations')
+        .withIndex('worldId', q => q.eq('worldId', args.worldId).eq('id', conversationId)).unique();
+      if (conversation) archived.push(conversation);
+      if (messages.length < 501) messages.push(...await ctx.db.query('messages')
+        .withIndex('conversationId', q => q.eq('worldId', args.worldId).eq('conversationId', conversationId))
+        .take(501 - messages.length));
+    }
+    const descriptions: BackupRow[] = [];
+    const oldPlayers: BackupRow[] = [];
+    const related = new Set([args.playerId, ...archived.flatMap(c => c.participants)]);
+    for (const relatedPlayer of related) {
+      const description = await ctx.db.query('playerDescriptions').withIndex('worldId', q =>
+        q.eq('worldId', args.worldId).eq('playerId', relatedPlayer)).unique();
+      if (description) descriptions.push(description);
+      const oldPlayer = await ctx.db.query('archivedPlayers').withIndex('worldId', q =>
+        q.eq('worldId', args.worldId).eq('id', relatedPlayer)).first();
+      if (oldPlayer) oldPlayers.push(oldPlayer);
+    }
+    const all: Record<string, BackupRow[]> = {
+      worlds: [world], residentModelBindings: [binding],
+      memories: await ctx.db.query('memories').withIndex('resident', q => q.eq('worldId', args.worldId).eq('playerId', args.playerId)).take(501),
+      maps: await ctx.db.query('maps').withIndex('worldId', q => q.eq('worldId', args.worldId)).take(2),
+      playerDescriptions: descriptions,
+      agentDescriptions: await ctx.db.query('agentDescriptions').withIndex('worldId', q => q.eq('worldId', args.worldId).eq('agentId', agent.id)).take(2),
+      chatProfiles: [await ctx.db.get(binding.chatProfileId)].filter((p): p is Doc<'chatProfiles'> => !!p),
+      federationAgentRuntimes: await ctx.db.query('federationAgentRuntimes').withIndex('world', q => q.eq('worldId', args.worldId).eq('playerId', args.playerId)).take(2),
+      archivedConversations: archived, messages, participatedTogether: history,
+      archivedPlayers: oldPlayers, federationIdentity: [sanitize(local)],
+    };
+    // Unscoped legacy memories can only be attributed when the local player ID
+    // has exactly one fixed Home binding across all worlds.
+    const legacy = await ctx.db.query('memories').withIndex('playerId', q => q.eq('playerId', args.playerId))
+      .filter(q => q.eq(q.field('worldId'), undefined)).take(501);
+    if (legacy.length) {
+      const owners = await ctx.db.query('residentModelBindings').filter(q => q.eq(q.field('playerId'), args.playerId)).take(2);
+      if (owners.length !== 1) throw new Error('LEGACY_MEMORY_OWNER_AMBIGUOUS');
+      all.memories.push(...legacy.map(m => ({ ...m, worldId: args.worldId, agentGlobalId: binding.agentGlobalId })));
+    }
     const rows: Record<string, BackupRow[]> = {};
-    const binding = all.residentModelBindings.find(
-      (b) => b.worldId === args.worldId && b.playerId === args.playerId,
-    );
     const memories = all.memories.filter(
       (m) => m.worldId === args.worldId && m.playerId === args.playerId,
     );
@@ -160,6 +204,10 @@ export const getResident = internalQuery({
           _id: `snapshot-player:${world._id}:${current.id}`,
           worldId: world._id,
         });
+    rows.homeTravelTranscripts = await ctx.db.query('homeTravelTranscripts')
+      .withIndex('owner_transcript', q => q.eq('agentGlobalId', binding.agentGlobalId!)).take(501);
+    rows.homeTravelTranscriptPages = await ctx.db.query('homeTravelTranscriptPages')
+      .withIndex('owner_transcript_page', q => q.eq('agentGlobalId', binding.agentGlobalId!)).take(501);
     rows.federationIdentity = all.federationIdentity;
     rows.federationPeers = [];
     const bundle = await createBundle(local.townId, 'resident', rows);
@@ -267,6 +315,7 @@ async function checkImport(
     'archivedAgents',
     'archivedConversations',
     'participatedTogether',
+    'homeTravelTranscripts',
   ]) {
     if ((rows[name] ?? []).some((r) => r.worldId && !worldIds.has(r.worldId)))
       throw new Error('BACKUP_WORLD_REFERENCE_MISSING');
@@ -306,6 +355,26 @@ async function checkImport(
     )
   )
     throw new Error('BACKUP_REFLECTION_REFERENCE_MISSING');
+  for (const memory of rows.memories ?? []) {
+    if (memory.data?.type === 'relationship' && (memory.data.evidenceMemoryIds ?? []).some((id: string) => !memoryIds.has(id)))
+      throw new Error('BACKUP_RELATIONSHIP_REFERENCE_MISSING');
+  }
+  for (const transcript of rows.homeTravelTranscripts ?? []) {
+    if (!(rows.residentModelBindings ?? []).some(b => b.worldId === transcript.worldId && b.playerId === transcript.playerId && b.agentGlobalId === transcript.agentGlobalId))
+      throw new Error('BACKUP_TRANSCRIPT_OWNER_MISSING');
+    if ([transcript.endMemoryId, transcript.summaryMemoryId].some(id => id && !memoryIds.has(id)))
+      throw new Error('BACKUP_TRANSCRIPT_MEMORY_REFERENCE_MISSING');
+    const pages = (rows.homeTravelTranscriptPages ?? []).filter(p => p.agentGlobalId === transcript.agentGlobalId && p.transcriptId === transcript.transcriptId);
+    const pageNumbers = new Set(pages.map(p => p.pageNumber));
+    if (pageNumbers.size !== pages.length || pages.length !== transcript.receivedPageCount ||
+        pages.reduce((sum, p) => sum + p.messages.length, 0) !== transcript.totalMessageCount ||
+        pages.some(p => p.memoryIds.length !== p.messages.length || p.memoryIds.some((id: string) => !memoryIds.has(id))) ||
+        (transcript.state === 'COMPLETE' && (transcript.finalPageNumber === undefined || pages.length !== transcript.finalPageNumber + 1 ||
+          pages.some(p => p.pageNumber < 0 || p.pageNumber > transcript.finalPageNumber))))
+      throw new Error('BACKUP_TRANSCRIPT_PAGE_REFERENCE_MISSING');
+  }
+  if ((rows.homeTravelTranscriptPages ?? []).some(p => !(rows.homeTravelTranscripts ?? []).some(t => t.agentGlobalId === p.agentGlobalId && t.transcriptId === p.transcriptId)))
+    throw new Error('BACKUP_TRANSCRIPT_REFERENCE_MISSING');
   return { bundle, local, rows };
 }
 export const checkPreflight = internalQuery({
@@ -500,7 +569,7 @@ export async function applyBackupData(
     'modelSettings',
     'federationAgentRuntimes',
     ...(args.mode === 'merge'
-      ? ['engines', 'worlds', 'worldStatus', 'maps', 'deploymentRecords', 'modelAudits']
+      ? ['engines', 'worlds', 'worldStatus', 'maps', 'deploymentRecords', 'modelAudits', 'storagePolicies', 'federationActionFacts', 'federationEventFacts']
       : []),
   ]);
   for (const name of dataTables) {

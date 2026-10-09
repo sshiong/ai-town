@@ -58,8 +58,8 @@ export default function ModelsPanel({ adminToken }: { adminToken: string }) {
     <section className="admin-panel">
       <h2>Models &amp; resident bindings</h2>
       <p className="admin-muted">
-        Chat and Embedding use independent providers. The first saved Chat profile becomes main.
-        Changing main only affects new residents; existing bindings remain fixed.
+        Chat and Embedding use independent providers. Test a Chat connection successfully before
+        selecting main. Changing main only affects new residents; existing bindings remain fixed.
       </p>
       <TaskFeedback task={task} />
       {!data && <p role="status">Loading model profiles…</p>}
@@ -101,11 +101,13 @@ export default function ModelsPanel({ adminToken }: { adminToken: string }) {
                     onClick={() =>
                       void task.run(
                         'Testing Chat connection',
-                        () =>
-                          convex.action(api.models.profiles.probeChat, {
-                            adminToken,
-                            chatProfileId: profile._id,
-                          }),
+                        async () => {
+                          try {
+                            return await convex.action(api.models.profiles.probeChat, { adminToken, chatProfileId: profile._id });
+                          } finally {
+                            await refresh();
+                          }
+                        },
                         'Chat provider returned a real response. This diagnostic may use provider credits.',
                       )
                     }
@@ -113,7 +115,7 @@ export default function ModelsPanel({ adminToken }: { adminToken: string }) {
                     Test connection
                   </AdminButton>
                   <AdminButton
-                    disabled={!!task.pending || data.settings?.mainChatProfileId === profile._id}
+                    disabled={!!task.pending || data.settings?.mainChatProfileId === profile._id || data.audits.find(a => a.subject === profile._id && ['PROBE_CHAT_SUCCESS', 'PROBE_CHAT_FAILED'].includes(a.operation))?.operation !== 'PROBE_CHAT_SUCCESS'}
                     onClick={() =>
                       void task.run(
                         'Changing main',

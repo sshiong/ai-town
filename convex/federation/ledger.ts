@@ -28,7 +28,9 @@ export async function assertVisitAuthority(ctx: MutationCtx, message: Federation
   if (!ledger || ledger.agentGlobalId !== message.agentGlobalId || visitPeer(ledger) !== message.fromTownId) throw new Error('VISIT_IDENTITY_MISMATCH');
   if (ledger.agentAuthorityEpoch !== message.agentAuthorityEpoch) throw new Error('STALE_AGENT_AUTHORITY');
   const renewing = message.type === 'VISIT_RENEW' && ledger.role === 'host' && message.visitLeaseVersion === ledger.visitLeaseVersion + 1;
-  if (ledger.visitLeaseVersion !== message.visitLeaseVersion && !renewing) throw new Error('STALE_VISIT_LEASE');
+  const historical = message.type === 'CONVERSATION_ENDED' && ledger.role === 'home' &&
+    Number.isSafeInteger(message.visitLeaseVersion) && message.visitLeaseVersion! >= 1 && message.visitLeaseVersion! <= ledger.visitLeaseVersion;
+  if (ledger.visitLeaseVersion !== message.visitLeaseVersion && !renewing && !historical) throw new Error('STALE_VISIT_LEASE');
   const senderEpoch = ledger.role === 'home' ? ledger.hostDeploymentEpoch : ledger.homeDeploymentEpoch;
   const recipientEpoch = ledger.role === 'home' ? ledger.homeDeploymentEpoch : ledger.hostDeploymentEpoch;
   if (senderEpoch !== message.senderDeploymentEpoch || recipientEpoch !== message.expectedRecipientDeploymentEpoch) throw new Error('VISIT_DEPLOYMENT_MISMATCH');

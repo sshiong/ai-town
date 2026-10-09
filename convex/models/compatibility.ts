@@ -24,21 +24,10 @@ export function embeddingFingerprint(profile: EmbeddingEvidence): string {
     profile.normalization,
   ]);
 }
-export function verifiedCompatible(a: EmbeddingEvidence, b: EmbeddingEvidence): boolean {
-  // Names, dimensions and approximate sample similarity are never compatibility evidence.
-  return (
-    !!a.immutableRevision &&
-    !!b.immutableRevision &&
-    !!a.weightsDigest &&
-    /^[a-f0-9]{64}$/i.test(a.weightsDigest) &&
-    a.weightsDigest === b.weightsDigest &&
-    a.immutableRevision === b.immutableRevision &&
-    a.dimensions === b.dimensions &&
-    a.preprocessingRevision === b.preprocessingRevision &&
-    a.queryPrefix === b.queryPrefix &&
-    a.documentPrefix === b.documentPrefix &&
-    a.normalization === b.normalization
-  );
+export function verifiedCompatible(_a: EmbeddingEvidence, _b: EmbeddingEvidence): boolean {
+  // These fields are administrator supplied claims, without trusted weights provenance.
+  // Even matching digests cannot establish that two endpoints serve the same weights.
+  return false;
 }
 export function validateVector(vector: number[], dimensions: number) {
   if (vector.length !== dimensions || vector.some((value) => !Number.isFinite(value)))

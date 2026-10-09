@@ -2,6 +2,16 @@ import { defineTable } from 'convex/server';
 import { v } from 'convex/values';
 
 export const federationTables = {
+  federationTranscriptJobs: defineTable({
+    transcriptId: v.string(), visitId: v.string(), worldId: v.id('worlds'),
+    conversationId: v.string(), federationConversationId: v.string(), endedAt: v.number(),
+    participants: v.any(), cursor: v.optional(v.string()), pageNumber: v.number(),
+    state: v.string(), lastError: v.optional(v.string()), createdAt: v.number(),
+    nextRetryAt: v.optional(v.number()), attempts: v.optional(v.number()),
+    pendingMessages: v.optional(v.array(v.any())), pageReadDone: v.optional(v.boolean()),
+    pendingMessageId: v.optional(v.string()), pendingFinalPage: v.optional(v.boolean()),
+  }).index('transcript', ['transcriptId']).index('state', ['state', 'createdAt'])
+    .index('retry', ['state', 'nextRetryAt']).index('pendingMessage', ['pendingMessageId']),
   federationIdentity: defineTable({
     townId: v.string(), townName: v.string(), publicKey: v.string(), privateKeyEncrypted: v.string(),
     fingerprint: v.string(), deploymentInstanceId: v.string(), deploymentEpoch: v.number(),

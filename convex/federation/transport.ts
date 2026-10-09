@@ -12,9 +12,16 @@ import { dispatchRuntimeMessage } from './runtime';
 
 const CLEANUP_TYPES = new Set(['VISIT_RETURN', 'VISIT_CLEANED', 'SESSION_RESYNC', 'STREAM_NACK']);
 const VISIT_TYPES = new Set(['VISIT_RESERVE', 'VISIT_RESERVED', 'VISIT_CONFIRM', 'VISIT_ACTIVE', 'VISIT_REJECT', 'VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_RENEW']);
-const RUNTIME_TYPES = new Set(['OBSERVATION', 'DECISION', 'ACTION_RESULT']);
+const RUNTIME_TYPES = new Set(['OBSERVATION', 'DECISION', 'ACTION_RESULT', 'CONVERSATION_ENDED']);
 const CONTROL_TYPES = new Set(['STREAM_NACK', 'SESSION_RESYNC']);
 const now = () => Date.now();
+// Historical pages retain their message/nonce/sequence and immutable contents
+// across transport TTL renewal. They cannot authorize any new engine action.
+export async function messageDigest(message: FederationMessage) {
+  if (message.type !== 'CONVERSATION_ENDED') return digest(message);
+  const { sentAt, expiresAt, ...immutable } = message;
+  return digest(immutable);
+}
 
 async function verifiedContext(ctx: any, packet: SignedPacket<FederationMessage>) {
   validateEnvelope(packet?.body);
@@ -224,7 +231,7 @@ export const drainStream = internalMutation({ args: { streamKey: v.string() }, h
 } });
 export const receiveMessage = internalAction({ args: { packet: v.any() }, handler: async (ctx, { packet }) => {
   const data = await verifiedContext(ctx, packet);
-  const result = await ctx.runMutation(mutationRef('transport/acceptMessage'), { message: packet.body, payloadDigest: await digest(packet.body) });
+  const result = await ctx.runMutation(mutationRef('transport/acceptMessage'), { message: packet.body, payloadDigest: await messageDigest(packet.body) });
   const body = { protocol: PROTOCOL, type: 'MESSAGE_ACK', fromTownId: data.identity.townId, toTownId: data.peer.townId,
     senderDeploymentInstanceId: data.identity.deploymentInstanceId, senderDeploymentEpoch: data.identity.deploymentEpoch,
     expectedRecipientDeploymentEpoch: data.peer.deploymentEpoch, credentialId: data.peer.credentialId, expiresAt: now() + 30_000, ...result };
@@ -244,6 +251,11 @@ export const markDelivery = internalMutation({ args: { messageId: v.string(), st
     const key = streamKey(item.envelope, item.toTownId);
     const cursor = await ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', key)).unique();
     if (cursor) await ctx.db.patch(cursor._id, { lastAckedSequence: Math.max(cursor.lastAckedSequence, item.envelope.sequence) });
+  }
+  if (args.status === 'EXPIRED' && item.envelope.type === 'CONVERSATION_ENDED') {
+    await ctx.db.patch(item._id, { envelope: { ...item.envelope, sentAt: now(), expiresAt: now() + 10 * 60_000 },
+      ackedAt: undefined, nextRetryAt: now(), lastError: undefined });
+    return;
   }
   if (['EXPIRED', 'STALE_SEQUENCE'].includes(args.status)) {
     const ledger = await visit(ctx, item.envelope.visitId);

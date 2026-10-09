@@ -12,6 +12,7 @@ import { actionRef } from './refs';
 import { makeFunctionReference } from 'convex/server';
 import { bindResident } from '../models/profiles';
 import { recordConfirmedObservation } from '../agent/travelMemory';
+import { receiveConversationEnded } from '../agent/travelTranscript';
 import { homeFrozen, hostCreated, hostRemoved, homeResumed } from './ledger';
 import type { InputNames, InputArgs } from '../aiTown/inputs';
 
@@ -412,7 +413,15 @@ export async function collectObservations(ctx: MutationCtx, worldId: Id<'worlds'
 
 export async function dispatchRuntimeMessage(ctx: MutationCtx, message: FederationMessage) {
   const ledger = await visit(ctx, message.visitId!);
-  if (!ledger || ledger.state !== 'ACTIVE' || ledger.leaseExpiry <= Date.now())
+  if (!ledger) throw new Error('VISIT_NOT_FOUND');
+  // Final committed history has no authority to create a body or execute actions.
+  // Its immutable visit/deployment fences were checked by transport, including
+  // when delivery catches up after the resident has safely returned Home.
+  if (message.type === 'CONVERSATION_ENDED') {
+    if (ledger.role !== 'home') throw new Error('INVALID_HISTORY_RECIPIENT');
+    return receiveConversationEnded(ctx, ledger, message.payload);
+  }
+  if (ledger.state !== 'ACTIVE' || ledger.leaseExpiry <= Date.now())
     throw new Error('VISIT_NOT_ACTIVE');
   const payload = message.payload;
   if (message.type === 'OBSERVATION') {

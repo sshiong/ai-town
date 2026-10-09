@@ -12,13 +12,16 @@ import schema from '../schema';
 
 // Derived vectors are deliberately omitted: canonical memories are the complete rebuilding source.
 export const largeTables = [
-  ...dataTables.filter((t) => t !== 'modelMemoryVectors'),
-  ...snapshotTables,
+  ...dataTables.filter((t) => !['modelMemoryVectors', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages'].includes(t)),
+  ...snapshotTables.filter((t) => t !== 'federationTranscriptJobs'),
   'federationIdentity',
   'federationPeers',
   'storagePolicies',
   'federationActionFacts',
   'federationEventFacts',
+  'homeTravelTranscripts',
+  'homeTravelTranscriptPages',
+  'federationTranscriptJobs',
 ] as const;
 export const oldTables = [
   ...largeTables.filter((t) => t !== 'federationIdentity'),
@@ -122,7 +125,7 @@ export async function validateManifest(manifest: LargeManifest, signature: strin
     bytes += entry.bytes;
   }
   if (bytes > MAX_ARCHIVE_BYTES) throw new Error('LARGE_BACKUP_ARCHIVE_BUDGET');
-  if (largeTables.some((table) => !tables.has(table)))
+  if (largeTables.some((table) => !['homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs'].includes(table) && !tables.has(table)))
     throw new Error('INCOMPLETE_LARGE_BACKUP_MANIFEST');
   validateSourceRow('federationIdentity', manifest.source);
   if (manifest.source.fingerprint !== `sha256:${await digest(manifest.source.publicKey)}`)

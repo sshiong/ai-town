@@ -38,6 +38,8 @@ type Group = { category: Category; records: number; bytes: number };
 const measuredTables: Array<[TableNames, Category]> = [
   ['memories', 'canonicalMemory'],
   ['messages', 'history'],
+  ['homeTravelTranscripts', 'history'],
+  ['homeTravelTranscriptPages', 'history'],
   ['archivedConversations', 'history'],
   ['participatedTogether', 'history'],
   ['visitLedger', 'history'],
@@ -51,6 +53,7 @@ const measuredTables: Array<[TableNames, Category]> = [
   ['federationInbox', 'operational'],
   ['federationOutbox', 'operational'],
   ['federationDecisionJobs', 'operational'],
+  ['federationTranscriptJobs', 'operational'],
   ['federationTurns', 'operational'],
   ['federationPendingActions', 'operational'],
   ['federationPresenceJobs', 'operational'],
@@ -405,6 +408,9 @@ async function pruneRecord(
         record.status === 'COMMITTED';
     }
   } else if (table === 'federationOutbox') {
+    const transcript = await ctx.db.query('federationTranscriptJobs')
+      .withIndex('pendingMessage', q => q.eq('pendingMessageId', record.messageId)).first();
+    if (transcript) return { deleted: false };
     // markDelivery also sets ackedAt when it stops retrying expired/stale
     // messages. Those outcomes are not a committed peer acknowledgement.
     eligible =
