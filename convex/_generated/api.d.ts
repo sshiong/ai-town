@@ -42,15 +42,21 @@ import type * as engine_historicalObject from "../engine/historicalObject.js";
 import type * as engine_schema from "../engine/schema.js";
 import type * as federation_admin from "../federation/admin.js";
 import type * as federation_auth from "../federation/auth.js";
+import type * as federation_autonomy from "../federation/autonomy.js";
+import type * as federation_autonomySchema from "../federation/autonomySchema.js";
 import type * as federation_backup from "../federation/backup.js";
 import type * as federation_backupHelpers from "../federation/backupHelpers.js";
 import type * as federation_backupLarge from "../federation/backupLarge.js";
 import type * as federation_backupLargeHelpers from "../federation/backupLargeHelpers.js";
 import type * as federation_backupLargeSchema from "../federation/backupLargeSchema.js";
+import type * as federation_backupResident from "../federation/backupResident.js";
 import type * as federation_backupSchema from "../federation/backupSchema.js";
 import type * as federation_decision from "../federation/decision.js";
 import type * as federation_direct from "../federation/direct.js";
+import type * as federation_endpoints from "../federation/endpoints.js";
+import type * as federation_endpointsSchema from "../federation/endpointsSchema.js";
 import type * as federation_engineInputs from "../federation/engineInputs.js";
+import type * as federation_identityConflict from "../federation/identityConflict.js";
 import type * as federation_identityRecovery from "../federation/identityRecovery.js";
 import type * as federation_identityRecoverySchema from "../federation/identityRecoverySchema.js";
 import type * as federation_ledger from "../federation/ledger.js";
@@ -64,6 +70,7 @@ import type * as federation_queue from "../federation/queue.js";
 import type * as federation_refs from "../federation/refs.js";
 import type * as federation_remoteTick from "../federation/remoteTick.js";
 import type * as federation_replyPolicy from "../federation/replyPolicy.js";
+import type * as federation_resourceMonitoring from "../federation/resourceMonitoring.js";
 import type * as federation_resources from "../federation/resources.js";
 import type * as federation_runtime from "../federation/runtime.js";
 import type * as federation_runtimeSchema from "../federation/runtimeSchema.js";
@@ -141,15 +148,21 @@ import type * as world from "../world.js";
 "engine/schema": typeof engine_schema,
 "federation/admin": typeof federation_admin,
 "federation/auth": typeof federation_auth,
+"federation/autonomy": typeof federation_autonomy,
+"federation/autonomySchema": typeof federation_autonomySchema,
 "federation/backup": typeof federation_backup,
 "federation/backupHelpers": typeof federation_backupHelpers,
 "federation/backupLarge": typeof federation_backupLarge,
 "federation/backupLargeHelpers": typeof federation_backupLargeHelpers,
 "federation/backupLargeSchema": typeof federation_backupLargeSchema,
+"federation/backupResident": typeof federation_backupResident,
 "federation/backupSchema": typeof federation_backupSchema,
 "federation/decision": typeof federation_decision,
 "federation/direct": typeof federation_direct,
+"federation/endpoints": typeof federation_endpoints,
+"federation/endpointsSchema": typeof federation_endpointsSchema,
 "federation/engineInputs": typeof federation_engineInputs,
+"federation/identityConflict": typeof federation_identityConflict,
 "federation/identityRecovery": typeof federation_identityRecovery,
 "federation/identityRecoverySchema": typeof federation_identityRecoverySchema,
 "federation/ledger": typeof federation_ledger,
@@ -163,6 +176,7 @@ import type * as world from "../world.js";
 "federation/refs": typeof federation_refs,
 "federation/remoteTick": typeof federation_remoteTick,
 "federation/replyPolicy": typeof federation_replyPolicy,
+"federation/resourceMonitoring": typeof federation_resourceMonitoring,
 "federation/resources": typeof federation_resources,
 "federation/runtime": typeof federation_runtime,
 "federation/runtimeSchema": typeof federation_runtimeSchema,

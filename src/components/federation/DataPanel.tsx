@@ -22,7 +22,7 @@ type ImportMode = 'restore' | 'migrate' | 'clone' | 'merge';
 const modes: { value: ImportMode; label: string; description: string }[] = [
   {
     value: 'restore',
-    label: 'Restore this town',
+    label: 'Restore this town or original Home resident',
     description:
       'Requires this town identity, matching fingerprint and a stopped source deployment. Existing runtime authorizations are never restored.',
   },
@@ -62,6 +62,8 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
   const [sourceStopped, setSourceStopped] = useState(false);
   const [targetEndpoint, setTargetEndpoint] = useState('');
   const [acknowledged, setAcknowledged] = useState(false);
+  const [operator, setOperator] = useState('');
+  const [reason, setReason] = useState('');
   const [report, setReport] =
     useState<FunctionReturnType<typeof api.federation.backup.preflight>>();
   const [result, setResult] =
@@ -74,11 +76,19 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
     !world || world.status === 'stoppedByDeveloper' || world.status === 'inactive';
   const args = {
     adminToken,
-    bundle,
+    bundleJson: bundle === undefined ? undefined : JSON.stringify(bundle),
     mode,
-    targetWorldId: mode === 'merge' ? world?.worldId : undefined,
+    targetWorldId: mode === 'merge' || mode === 'restore' ? world?.worldId : undefined,
     sourceStopped,
     targetEndpoint: mode === 'clone' ? targetEndpoint.trim() : undefined,
+    residentRestore: report?.residentRestorePlan
+      ? {
+          expectedTargetDigest: report.residentRestorePlan.targetDigest,
+          confirmOverwrite: acknowledged,
+          operator: operator.trim(),
+          reason: reason.trim(),
+        }
+      : undefined,
   };
   function invalidate() {
     setReport(undefined);
@@ -251,7 +261,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
         </Field>
       </div>
       <p className="admin-muted">{modes.find((item) => item.value === mode)?.description}</p>
-      {mode === 'merge' && (
+      {(mode === 'merge' || mode === 'restore') && (
         <p>
           Target world: <code>{world?.worldId ?? 'No default world exists'}</code>
         </p>
@@ -339,11 +349,58 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               <p key={i}>{warning}</p>
             ))}
             <pre className="admin-report">{JSON.stringify(report.counts, null, 2)}</pre>
+            {report.residentRestorePlan && (
+              <>
+                <p>
+                  Restore resident: <code>{report.residentRestorePlan.agentGlobalId}</code>
+                </p>
+                <p>
+                  Fixed Chat model: {report.residentRestorePlan.model.model} · credential:{' '}
+                  {report.residentRestorePlan.model.credentialConfigured
+                    ? 'configured'
+                    : 'requires configuration'}
+                </p>
+                <p>
+                  Archived memories: {report.residentRestorePlan.memoryCount}. Newer memories and
+                  other residents are retained. The server stores a target snapshot before applying
+                  the restore.
+                </p>
+                <p>
+                  Target confirmation: <code>{report.residentRestorePlan.targetDigest}</code>
+                </p>
+              </>
+            )}
           </div>
           <p className="admin-muted">
             Vectors require rebuilding in the target's verified space. Imported travel is
             historical; no visitor lease or remote task is reactivated.
           </p>
+          {report.residentRestorePlan && (
+            <div className="admin-form">
+              <Field label="Restore operator">
+                <input
+                  value={operator}
+                  maxLength={120}
+                  disabled={!!task.pending}
+                  onChange={(event) => {
+                    setOperator(event.target.value);
+                    setAcknowledged(false);
+                  }}
+                />
+              </Field>
+              <Field label="Restore reason">
+                <input
+                  value={reason}
+                  maxLength={1000}
+                  disabled={!!task.pending}
+                  onChange={(event) => {
+                    setReason(event.target.value);
+                    setAcknowledged(false);
+                  }}
+                />
+              </Field>
+            </div>
+          )}
           <label className="admin-check">
             <input
               type="checkbox"
@@ -351,7 +408,9 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               disabled={!!task.pending}
               onChange={(event) => setAcknowledged(event.target.checked)}
             />{' '}
-            I reviewed the scope, identity requirements and conflict warnings.
+            {report.residentRestorePlan
+              ? 'I reviewed this target snapshot and authorize overwriting this resident’s archived records, persona and fixed Chat binding.'
+              : 'I reviewed the scope, identity requirements and conflict warnings.'}
           </label>
           <div className="admin-toolbar">
             <AdminButton
@@ -360,6 +419,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                 !!task.pending ||
                 !report.valid ||
                 !acknowledged ||
+                (!!report.residentRestorePlan && (!operator.trim() || !reason.trim())) ||
                 !!result ||
                 (mode !== 'clone' && !targetPaused) ||
                 (requiresStoppedSource(mode) && !sourceStopped)
@@ -368,7 +428,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                 void task.run(
                   'Importing validated backup',
                   async () => {
-                    if (mode === 'restore' || mode === 'migrate')
+                    if ((mode === 'restore' || mode === 'migrate') && !report.residentRestorePlan)
                       downloadBundle(
                         await convex.action(api.federation.backup.exportTown, { adminToken }),
                         `ai-town-before-import-${Date.now()}.json`,

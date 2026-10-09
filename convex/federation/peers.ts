@@ -5,8 +5,11 @@ import { PROTOCOL, normalizeEndpoint } from './protocol';
 import { actionRef, mutationRef, queryRef } from './refs';
 import { directRequest, readRequest } from './direct';
 import { identity, peer, session } from './store';
+import { assertNoIdentityConflict, observeSignedIdentity } from './identityConflict';
 
 const pairById = async (ctx: any, requestId: string) => ctx.db.query('pairRequests').withIndex('requestId', (q: any) => q.eq('pairRequestId', requestId)).unique();
+const terminalPairStates = ['TRUSTED', 'REJECTED', 'AUTH_FAILED', 'CANCELLED', 'EXPIRED'];
+const clearedPairSecrets = { secretEncrypted: undefined, credentialEncrypted: undefined, ephemeralPrivateEncrypted: undefined };
 export const requestPair = action({ args: { adminToken: v.string(), endpoint: v.string(), pairingSecret: v.string() }, handler: async (ctx, args) => {
   requireAdmin(args.adminToken); validatePairingSecret(args.pairingSecret);
   const endpoint = normalizeEndpoint(args.endpoint); const data = await ctx.runQuery(queryRef('store/context'), {});
@@ -14,22 +17,24 @@ export const requestPair = action({ args: { adminToken: v.string(), endpoint: v.
   const local = data.identity;
   const discovery = await directRequest(endpoint, '/health');
   if (!await verifySignature(discovery.body, discovery.signature, discovery.body.publicKey) || discovery.body.protocol !== PROTOCOL || discovery.body.expiresAt < Date.now()) throw new Error('INVALID_DISCOVERY');
+  await observeSignedIdentity(ctx, discovery, 'HEALTH');
   if (discovery.body.townId === local.townId) throw new Error('TOWN_ID_CONFLICT');
   const keys = await ephemeralKeys(); const pairRequestId = crypto.randomUUID();
-  const request = { protocol: PROTOCOL, pairRequestId, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint, deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, targetTownId: discovery.body.townId, endpoint: local.endpoint, ephemeralPublicKey: keys.publicKey, nonce: crypto.randomUUID(), expiresAt: Date.now() + 10 * 60_000 };
+  const request = { protocol: PROTOCOL, pairRequestId, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint, deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, targetTownId: discovery.body.townId, endpoint: local.endpoint, ephemeralPublicKey: keys.publicKey, nonce: crypto.randomUUID(), sentAt: Date.now(), expiresAt: Date.now() + 10 * 60_000 };
   const packet = { body: request, signature: await sign(request, local.privateKeyEncrypted), proof: await mac({ direction: 'offer', request }, args.pairingSecret) };
-  await ctx.runMutation(mutationRef('peers/storeOutbound'), { request, endpoint, secretEncrypted: await sealSecret(args.pairingSecret), ephemeralPrivateEncrypted: keys.privateKeyEncrypted });
+  const targetIdentity = { townId: discovery.body.townId, townName: discovery.body.townName, publicKey: discovery.body.publicKey, fingerprint: discovery.body.fingerprint, protocol: discovery.body.protocol };
+  await ctx.runMutation(mutationRef('peers/storeOutbound'), { request, endpoint, targetIdentity, secretEncrypted: await sealSecret(args.pairingSecret), ephemeralPrivateEncrypted: keys.privateKeyEncrypted });
   const response = await directRequest(endpoint, '/pair', { operation: 'request', packet });
   if (!await verifySignature(response.body, response.signature, discovery.body.publicKey) || response.body.pairRequestId !== pairRequestId || response.body.townId !== discovery.body.townId) throw new Error('INVALID_PAIR_RESPONSE');
   return { pairRequestId, state: response.body.state as string };
 } });
-export const storeOutbound = internalMutation({ args: { request: v.any(), endpoint: v.string(), secretEncrypted: v.string(), ephemeralPrivateEncrypted: v.string() }, handler: async (ctx, args) => {
+export const storeOutbound = internalMutation({ args: { request: v.any(), endpoint: v.string(), targetIdentity: v.any(), secretEncrypted: v.string(), ephemeralPrivateEncrypted: v.string() }, handler: async (ctx, args) => {
   const local = await identity(ctx);
   if (!local?.enabled || local.mode !== 'ACTIVE' || args.request.deploymentInstanceId !== local.deploymentInstanceId || args.request.deploymentEpoch !== local.deploymentEpoch) throw new Error('DEPLOYMENT_NOT_ACTIVE');
   const existing = await pairById(ctx, args.request.pairRequestId); if (existing) return;
   const recent = await ctx.db.query('pairRequests').order('desc').take(100);
   if (recent.some((r) => r.endpoint === args.endpoint && r.direction === 'OUTBOUND' && r.requestedAt > Date.now() - 60_000)) throw new Error('PAIR_RATE_LIMITED');
-  await ctx.db.insert('pairRequests', { pairRequestId: args.request.pairRequestId, direction: 'OUTBOUND', state: 'PENDING_APPROVAL', request: args.request, endpoint: args.endpoint, secretEncrypted: args.secretEncrypted, ephemeralPrivateEncrypted: args.ephemeralPrivateEncrypted, requestedAt: Date.now(), expiresAt: args.request.expiresAt, attempts: 0 });
+  await ctx.db.insert('pairRequests', { pairRequestId: args.request.pairRequestId, direction: 'OUTBOUND', state: 'PENDING_APPROVAL', request: args.request, endpoint: args.endpoint, targetIdentity: args.targetIdentity, secretEncrypted: args.secretEncrypted, ephemeralPrivateEncrypted: args.ephemeralPrivateEncrypted, requestedAt: Date.now(), expiresAt: args.request.expiresAt, attempts: 0 });
 } });
 export const receiveRequest = internalMutation({ args: { request: v.any(), proof: v.string() }, handler: async (ctx, args) => {
   const local = await identity(ctx); const request = args.request;
@@ -57,7 +62,7 @@ export const approvePair = action({ args: { adminToken: v.string(), pairRequestI
     throw new Error('AUTH_FAILED');
   }
   const keys = await ephemeralKeys();
-  const response = { protocol: PROTOCOL, pairRequestId: args.pairRequestId, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint, deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, endpoint: local.endpoint, ephemeralPublicKey: keys.publicKey, nonce: crypto.randomUUID(), expiresAt: pair.expiresAt };
+  const response = { protocol: PROTOCOL, pairRequestId: args.pairRequestId, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint, deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, endpoint: local.endpoint, ephemeralPublicKey: keys.publicKey, nonce: crypto.randomUUID(), sentAt: Date.now(), expiresAt: pair.expiresAt };
   const transcript = { request, response };
   const credential = await deriveCredential(keys.privateKeyEncrypted, request.ephemeralPublicKey, args.pairingSecret, transcript);
   const packet = { body: response, signature: await sign(response, local.privateKeyEncrypted), proof: await mac({ direction: 'response', transcript }, args.pairingSecret) };
@@ -69,46 +74,102 @@ export const storeApproval = internalMutation({ args: { pairRequestId: v.string(
   if (!local?.enabled || local.mode !== 'ACTIVE') throw new Error('DEPLOYMENT_NOT_ACTIVE');
   const pair = await pairById(ctx, args.pairRequestId);
   if (!pair || pair.direction !== 'INBOUND' || pair.state !== 'PENDING_APPROVAL' || pair.expiresAt <= Date.now()) throw new Error('PAIR_NOT_PENDING');
-  await ctx.db.patch(pair._id, { state: 'PENDING_BOTH_CONFIRM', response: args.response, credentialEncrypted: args.credentialEncrypted });
+  await ctx.db.patch(pair._id, { state: 'PENDING_BOTH_CONFIRM', response: args.response, credentialEncrypted: args.credentialEncrypted, readAt: Date.now() });
 } });
 export const authFailure = internalMutation({ args: { pairRequestId: v.string() }, handler: async (ctx, args) => {
-  const pair = await pairById(ctx, args.pairRequestId); if (pair && pair.state !== 'TRUSTED') await ctx.db.patch(pair._id, { state: 'AUTH_FAILED', attempts: pair.attempts + 1, credentialEncrypted: undefined, secretEncrypted: undefined, ephemeralPrivateEncrypted: undefined });
+  const pair = await pairById(ctx, args.pairRequestId); if (pair && ['PENDING_APPROVAL', 'PENDING_BOTH_CONFIRM'].includes(pair.state)) await ctx.db.patch(pair._id, { state: 'AUTH_FAILED', attempts: pair.attempts + 1, readAt: Date.now(), ...clearedPairSecrets });
 } });
 export const rejectPair = mutation({ args: { adminToken: v.string(), pairRequestId: v.string() }, handler: async (ctx, args) => {
   requireAdmin(args.adminToken); const pair = await pairById(ctx, args.pairRequestId);
   if (!pair || pair.direction !== 'INBOUND' || pair.state !== 'PENDING_APPROVAL') throw new Error('PAIR_NOT_PENDING');
-  await ctx.db.patch(pair._id, { state: 'REJECTED', secretEncrypted: undefined, credentialEncrypted: undefined });
+  await ctx.db.patch(pair._id, { state: 'REJECTED', readAt: Date.now(), ...clearedPairSecrets });
+} });
+export const markPairRead = mutation({ args: { adminToken: v.string(), pairRequestId: v.string() }, handler: async (ctx, args) => {
+  requireAdmin(args.adminToken); const pair = await pairById(ctx, args.pairRequestId);
+  if (!pair || pair.direction !== 'INBOUND') throw new Error('PAIR_NOT_FOUND');
+  if (pair.readAt === undefined) await ctx.db.patch(pair._id, { readAt: Date.now() });
+} });
+
+// Once an outbound confirmation can be on the wire, cancellation is no longer
+// safe: the responder may already have committed trust. Continue/reconcile it.
+export const beginCancellation = internalMutation({ args: { pairRequestId: v.string() }, handler: async (ctx, args) => {
+  const pair = await pairById(ctx, args.pairRequestId);
+  if (!pair) throw new Error('PAIR_NOT_FOUND');
+  if (pair.state === 'CANCELLED' || pair.direction === 'OUTBOUND' && pair.state === 'CANCEL_PENDING') return;
+  if (pair.direction === 'OUTBOUND' ? pair.state !== 'PENDING_APPROVAL' : !['PENDING_APPROVAL', 'PENDING_BOTH_CONFIRM', 'AUTH_FAILED'].includes(pair.state)) throw new Error('PAIR_NOT_CANCELLABLE');
+  await ctx.db.patch(pair._id, { state: pair.direction === 'OUTBOUND' ? 'CANCEL_PENDING' : 'CANCELLED', readAt: Date.now(), ...clearedPairSecrets });
+} });
+export const cancelPair = action({ args: { adminToken: v.string(), pairRequestId: v.string() }, handler: async (ctx, args) => {
+  requireAdmin(args.adminToken);
+  await ctx.runMutation(mutationRef('peers/beginCancellation'), { pairRequestId: args.pairRequestId });
+  const { pair, identity: local } = await ctx.runQuery(queryRef('store/context'), { pairRequestId: args.pairRequestId });
+  if (pair.state === 'CANCELLED') return { state: 'CANCELLED' };
+  // After the shared request deadline neither side may complete confirmation.
+  // An unreachable peer therefore cannot leave local cancellation open forever.
+  if (pair.expiresAt <= Date.now()) {
+    await ctx.runMutation(mutationRef('peers/finishCancellation'), { pairRequestId: pair.pairRequestId, state: 'CANCELLED' });
+    return { state: 'CANCELLED' };
+  }
+  if (!local?.enabled || local.mode !== 'ACTIVE') throw new Error('DEPLOYMENT_NOT_ACTIVE');
+  const body = { pairRequestId: pair.pairRequestId, townId: local.townId, nonce: crypto.randomUUID(), expiresAt: Date.now() + 30_000 };
+  const result = await directRequest(pair.endpoint, '/pair', { operation: 'cancel', body, signature: await sign(body, local.privateKeyEncrypted) });
+  if (!result.body || !await verifySignature(result.body, result.signature, pair.targetIdentity?.publicKey ?? result.body.publicKey) || result.body.pairRequestId !== pair.pairRequestId || result.body.townId !== pair.request.targetTownId || result.body.nonce !== body.nonce || result.body.expiresAt <= Date.now() || !['CANCELLED', 'REJECTED', 'AUTH_FAILED', 'EXPIRED'].includes(result.body.state)) throw new Error('INVALID_PAIR_CANCEL_RESPONSE');
+  await ctx.runMutation(mutationRef('peers/finishCancellation'), { pairRequestId: pair.pairRequestId, state: result.body.state });
+  return { state: result.body.state as string };
+} });
+export const finishCancellation = internalMutation({ args: { pairRequestId: v.string(), state: v.string() }, handler: async (ctx, args) => {
+  const pair = await pairById(ctx, args.pairRequestId);
+  if (pair?.state === args.state && ['CANCELLED', 'REJECTED', 'AUTH_FAILED', 'EXPIRED'].includes(args.state)) return;
+  if (!pair || pair.state !== 'CANCEL_PENDING' || !['CANCELLED', 'REJECTED', 'AUTH_FAILED', 'EXPIRED'].includes(args.state)) throw new Error('INVALID_PAIR_STATE');
+  await ctx.db.patch(pair._id, { state: args.state, ...clearedPairSecrets });
+} });
+export const receiveCancellation = internalMutation({ args: { pairRequestId: v.string() }, handler: async (ctx, args) => {
+  const pair = await pairById(ctx, args.pairRequestId);
+  if (!pair || pair.direction !== 'INBOUND') throw new Error('PAIR_NOT_FOUND');
+  if (['CANCELLED', 'REJECTED', 'AUTH_FAILED', 'EXPIRED'].includes(pair.state)) return { state: pair.state };
+  if (!['PENDING_APPROVAL', 'PENDING_BOTH_CONFIRM'].includes(pair.state)) throw new Error('PAIR_NOT_CANCELLABLE');
+  await ctx.db.patch(pair._id, { state: 'CANCELLED', ...clearedPairSecrets });
+  return { state: 'CANCELLED' };
+} });
+export const beginConfirmation = internalMutation({ args: { pairRequestId: v.string() }, handler: async (ctx, args) => {
+  const pair = await pairById(ctx, args.pairRequestId);
+  if (!pair || pair.direction !== 'OUTBOUND' || !['PENDING_APPROVAL', 'PENDING_BOTH_CONFIRM'].includes(pair.state) || pair.expiresAt <= Date.now()) throw new Error('PAIR_NOT_CONFIRMABLE');
+  await ctx.db.patch(pair._id, { state: 'PENDING_BOTH_CONFIRM' });
 } });
 export const continuePair = action({ args: { adminToken: v.string(), pairRequestId: v.string() }, handler: async (ctx, args) => {
   requireAdmin(args.adminToken);
   const data = await ctx.runQuery(queryRef('store/context'), { pairRequestId: args.pairRequestId });
   const pair = data.pair; const local = data.identity;
-  if (!pair || pair.direction !== 'OUTBOUND' || !local?.enabled || local.mode !== 'ACTIVE' || pair.expiresAt <= Date.now() || !pair.secretEncrypted || !pair.ephemeralPrivateEncrypted) throw new Error('PAIR_NOT_PENDING');
+  if (!pair || pair.direction !== 'OUTBOUND' || !['PENDING_APPROVAL', 'PENDING_BOTH_CONFIRM'].includes(pair.state) || !local?.enabled || local.mode !== 'ACTIVE' || pair.expiresAt <= Date.now() || !pair.secretEncrypted || !pair.ephemeralPrivateEncrypted) throw new Error('PAIR_NOT_PENDING');
   const query = { pairRequestId: pair.pairRequestId, townId: local.townId, nonce: crypto.randomUUID(), expiresAt: Date.now() + 30_000 };
   const status = await directRequest(pair.endpoint, '/pair', { operation: 'status', body: query, signature: await sign(query, local.privateKeyEncrypted) });
-  if (!status.body || !await verifySignature(status.body, status.signature, status.body.publicKey) || status.body.pairRequestId !== pair.pairRequestId || status.body.townId !== pair.request.targetTownId) throw new Error('INVALID_PAIR_STATUS');
+  if (!status.body || !await verifySignature(status.body, status.signature, pair.targetIdentity?.publicKey ?? status.body.publicKey) || status.body.pairRequestId !== pair.pairRequestId || status.body.townId !== pair.request.targetTownId || status.body.nonce !== query.nonce || status.body.expiresAt <= Date.now()) throw new Error('INVALID_PAIR_STATUS');
   if (status.body.state !== 'PENDING_BOTH_CONFIRM' && status.body.state !== 'TRUSTED') {
     await ctx.runMutation(mutationRef('peers/updatePairState'), { pairRequestId: pair.pairRequestId, state: status.body.state });
     return { pairRequestId: pair.pairRequestId, state: status.body.state };
   }
   const response = status.body.response;
-  if (!response || response.body.townId !== pair.request.targetTownId || response.body.expiresAt < Date.now() || !await verifySignature(response.body, response.signature, response.body.publicKey)) throw new Error('AUTH_FAILED');
+  if (!response || response.body.townId !== pair.request.targetTownId || response.body.expiresAt < Date.now() || !await verifySignature(response.body, response.signature, pair.targetIdentity?.publicKey ?? response.body.publicKey)) throw new Error('AUTH_FAILED');
+  await observeSignedIdentity(ctx, response, 'PAIR');
   const transcript = { request: pair.request, response: response.body };
   const secret = await openSecret(pair.secretEncrypted);
   if (!await verifyMac({ direction: 'response', transcript }, response.proof, secret)) {
     await ctx.runMutation(mutationRef('peers/authFailure'), { pairRequestId: pair.pairRequestId }); throw new Error('AUTH_FAILED');
   }
   const credential = await deriveCredential(pair.ephemeralPrivateEncrypted, response.body.ephemeralPublicKey, secret, transcript);
+  await ctx.runMutation(mutationRef('peers/beginConfirmation'), { pairRequestId: pair.pairRequestId });
   const confirmation = { pairRequestId: pair.pairRequestId, townId: local.townId, transcriptDigest: await digest(transcript), direction: 'initiator-confirm', expiresAt: pair.expiresAt };
   const result = await directRequest(pair.endpoint, '/pair', { operation: 'confirm', body: confirmation, signature: await sign(confirmation, local.privateKeyEncrypted), proof: await mac(confirmation, credential) });
-  if (!await verifySignature(result.body, result.signature, response.body.publicKey) || !await verifyMac(result.body, result.proof, credential) || result.body.pairRequestId !== pair.pairRequestId || result.body.direction !== 'responder-confirm' || result.body.transcriptDigest !== confirmation.transcriptDigest) throw new Error('AUTH_FAILED');
+  if (!await verifySignature(result.body, result.signature, response.body.publicKey) || !await verifyMac(result.body, result.proof, credential) || result.body.pairRequestId !== pair.pairRequestId || result.body.townId !== pair.request.targetTownId || result.body.expiresAt <= Date.now() || result.body.direction !== 'responder-confirm' || result.body.transcriptDigest !== confirmation.transcriptDigest) throw new Error('AUTH_FAILED');
   await ctx.runMutation(mutationRef('peers/finalizePair'), { pairRequestId: pair.pairRequestId, remote: response.body, credentialEncrypted: await sealSecret(credential) });
   return { pairRequestId: pair.pairRequestId, state: 'TRUSTED' };
 } });
 export const updatePairState = internalMutation({ args: { pairRequestId: v.string(), state: v.string() }, handler: async (ctx, args) => {
-  const pair = await pairById(ctx, args.pairRequestId); if (!pair || pair.state === 'TRUSTED') return;
-  if (!['PENDING_APPROVAL', 'REJECTED', 'EXPIRED', 'AUTH_FAILED'].includes(args.state)) throw new Error('INVALID_PAIR_STATE');
-  await ctx.db.patch(pair._id, { state: args.state });
+  const pair = await pairById(ctx, args.pairRequestId); if (!pair || terminalPairStates.includes(pair.state)) return;
+  if (!['PENDING_APPROVAL', 'REJECTED', 'EXPIRED', 'AUTH_FAILED', 'CANCELLED'].includes(args.state)) throw new Error('INVALID_PAIR_STATE');
+  if (pair.state === 'CANCEL_PENDING' && args.state !== 'CANCELLED') return;
+  if (pair.state === 'PENDING_BOTH_CONFIRM' && args.state === 'PENDING_APPROVAL') return;
+  await ctx.db.patch(pair._id, { state: args.state, ...(terminalPairStates.includes(args.state) ? clearedPairSecrets : {}) });
 } });
 export const finalizePair = internalMutation({ args: { pairRequestId: v.string(), remote: v.any(), credentialEncrypted: v.string() }, handler: async (ctx, args) => {
   const pair = await pairById(ctx, args.pairRequestId); const local = await identity(ctx);
@@ -126,22 +187,20 @@ export const finalizePair = internalMutation({ args: { pairRequestId: v.string()
 } });
 export const setPolicy = mutation({ args: { adminToken: v.string(), peerTownId: v.string(), inboundVisitsAllowed: v.boolean(), outboundVisitsAllowed: v.boolean(), trustState: v.union(v.literal('TRUSTED'), v.literal('PAUSED'), v.literal('REVOKED')) }, handler: async (ctx, args) => {
   requireAdmin(args.adminToken); const remote = await peer(ctx, args.peerTownId); if (!remote) throw new Error('PEER_NOT_FOUND');
+  if (args.trustState === 'TRUSTED' || args.inboundVisitsAllowed || args.outboundVisitsAllowed)
+    await assertNoIdentityConflict(ctx, args.peerTownId);
   if (remote.trustState === 'REVOKED' && args.trustState === 'TRUSTED') throw new Error('REPAIR_REQUIRED');
   await ctx.db.patch(remote._id, { inboundVisitsAllowed: args.inboundVisitsAllowed, outboundVisitsAllowed: args.outboundVisitsAllowed, trustState: args.trustState });
   const transport = await session(ctx, remote.townId); if (transport) await ctx.db.patch(transport._id, { channelState: 'TRANSPORT_TESTING', inboundVerifiedAt: undefined, outboundVerifiedAt: undefined });
 } });
-export const updateEndpoint = action({ args: { adminToken: v.string(), peerTownId: v.string(), endpoint: v.string() }, handler: async (ctx, args) => {
-  requireAdmin(args.adminToken); const data = await ctx.runQuery(queryRef('store/context'), { peerTownId: args.peerTownId }); if (!data.peer) throw new Error('PEER_NOT_FOUND');
-  const endpoint = normalizeEndpoint(args.endpoint); const discovery = await directRequest(endpoint, '/health');
-  if (!await verifySignature(discovery.body, discovery.signature, data.peer.publicKey) || discovery.body.townId !== data.peer.townId || discovery.body.deploymentEpoch !== data.peer.deploymentEpoch || discovery.body.deploymentInstanceId !== data.peer.deploymentInstanceId || discovery.body.expiresAt <= Date.now()) throw new Error('IDENTITY_OR_DEPLOYMENT_CONFLICT');
-  await ctx.runMutation(mutationRef('peers/saveEndpoint'), { peerTownId: args.peerTownId, endpoint });
-  await ctx.runAction(actionRef('transport/probeInternal'), { peerTownId: args.peerTownId });
-} });
-export const saveEndpoint = internalMutation({ args: { peerTownId: v.string(), endpoint: v.string() }, handler: async (ctx, args) => {
-  const remote = await peer(ctx, args.peerTownId); if (!remote) throw new Error('PEER_NOT_FOUND');
-  await ctx.db.patch(remote._id, { endpoint: normalizeEndpoint(args.endpoint) });
-  const transport = await session(ctx, args.peerTownId); if (transport) await ctx.db.patch(transport._id, { channelState: 'TRANSPORT_TESTING', outboundVerifiedAt: undefined, inboundVerifiedAt: undefined });
-} });
+export const updateEndpoint = action({
+  args: { adminToken: v.string(), peerTownId: v.string(), endpoint: v.string(), operator: v.optional(v.string()), reason: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    return ctx.runAction(actionRef('endpoints/verifyPeerEndpoint'), { ...args,
+      operator: args.operator ?? 'Local administrator', reason: args.reason ?? 'Administrator verified a replacement peer address' });
+  },
+});
 
 export const consumePairNonce = internalMutation({ args: { pairRequestId: v.string(), townId: v.string(), nonce: v.string(), expiresAt: v.number() }, handler: async (ctx, args) => {
   const pair = await pairById(ctx, args.pairRequestId);
@@ -159,7 +218,7 @@ export function registerPairingRoutes(http: import('convex/server').HttpRouter) 
     const data = await ctx.runQuery(queryRef('store/context'), {}), local = data.identity;
     if (!local || local.mode !== 'ACTIVE') return new Response(JSON.stringify({ error: 'FEDERATION_UNAVAILABLE' }), { status: 503 });
     const body = { protocol: PROTOCOL, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint,
-      deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, endpoint: local.endpoint, expiresAt: Date.now() + 30_000 };
+      deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, endpoint: local.endpoint, sentAt: Date.now(), expiresAt: Date.now() + 30_000 };
     return jsonResponse({ body, signature: await sign(body, local.privateKeyEncrypted) });
   }) });
   http.route({ path: '/federation/v1/pair', method: 'POST', handler: httpAction(async (ctx, request) => {
@@ -168,18 +227,20 @@ export function registerPairingRoutes(http: import('convex/server').HttpRouter) 
       if (input.operation === 'request') {
         const packet = input.packet, body = packet?.body;
         if (!body || typeof body.publicKey !== 'string' || body.fingerprint !== `sha256:${await digest(body.publicKey)}` || !await verifySignature(body, packet.signature, body.publicKey) || typeof packet.proof !== 'string') throw new Error('INVALID_PAIR_SIGNATURE');
+        await observeSignedIdentity(ctx, packet, 'PAIR');
         const result = await ctx.runMutation(mutationRef('peers/receiveRequest'), { request: body, proof: packet.proof });
         const { identity: local } = await ctx.runQuery(queryRef('store/context'), {});
         const response = { protocol: PROTOCOL, pairRequestId: body.pairRequestId, townId: local.townId, state: result.state, expiresAt: Date.now() + 30_000 };
         return jsonResponse({ body: response, signature: await sign(response, local.privateKeyEncrypted) });
       }
-      if (!['status', 'confirm'].includes(input.operation) || !input.body || typeof input.body.pairRequestId !== 'string') throw new Error('INVALID_PAIR_OPERATION');
+      if (!['status', 'confirm', 'cancel'].includes(input.operation) || !input.body || typeof input.body.pairRequestId !== 'string') throw new Error('INVALID_PAIR_OPERATION');
       const body = input.body, data = await ctx.runQuery(queryRef('store/context'), { pairRequestId: body.pairRequestId });
       const pair = data.pair, local = data.identity;
       if (!pair || !local || pair.direction !== 'INBOUND' || body.townId !== pair.request.townId || !await verifySignature(body, input.signature, pair.request.publicKey) || body.expiresAt <= Date.now() || body.expiresAt > Date.now() + 10 * 60_000) throw new Error('INVALID_PAIR_SIGNATURE');
-      if (input.operation === 'status') {
+      if (input.operation === 'status' || input.operation === 'cancel') {
         await ctx.runMutation(mutationRef('peers/consumePairNonce'), { pairRequestId: pair.pairRequestId, townId: body.townId, nonce: body.nonce, expiresAt: body.expiresAt });
-        const response = { protocol: PROTOCOL, pairRequestId: pair.pairRequestId, townId: local.townId, publicKey: local.publicKey, state: pair.expiresAt <= Date.now() && !['TRUSTED', 'REJECTED', 'AUTH_FAILED'].includes(pair.state) ? 'EXPIRED' : pair.state, response: pair.response ?? null, expiresAt: Date.now() + 30_000, nonce: body.nonce };
+        const cancellation = input.operation === 'cancel' ? await ctx.runMutation(mutationRef('peers/receiveCancellation'), { pairRequestId: pair.pairRequestId }) : null;
+        const response = { protocol: PROTOCOL, pairRequestId: pair.pairRequestId, townId: local.townId, publicKey: local.publicKey, state: cancellation?.state ?? (pair.expiresAt <= Date.now() && !terminalPairStates.includes(pair.state) ? 'EXPIRED' : pair.state), response: input.operation === 'status' && ['PENDING_BOTH_CONFIRM', 'TRUSTED'].includes(pair.state) && pair.expiresAt > Date.now() ? pair.response ?? null : null, expiresAt: Date.now() + 30_000, nonce: body.nonce };
         return jsonResponse({ body: response, signature: await sign(response, local.privateKeyEncrypted) });
       }
       if (!['PENDING_BOTH_CONFIRM', 'TRUSTED'].includes(pair.state) || pair.expiresAt <= Date.now() || !pair.response) throw new Error('PAIR_NOT_CONFIRMABLE');

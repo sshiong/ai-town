@@ -50,6 +50,12 @@ export function adminErrorSummary(message: string) {
     CHAT_REQUEST_DEADLINE: 'The model request exceeded its overall deadline.',
     DECISION_QUEUE_FULL: 'The pending visitor decision limit has been reached.',
     ADMIN_UNAUTHORIZED: "Administrator access was rejected. Check this deployment's admin token.",
+    DRAIN_TARGET_WORK_BEFORE_RESIDENT_RESTORE:
+      'Wait for model requests and resident operations to finish, and drain the target input queue before restoring this resident.',
+    RESIDENT_RESTORE_TARGET_CHANGED:
+      'The target changed after preflight. Run preflight again and review the new snapshot before confirming.',
+    RESIDENT_RESTORE_CONFIRMATION_REQUIRED:
+      'Review the resident snapshot, enter an operator and reason, and explicitly authorize this restore.',
     STOP_TARGET_ENGINE_FIRST: 'Pause the target simulation before running import preflight.',
     END_VISITS_BEFORE_STOPPING:
       'End active visits and wait for cleanup before pausing the simulation.',

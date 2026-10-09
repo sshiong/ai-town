@@ -5,12 +5,14 @@ import { aiTownTables } from './aiTown/schema';
 import { conversationId, playerId } from './aiTown/ids';
 import { engineTables } from './engine/schema';
 import { federationTables } from './federation/schema';
+import { autonomyTables } from './federation/autonomySchema';
 import { runtimeTables } from './federation/runtimeSchema';
 import { modelTables } from './models/schema';
 import { backupTables } from './federation/backupSchema';
 import { backupLargeTables } from './federation/backupLargeSchema';
 import { identityRecoveryTables } from './federation/identityRecoverySchema';
 import { storagePolicyTables } from './federation/storageSchema';
+import { endpointTables } from './federation/endpointsSchema';
 
 export default defineSchema({
   music: defineTable({
@@ -32,10 +34,12 @@ export default defineSchema({
   ...aiTownTables,
   ...engineTables,
   ...federationTables,
+  ...autonomyTables,
   ...runtimeTables,
   ...modelTables,
   ...backupTables,
   ...backupLargeTables,
   ...identityRecoveryTables,
   ...storagePolicyTables,
+  ...endpointTables,
 });

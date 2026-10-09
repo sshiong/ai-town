@@ -1,5 +1,6 @@
 import { convexToJson, jsonToConvex, Value } from 'convex/values';
 import { digest, verifySignature } from './security';
+import { validateResourceLimits } from './resources';
 
 export const dataTables = [
   'engines',
@@ -29,6 +30,10 @@ export const dataTables = [
   'federationEventFacts',
   'homeTravelTranscripts',
   'homeTravelTranscriptPages',
+  'autonomousTravelPolicies',
+  'autonomousTravelDecisions',
+  'federationResourcePolicy',
+  'federationResourceAudit',
 ] as const;
 export const snapshotTables = [
   'visitLedger',
@@ -45,6 +50,13 @@ export const snapshotTables = [
   'federationTranscriptJobs',
 ] as const;
 export type BackupRow = Record<string, any>;
+export function restoredAutonomyFields(table: string, fields: BackupRow): BackupRow {
+  if (table === 'autonomousTravelPolicies')
+    return { ...fields, nextDecisionAt: Date.now() + fields.decisionIntervalMs };
+  if (table === 'autonomousTravelDecisions' && fields.state === 'RUNNING')
+    return { ...fields, state: 'STALE', completedAt: Date.now(), error: 'BACKUP_RESTORE_INTERRUPTED_DECISION' };
+  return fields;
+}
 export type BackupBundle = {
   manifest: {
     format: 'ai-town-backup';
@@ -66,10 +78,14 @@ const allowed = new Set<string>([
   'federationPeers',
 ]);
 export function encodeRow(row: BackupRow) {
-  return convexToJson(row as Value);
+  // JSON tagged values use reserved $float/$bytes/$integer keys. Keep each
+  // encoded row inside a string so it can cross Convex RPC without re-encoding.
+  return JSON.stringify(convexToJson(row as Value));
 }
 export function decodeRow(row: unknown): BackupRow {
-  const decoded = jsonToConvex(row as Parameters<typeof jsonToConvex>[0]);
+  // Version 1 files written before string transport contain JSON objects.
+  const value = typeof row === 'string' ? JSON.parse(row) : row;
+  const decoded = jsonToConvex(value as Parameters<typeof jsonToConvex>[0]);
   if (
     !decoded ||
     typeof decoded !== 'object' ||
@@ -82,6 +98,11 @@ export function decodeRow(row: unknown): BackupRow {
 export function stripSystem(row: BackupRow) {
   const { _id, _creationTime, ...fields } = row;
   return fields;
+}
+export function validateResourcePolicy(row: BackupRow) {
+  const value = row.maxVisitorsPerSourceTown;
+  if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > 1000))
+    throw new Error('INVALID_SOURCE_VISITOR_QUOTA');
 }
 export function assertNoSecrets(value: unknown): void {
   if (Array.isArray(value)) {
@@ -128,6 +149,10 @@ export async function createBundle(
   };
 }
 export async function validateBundle(value: unknown): Promise<BackupBundle> {
+  if (typeof value === 'string') {
+    if (new TextEncoder().encode(value).length > 5_000_000) throw new Error('BACKUP_SIZE_LIMIT');
+    value = JSON.parse(value);
+  }
   const bundle = value as BackupBundle;
   if (
     !bundle?.manifest ||
@@ -165,17 +190,25 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
     count += rows.length;
     for (const row of rows) {
       const doc = decodeRow(row);
+      assertNoSecrets(doc);
+      if (name === 'federationResourcePolicy') validateResourcePolicy(doc);
       if (typeof doc._id !== 'string' || ids.has(doc._id))
         throw new Error('INVALID_BACKUP_DOCUMENT_ID');
       ids.add(doc._id);
     }
   }
   if (count > 500) throw new Error('BACKUP_ATOMIC_RECORD_LIMIT');
-  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords'].includes(t) && !bundle.sections[t]))
+  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t) && !bundle.sections[t]))
     throw new Error('INCOMPLETE_TOWN_BACKUP');
+  if ((bundle.sections.federationResourcePolicy?.length ?? 0) > 1)
+    throw new Error('BACKUP_SINGLETON_MISMATCH');
+  if (bundle.manifest.scope === 'resident' &&
+    ['federationResourcePolicy', 'federationResourceAudit'].some(t => bundle.sections[t]?.length))
+    throw new Error('RESIDENT_BACKUP_CONTAINS_TOWN_RESOURCE_POLICY');
   const identities = bundle.sections.federationIdentity?.map(decodeRow) ?? [];
   if (identities.length !== 1 || identities[0].townId !== bundle.manifest.sourceTownId)
     throw new Error('BACKUP_IDENTITY_MISMATCH');
+  if (identities[0].resourceLimits !== undefined) validateResourceLimits(identities[0].resourceLimits);
   if (
     bundle.signature &&
     !(await verifySignature(bundle.manifest, bundle.signature, identities[0].publicKey))

@@ -6,13 +6,15 @@ import {
   snapshotTables,
   stripSystem,
   validateFields,
+  validateResourcePolicy,
 } from './backupHelpers';
 import { digest, verifySignature } from './security';
 import schema from '../schema';
+import { validateResourceLimits } from './resources';
 
 // Derived vectors are deliberately omitted: canonical memories are the complete rebuilding source.
 export const largeTables = [
-  ...dataTables.filter((t) => !['modelMemoryVectors', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages'].includes(t)),
+  ...dataTables.filter((t) => !['modelMemoryVectors', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t)),
   ...snapshotTables.filter((t) => t !== 'federationTranscriptJobs'),
   'federationIdentity',
   'federationPeers',
@@ -22,9 +24,13 @@ export const largeTables = [
   'homeTravelTranscripts',
   'homeTravelTranscriptPages',
   'federationTranscriptJobs',
+  'autonomousTravelPolicies',
+  'autonomousTravelDecisions',
+  'federationResourcePolicy',
+  'federationResourceAudit',
 ] as const;
 export const oldTables = [
-  ...largeTables.filter((t) => t !== 'federationIdentity'),
+  ...largeTables.filter((t) => !['federationIdentity', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t)),
   'modelMemoryVectors',
   'memoryEmbeddings',
   'embeddingsCache',
@@ -34,6 +40,10 @@ export const oldTables = [
   'storageUsageScans',
   'storageUsageSnapshots',
   'storageCleanupJobs',
+  'autonomousTravelPolicies',
+  'autonomousTravelDecisions',
+  'federationResourcePolicy',
+  'federationResourceAudit',
 ] as const;
 export const MAX_CHUNK_BYTES = 900_000;
 export const TARGET_CHUNK_BYTES = 512 * 1024;
@@ -126,7 +136,7 @@ export async function validateManifest(manifest: LargeManifest, signature: strin
     bytes += entry.bytes;
   }
   if (bytes > MAX_ARCHIVE_BYTES) throw new Error('LARGE_BACKUP_ARCHIVE_BUDGET');
-  if (largeTables.some((table) => !['homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords'].includes(table) && !tables.has(table)))
+  if (largeTables.some((table) => !['homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(table) && !tables.has(table)))
     throw new Error('INCOMPLETE_LARGE_BACKUP_MANIFEST');
   validateSourceRow('federationIdentity', manifest.source);
   if (manifest.source.fingerprint !== `sha256:${await digest(manifest.source.publicKey)}`)
@@ -135,7 +145,8 @@ export async function validateManifest(manifest: LargeManifest, signature: strin
     manifest.chunks
       .filter((c) => c.table === 'federationIdentity')
       .reduce((n, c) => n + c.count, 0) !== 1 ||
-    manifest.chunks.filter((c) => c.table === 'modelSettings').reduce((n, c) => n + c.count, 0) > 1
+    manifest.chunks.filter((c) => c.table === 'modelSettings').reduce((n, c) => n + c.count, 0) > 1 ||
+    manifest.chunks.filter((c) => c.table === 'federationResourcePolicy').reduce((n, c) => n + c.count, 0) > 1
   )
     throw new Error('BACKUP_SINGLETON_MISMATCH');
   if (!(await verifySignature(manifest, signature, manifest.source.publicKey)))
@@ -157,7 +168,11 @@ export async function validateChunk(chunk: LargeChunk, expected: ChunkDescriptor
     actual.digest !== expected.digest
   )
     throw new Error('BACKUP_CHECKSUM_MISMATCH');
-  return chunk.rows.map(decodeRow);
+  return chunk.rows.map(row => {
+    const decoded = decodeRow(row);
+    assertNoSecrets(decoded);
+    return decoded;
+  });
 }
 export function referencesFor(value: any, validator: any): { id: string; table: string }[] {
   if (validator.type === 'id')
@@ -192,6 +207,9 @@ export function validateSourceRow(table: string, row: BackupRow) {
   if (!definition) throw new Error('INVALID_BACKUP_SECTION');
   const validator = (definition.validator as unknown as { json: unknown }).json;
   validateFields(fields, validator);
+  if (table === 'federationResourcePolicy') validateResourcePolicy(fields);
+  if (table === 'federationIdentity' && fields.resourceLimits !== undefined)
+    validateResourceLimits(fields.resourceLimits);
   // Runtime snapshots intentionally contain source IDs, never executable target references.
   return (snapshotTables as readonly string[]).includes(table)
     ? []
@@ -221,6 +239,7 @@ export function rowMetadata(table: string, row: BackupRow): BackupRow {
     'leaseExpiry',
     'homePlayerId',
     'role',
+    'policyId',
   ];
   const metadata: BackupRow = {};
   for (const key of keys) if (row[key] !== undefined) metadata[key] = row[key];
@@ -229,6 +248,7 @@ export function rowMetadata(table: string, row: BackupRow): BackupRow {
   return metadata;
 }
 export function relationKey(table: string, row: BackupRow): string | undefined {
+  if (table === 'autonomousTravelPolicies') return row.agentGlobalId;
   if (table === 'visitLedger') return `visit:${row.visitId}`;
   if (['maps', 'worldStatus'].includes(table)) return row.worldId;
   if (['residentModelBindings', 'federationAgentRuntimes'].includes(table))

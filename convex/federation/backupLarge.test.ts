@@ -15,7 +15,9 @@ import {
   LargeChunk,
   LargeManifest,
   largeTables,
+  oldTables,
   validateManifest,
+  validateSourceRow,
 } from './backupLargeHelpers';
 
 const modules = {
@@ -286,6 +288,172 @@ test('chunked restore resets a nonzero source cursor and commits the first new e
   } finally {
     jest.useRealTimers();
   }
+});
+
+test.each([false, true])('relationship evidence survives cross-chunk allocation and cycles (rollback=%s)', async rollback => {
+  const { t, memoryIds } = await town(45);
+  await t.run(async ctx => {
+    await ctx.db.patch(memoryIds[0], {
+      data: { type: 'relationship', playerId: 'p:0', evidenceMemoryIds: [memoryIds[40], memoryIds[0]], encounterCount: 2 },
+    });
+    await ctx.db.patch(memoryIds[40], {
+      data: { type: 'relationship', playerId: 'p:0', evidenceMemoryIds: [memoryIds[0]] },
+    });
+  });
+  const archive = await exported(t);
+  expect(archive.chunks.find(c => c.rows.some(row => decodeRow(row)._id === memoryIds[0]))!.index)
+    .not.toBe(archive.chunks.find(c => c.rows.some(row => decodeRow(row)._id === memoryIds[40]))!.index);
+  await t.run(ctx => ctx.db.patch(memoryIds[0], { description: 'Target relationship newer than archive' }));
+  const jobId = await staged(t, archive);
+  await drive(t, jobId, 'import', 'READY');
+  await t.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(t, jobId, 'import', 'REMAP');
+  if (rollback) await t.mutation(mutation('cancel'), { adminToken, jobId });
+  await drive(t, jobId, 'import', rollback ? 'CANCELLED' : 'COMPLETE');
+  const result = await t.query(async ctx => ({
+    memories: await ctx.db.query('memories').collect(),
+    lock: await ctx.db.query('backupMaintenanceLocks').first(),
+  }));
+  const first = result.memories.find(m => m.description === (rollback ? 'Target relationship newer than archive' : 'Canonical memory 0'))!;
+  const last = result.memories.find(m => m.description === 'Canonical memory 40')!;
+  expect(first.data).toEqual({ type: 'relationship', playerId: 'p:0', evidenceMemoryIds: [last._id, first._id], encounterCount: 2 });
+  expect(last.data).toEqual({ type: 'relationship', playerId: 'p:0', evidenceMemoryIds: [first._id] });
+  expect(result.memories).toHaveLength(45);
+  expect(result.lock).toBeNull();
+});
+
+test('large recovery cannot overwrite an identity quarantine at creation or finalization', async () => {
+  const { t } = await town();
+  const archive = await exported(t);
+  await t.run(async ctx => {
+    const local = (await ctx.db.query('federationIdentity').unique())!;
+    await ctx.db.patch(local._id, { mode: 'QUARANTINED', quarantinePreviousMode: local.mode });
+  });
+  await expect(staged(t, archive)).rejects.toThrow('TOWN_CLONE_CONFLICT');
+  await t.run(async ctx => {
+    const local = (await ctx.db.query('federationIdentity').unique())!;
+    await ctx.db.patch(local._id, { mode: 'ACTIVE', quarantinePreviousMode: undefined });
+  });
+  const jobId = await staged(t, archive);
+  await drive(t, jobId, 'import', 'READY');
+  await t.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(t, jobId, 'import', 'FINALIZE');
+  await t.run(async ctx => {
+    const local = (await ctx.db.query('federationIdentity').unique())!;
+    await ctx.db.patch(local._id, { mode: 'QUARANTINED', quarantinePreviousMode: local.mode });
+  });
+  const failed = await t.action(action('advanceImport'), { adminToken, jobId });
+  expect(failed.state).toBe('FAILED');
+  expect(failed.error).toContain('TOWN_CLONE_CONFLICT');
+  const local = await t.query(ctx => ctx.db.query('federationIdentity').unique());
+  expect(local!.mode).toBe('QUARANTINED');
+  expect(local!.deploymentEpoch).toBe(3);
+  await t.mutation(mutation('cancel'), { adminToken, jobId });
+  await drive(t, jobId, 'import', 'CANCELLED');
+  expect((await t.query(ctx => ctx.db.query('federationIdentity').unique()))!.mode).toBe('QUARANTINED');
+});
+
+test.each(['restore', 'clone'] as const)('large %s preserves autonomous policy and completed audit without reviving a running decision', async mode => {
+  const { t, worldId, agentGlobalId } = await town();
+  await t.run(async ctx => {
+    const policyId = await ctx.db.insert('autonomousTravelPolicies', {
+      worldId, agentGlobalId, playerId: 'p:0', enabled: true, allowedPeerTownIds: ['town:friend'],
+      decisionIntervalMs: 60000, dailyRequestLimit: 2, revision: 7, nextDecisionAt: 1,
+      operator: 'admin', reason: 'Visit this friend', updatedAt: 1,
+    });
+    for (const state of ['RUNNING', 'VISIT_REQUESTED'])
+      await ctx.db.insert('autonomousTravelDecisions', {
+        policyId, policyRevision: 7, worldId, agentGlobalId, playerId: 'p:0', agentId: 'a:1',
+        operationId: `operation-${state}`, state, createdAt: 1, deadline: 2,
+        ...(state === 'VISIT_REQUESTED' ? { completedAt: 2, destinationTownId: 'town:friend', visitId: 'historical-visit', reason: 'Meet my friend' } : {}),
+      });
+  });
+  const archive = await exported(t);
+  const target = mode === 'clone' ? convexTest(schema, modules) : t;
+  const jobId = await staged(target, archive, mode);
+  await drive(target, jobId, 'import', 'READY');
+  await target.mutation(mutation('startApply'), { adminToken, jobId });
+  const beforeApply = Date.now();
+  await drive(target, jobId, 'import', 'COMPLETE');
+  const result = await target.query(async ctx => ({
+    policy: await ctx.db.query('autonomousTravelPolicies').unique(),
+    decisions: await ctx.db.query('autonomousTravelDecisions').collect(),
+    binding: await ctx.db.query('residentModelBindings').unique(),
+    local: await ctx.db.query('federationIdentity').unique(),
+  }));
+  expect(result.policy!.nextDecisionAt).toBeGreaterThanOrEqual(beforeApply + 60000);
+  expect(result.policy).toMatchObject({ revision: 7, enabled: true, allowedPeerTownIds: ['town:friend'], agentGlobalId: result.binding!.agentGlobalId, worldId: result.binding!.worldId });
+  expect(result.decisions.every(d => d.policyId === result.policy!._id && d.worldId === result.binding!.worldId && d.agentGlobalId === result.binding!.agentGlobalId)).toBe(true);
+  expect(result.decisions.find(d => d.operationId === 'operation-RUNNING')).toMatchObject({ state: 'STALE', error: 'BACKUP_RESTORE_INTERRUPTED_DECISION' });
+  expect(result.decisions.find(d => d.operationId === 'operation-VISIT_REQUESTED')).toMatchObject({ state: 'VISIT_REQUESTED', completedAt: 2, destinationTownId: 'town:friend', visitId: 'historical-visit', reason: 'Meet my friend' });
+  expect(result.local!.enabled).toBe(false);
+});
+
+test('legacy signed large manifests without optional autonomy and resource sections still restore', async () => {
+  const { t, keys } = await town();
+  const archive = await exported(t);
+  archive.chunks = archive.chunks.filter(c => !c.table.startsWith('autonomousTravel') && !c.table.startsWith('federationResource'))
+    .map((c, index) => ({ ...c, index }));
+  archive.manifest.chunks = await Promise.all(archive.chunks.map(descriptor));
+  archive.signature = await sign(archive.manifest, keys.privateKeyEncrypted);
+  const jobId = await staged(t, archive);
+  await drive(t, jobId, 'import', 'READY');
+  await t.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(t, jobId, 'import', 'COMPLETE');
+  expect(await t.query(ctx => ctx.db.query('autonomousTravelPolicies').collect())).toEqual([]);
+});
+
+test.each(['restore', 'clone', 'rollback'] as const)('large %s preserves capacity policy and audit without backing up transient measurements', async mode => {
+  const { t, keys } = await town();
+  await t.run(async ctx => {
+    await ctx.db.insert('federationResourcePolicy', { maxVisitorsPerSourceTown: 3 });
+    await ctx.db.insert('federationResourceAudit', { operation: 'SOURCE_QUOTA_CHANGED', previous: null, next: 3, createdAt: 1 });
+    await ctx.db.insert('federationResourceMetrics', { kind: 'INBOUND_EVENT', bucketStart: Date.now(), count: 1, durationCount: 0, durationSumMs: 0, samples: [] });
+  });
+  expect(largeTables.slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
+  expect(oldTables.slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
+  const archive = await exported(t);
+  expect(archive.manifest.chunks.some(c => c.table === 'federationResourceMetrics')).toBe(false);
+  expect(archive.manifest.chunks.filter(c => c.table === 'federationResourcePolicy').reduce((sum, c) => sum + c.count, 0)).toBe(1);
+  const invalid = structuredClone(archive.manifest);
+  invalid.chunks.find(c => c.table === 'federationResourcePolicy')!.count = 2;
+  await expect(validateManifest(invalid, await sign(invalid, keys.privateKeyEncrypted))).rejects.toThrow('BACKUP_SINGLETON_MISMATCH');
+  const target = mode === 'clone' ? convexTest(schema, modules) : t;
+  if (mode === 'rollback') await t.run(async ctx => {
+    const policy = (await ctx.db.query('federationResourcePolicy').unique())!;
+    await ctx.db.patch(policy._id, { maxVisitorsPerSourceTown: 7 });
+    await ctx.db.insert('federationResourceAudit', { operation: 'SOURCE_QUOTA_CHANGED', previous: 3, next: 7, createdAt: 2 });
+  });
+  const jobId = await staged(target, archive, mode === 'clone' ? 'clone' : 'restore');
+  await drive(target, jobId, 'import', 'READY');
+  await target.mutation(mutation('startApply'), { adminToken, jobId });
+  if (mode === 'rollback') {
+    await drive(target, jobId, 'import', 'REMAP');
+    await target.mutation(mutation('cancel'), { adminToken, jobId });
+  }
+  await drive(target, jobId, 'import', mode === 'rollback' ? 'CANCELLED' : 'COMPLETE');
+  const result = await target.query(async ctx => ({
+    policy: await ctx.db.query('federationResourcePolicy').unique(),
+    audit: await ctx.db.query('federationResourceAudit').collect(),
+    metrics: await ctx.db.query('federationResourceMetrics').collect(),
+  }));
+  expect(result.policy!.maxVisitorsPerSourceTown).toBe(mode === 'rollback' ? 7 : 3);
+  expect(result.audit).toHaveLength(mode === 'rollback' ? 2 : 1);
+  expect(result.audit.some(row => row.createdAt === 1 && row.next === 3)).toBe(true);
+  expect(result.metrics).toHaveLength(mode === 'clone' ? 0 : 1);
+});
+
+test('backup preflight rejects invalid quota and identity capacity limits before applying data', async () => {
+  for (const maxVisitorsPerSourceTown of [-1, 0.5, 1001])
+    expect(() => validateSourceRow('federationResourcePolicy', {
+      _id: 'invalid-policy', _creationTime: 1, maxVisitorsPerSourceTown,
+    })).toThrow('INVALID_SOURCE_VISITOR_QUOTA');
+  const { t, keys } = await town();
+  const archive = await exported(t);
+  archive.manifest.source.resourceLimits.maxConcurrentLocalLLM = -1;
+  await expect(validateManifest(archive.manifest, await sign(archive.manifest, keys.privateKeyEncrypted)))
+    .rejects.toThrow('INVALID_RESOURCE_LIMIT:maxConcurrentLocalLLM');
+  expect(await t.query(ctx => ctx.db.query('federationResourcePolicy').collect())).toEqual([]);
 });
 
 test('tampered chunk is rejected before staging and retry is idempotent; cross-chunk missing references fail before writes', async () => {

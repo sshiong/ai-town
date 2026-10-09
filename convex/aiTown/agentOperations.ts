@@ -1,4 +1,5 @@
 import { v } from 'convex/values';
+import { considerAutonomousTravel } from '../federation/autonomy';
 import { internalAction } from '../_generated/server';
 import { WorldMap, serializedWorldMap } from './worldMap';
 import { rememberConversation } from '../agent/memory';
@@ -101,6 +102,16 @@ export const agentDoSomething = internalAction({
   },
   handler: async (ctx, args) => {
     const { player, agent } = args;
+    if (await considerAutonomousTravel(ctx, {
+      worldId: args.worldId, playerId: player.id, agentId: agent.id,
+      operationId: args.operationId,
+    })) {
+      await ctx.runMutation(internal.aiTown.main.sendAgentInput, {
+        worldId: args.worldId, name: 'finishDoSomething',
+        args: { operationId: args.operationId, agentId: agent.id },
+      });
+      return;
+    }
     const map = new WorldMap(args.map);
     const now = Date.now();
     // Don't try to start a new conversation if we were just in one.

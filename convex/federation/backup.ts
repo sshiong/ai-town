@@ -25,16 +25,20 @@ import {
   createBundle,
   dataTables,
   decodeRow,
+  encodeRow,
   remapValue,
   snapshotTables,
   stripSystem,
   validateBundle,
   validateFields,
+  restoredAutonomyFields,
 } from './backupHelpers';
 import { ensureEmbeddingSpace } from '../models/embeddings';
 import schema from '../schema';
 import { validateConnection } from '../models/profiles';
 import { embeddingFingerprint } from '../models/compatibility';
+import { assertNoIdentityConflict } from './identityConflict';
+import { applyResidentRestore, residentRestoreConfirmation, residentRestorePlan } from './backupResident';
 
 const mode = v.union(
   v.literal('restore'),
@@ -44,13 +48,25 @@ const mode = v.union(
 );
 const importArgs = {
   adminToken: v.string(),
-  bundle: v.any(),
+  bundle: v.optional(v.any()),
+  bundleJson: v.optional(v.string()),
   mode,
   targetWorldId: v.optional(v.id('worlds')),
   sourceStopped: v.optional(v.boolean()),
   targetEndpoint: v.optional(v.string()),
+  residentRestore: v.optional(residentRestoreConfirmation),
 };
 const table = (name: string) => name as TableNames;
+function importBundle(args: { bundle?: unknown; bundleJson?: string }): unknown {
+  if (args.bundleJson !== undefined && args.bundle !== undefined) throw new Error('BACKUP_TRANSPORT_AMBIGUOUS');
+  const json = args.bundleJson ?? (typeof args.bundle === 'string' ? args.bundle : undefined);
+  if (json !== undefined) {
+    if (new TextEncoder().encode(json).length > 5_000_000) throw new Error('BACKUP_SIZE_LIMIT');
+    return JSON.parse(json);
+  }
+  return args.bundle;
+}
+
 function sanitize(value: any): any {
   if (value instanceof ArrayBuffer || !value || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(sanitize);
@@ -202,6 +218,7 @@ export const getResident = internalQuery({
         rows.archivedPlayers.push({
           ...current,
           _id: `snapshot-player:${world._id}:${current.id}`,
+          _creationTime: world._creationTime,
           worldId: world._id,
         });
     rows.homeTravelTranscripts = await ctx.db.query('homeTravelTranscripts')
@@ -220,7 +237,7 @@ export const getResident = internalQuery({
 async function checkImport(
   ctx: QueryCtx | MutationCtx,
   args: {
-    bundle: unknown;
+    bundle?: unknown;
     mode: ImportMode;
     targetWorldId?: Id<'worlds'>;
     sourceStopped?: boolean;
@@ -228,6 +245,9 @@ async function checkImport(
   },
 ) {
   const bundle = await validateBundle(args.bundle);
+  await assertNoIdentityConflict(ctx);
+  if (decodeRow(bundle.sections.federationIdentity[0]).mode === 'QUARANTINED')
+    throw new Error('TOWN_CLONE_CONFLICT');
   const local = await identity(ctx);
   if (bundle.manifest.scope === 'resident' && args.mode !== 'merge')
     throw new Error('RESIDENT_BACKUP_REQUIRES_MERGE');
@@ -285,6 +305,7 @@ async function checkImport(
       throw new Error('UNSUPPORTED_BACKUP_EMBEDDING_CONFIGURATION');
     else if (profile.fingerprint !== embeddingFingerprint(profile as never))
       throw new Error('EMBEDDING_FINGERPRINT_MISMATCH');
+  if ((rows.federationResourcePolicy?.length ?? 0) > 1) throw new Error('BACKUP_SINGLETON_MISMATCH');
   if (args.mode === 'merge' && rows.worlds?.length !== 1)
     throw new Error('MERGE_REQUIRES_SINGLE_WORLD_PACKAGE');
   validateFields(
@@ -316,10 +337,23 @@ async function checkImport(
     'archivedConversations',
     'participatedTogether',
     'homeTravelTranscripts',
+    'autonomousTravelPolicies',
+    'autonomousTravelDecisions',
   ]) {
     if ((rows[name] ?? []).some((r) => r.worldId && !worldIds.has(r.worldId)))
       throw new Error('BACKUP_WORLD_REFERENCE_MISSING');
   }
+  const travelPolicyIds = new Set((rows.autonomousTravelPolicies ?? []).map(p => p._id));
+  if ((rows.autonomousTravelDecisions ?? []).some(d => !travelPolicyIds.has(d.policyId)))
+    throw new Error('BACKUP_AUTONOMOUS_POLICY_REFERENCE_MISSING');
+  for (const policy of rows.autonomousTravelPolicies ?? [])
+    if (!(rows.residentModelBindings ?? []).some(b => b.worldId === policy.worldId &&
+        b.playerId === policy.playerId && b.agentGlobalId === policy.agentGlobalId))
+      throw new Error('BACKUP_AUTONOMOUS_POLICY_OWNER_MISMATCH');
+  for (const decision of rows.autonomousTravelDecisions ?? [])
+    if (!(rows.autonomousTravelPolicies ?? []).some(p => p._id === decision.policyId &&
+        p.worldId === decision.worldId && p.playerId === decision.playerId && p.agentGlobalId === decision.agentGlobalId))
+      throw new Error('BACKUP_AUTONOMOUS_DECISION_OWNER_MISMATCH');
   if (rows.memories?.some((m) => !m.worldId)) throw new Error('LEGACY_MEMORY_OWNER_AMBIGUOUS');
   const spaceIds = new Set(rows.embeddingSpaces?.map((s) => s._id));
   const embeddingProfiles = new Map(rows.embeddingProfiles?.map((p) => [p._id, p]));
@@ -381,6 +415,14 @@ export const checkPreflight = internalQuery({
   args: importArgs,
   handler: async (ctx, args) => {
     requireAdmin(args.adminToken);
+    args = { ...args, bundle: importBundle(args) };
+    if (args.mode === 'restore' && args.bundle?.manifest?.scope === 'resident') {
+      const plan = await residentRestorePlan(ctx, args);
+      return { valid: true as const, mode: args.mode, scope: 'resident', counts: plan.counts, vectorPolicy: 'REBUILD' as const,
+        warnings: ['Only this Home resident is restored; newer memory IDs and other residents are retained.',
+          'Runtime snapshots, travel leases and pending jobs are not replayed.',
+          'Confirm the target digest before applying the resident restore.'], residentRestorePlan: plan.report };
+    }
     const { bundle, rows } = await checkImport(ctx, args);
     return {
       valid: true as const,
@@ -406,6 +448,8 @@ export const importBackup = action({
     worldIds: string[];
     mapping: Record<string, string>;
     rebuildRequired: true;
+    importId?: Id<'backupImports'>;
+    residentRestoreReport?: Awaited<ReturnType<typeof residentRestorePlan>>['report'];
   }> => {
     requireAdmin(args.adminToken);
     // Generate fresh identity material outside the database transaction; never accept an imported private key.
@@ -439,11 +483,13 @@ export async function applyBackupData(
   args: ObjectType<typeof applyImportFields>,
 ) {
   requireAdmin(args.adminToken);
+  args = { ...args, bundle: importBundle(args) };
+  if (args.mode === 'restore' && args.bundle?.manifest?.scope === 'resident') return applyResidentRestore(ctx, args);
   const { bundle, local, rows } = await checkImport(ctx, args);
   const mapping: Record<string, string> = {};
   const snapshots = Object.fromEntries(
     [...snapshotTables, 'federationIdentity', 'engines', 'worlds', 'federationAgentRuntimes'].map(
-      (name) => [name, bundle.sections[name] ?? []],
+      (name) => [name, (bundle.sections[name] ?? []).map(row => encodeRow(decodeRow(row)))],
     ),
   );
   let townId = local?.townId;
@@ -577,7 +623,7 @@ export async function applyBackupData(
     'modelSettings',
     'federationAgentRuntimes',
     ...(args.mode === 'merge'
-      ? ['engines', 'worlds', 'worldStatus', 'maps', 'deploymentRecords', 'modelAudits', 'storagePolicies', 'federationActionFacts', 'federationEventFacts']
+      ? ['engines', 'worlds', 'worldStatus', 'maps', 'deploymentRecords', 'modelAudits', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'federationResourcePolicy', 'federationResourceAudit']
       : []),
   ]);
   for (const name of dataTables) {
@@ -612,6 +658,7 @@ export async function applyBackupData(
           return rest;
         });
       }
+      fields = restoredAutonomyFields(name, fields);
       const id = await ctx.db.insert(table(name), remapValue(fields, mapping) as never);
       mapping[row._id] = id;
     }
@@ -776,6 +823,7 @@ export const preflight = action({
     counts: Record<string, number>;
     vectorPolicy: 'REBUILD';
     warnings: string[];
+    residentRestorePlan?: Awaited<ReturnType<typeof residentRestorePlan>>['report'];
   }> => ctx.runQuery(makeFunctionReference<'query'>('federation/backup:checkPreflight'), args),
 });
 

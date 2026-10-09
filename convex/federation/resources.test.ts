@@ -14,6 +14,7 @@ import { FederationMessage, PROTOCOL } from './protocol';
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/resources.ts': () => import('./resources'),
+  '../federation/resourceMonitoring.ts': () => import('./resourceMonitoring'),
   '../federation/admin.ts': () => import('./admin'),
   '../federation/decision.ts': () => import('./decision'),
   '../federation/transport.ts': () => import('./transport'),
@@ -484,10 +485,10 @@ function reserveMessage(index: number): FederationMessage {
     },
   };
 }
-async function peer(t: Awaited<ReturnType<typeof setup>>['t']) {
+async function peer(t: Awaited<ReturnType<typeof setup>>['t'], townId = 'home') {
   await t.run(async (ctx) => {
     await ctx.db.insert('federationPeers', {
-      townId: 'home',
+      townId,
       townName: 'Home',
       publicKey: 'unused',
       fingerprint: 'unused',
@@ -502,7 +503,7 @@ async function peer(t: Awaited<ReturnType<typeof setup>>['t']) {
       pairedAt: Date.now(),
     });
     await ctx.db.insert('transportSessions', {
-      peerTownId: 'home',
+      peerTownId: townId,
       channelState: 'TRANSPORT_READY',
       transportType: 'DIRECT_HTTPS',
       localDeploymentEpoch: 1,
@@ -628,4 +629,105 @@ test('Home decision budget includes running jobs, ignores expired work, and pres
       (job) => job.eventId === 'new',
     ),
   ).toHaveLength(1);
+});
+
+test.each(['HOME_PENDING', 'HOME_RUNNING', 'AUTONOMOUS'] as const)(
+  'shared decision budget counts %s for Host admission, Home ingestion and administrator status', async kind => {
+    const { t } = await setup({ maxPendingDecisions: 1 });
+    const worldId = await world(t, true);
+    await peer(t);
+    await t.run(async ctx => {
+      await ctx.db.insert('visitLedger', {
+        visitId: 'traveling-home', agentGlobalId: 'host/agent:1', homeTownId: 'host', hostTownId: 'home',
+        homeDeploymentEpoch: 1, hostDeploymentEpoch: 1, agentAuthorityEpoch: 1,
+        visitLeaseVersion: 1, leaseExpiry: Date.now() + 90000, fencingToken: 'unused',
+        state: 'ACTIVE', role: 'home', profile: {}, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      if (kind === 'AUTONOMOUS') {
+        const policyId = await ctx.db.insert('autonomousTravelPolicies', {
+          worldId, agentGlobalId: 'host/agent:1', playerId: 'p:0', enabled: true,
+          allowedPeerTownIds: ['home'], decisionIntervalMs: 60000, dailyRequestLimit: 2,
+          revision: 1, nextDecisionAt: 0, operator: 'admin', reason: 'Visit', updatedAt: Date.now(),
+        });
+        await ctx.db.insert('autonomousTravelDecisions', {
+          policyId, policyRevision: 1, worldId, agentGlobalId: 'host/agent:1',
+          playerId: 'p:0', agentId: 'a:1', operationId: 'autonomous', state: 'RUNNING',
+          createdAt: Date.now(), deadline: Date.now() + 5000,
+        });
+      } else await ctx.db.insert('federationDecisionJobs', {
+        visitId: 'traveling-home', eventId: 'previous', observation: {},
+        state: kind === 'HOME_PENDING' ? 'PENDING' : 'RUNNING', createdAt: Date.now(), deadline: Date.now() + 5000,
+      });
+    });
+    expect((await t.query(queryRef('admin/status'), { adminToken })).resources)
+      .toMatchObject({ pendingDecisions: 1, admissionState: 'DEGRADED' });
+    await t.run(ctx => dispatchLedgerMessage(ctx, reserveMessage(1)));
+    expect((await t.run(ctx => ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', 'visit-1')).unique()))?.lastError)
+      .toBe('HOST_RESOURCE_DEGRADED');
+    const observation = { ...reserveMessage(1), visitId: 'traveling-home', type: 'OBSERVATION',
+      payload: { eventId: 'new', turnId: 'new', deadline: Date.now() + 25000 } };
+    await expect(t.run(ctx => dispatchRuntimeMessage(ctx, observation))).rejects.toThrow('DECISION_QUEUE_FULL');
+    jest.setSystemTime(Date.now() + 5001);
+    expect((await t.query(queryRef('admin/status'), { adminToken })).resources.pendingDecisions).toBe(0);
+    await t.run(ctx => dispatchRuntimeMessage(ctx, observation));
+    await t.run(ctx => dispatchRuntimeMessage(ctx, observation));
+    expect((await t.query(queryRef('admin/status'), { adminToken })).resources.pendingDecisions).toBe(1);
+  },
+);
+
+test('optional source quotas prevent one town filling all slots and count bodies awaiting cleanup', async () => {
+  const { t } = await setup();
+  await peer(t); await peer(t, 'other');
+  await t.mutation(mutationRef('resourceMonitoring/configureSourceQuota'), { adminToken, maxVisitorsPerSourceTown: 1 });
+  await t.run(ctx => dispatchLedgerMessage(ctx, reserveMessage(1)));
+  await t.run(ctx => dispatchLedgerMessage(ctx, reserveMessage(2)));
+  expect((await t.run(ctx => ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', 'visit-2')).unique()))?.lastError).toBe('HOST_SOURCE_QUOTA_EXCEEDED');
+  const other = { ...reserveMessage(3), fromTownId: 'other', agentGlobalId: 'other/agent:3' };
+  await t.run(ctx => dispatchLedgerMessage(ctx, other));
+  expect((await t.run(ctx => ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', 'visit-3')).unique()))?.state).toBe('RESERVED');
+  await t.run(async ctx => {
+    const ledger = (await ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', 'visit-1')).unique())!;
+    const slot = (await ctx.db.query('visitReservations').withIndex('visitId', q => q.eq('visitId', 'visit-1')).unique())!;
+    await ctx.db.patch(ledger._id, { state: 'REMOVING' });
+    await ctx.db.patch(slot._id, { expiresAt: Date.now() - 1 });
+  });
+  await t.run(ctx => dispatchLedgerMessage(ctx, reserveMessage(4)));
+  expect((await t.run(ctx => ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', 'visit-4')).unique()))?.lastError).toBe('HOST_SOURCE_QUOTA_EXCEEDED');
+  const status = await t.query(queryRef('admin/status'), { adminToken });
+  expect(status.resources.sourceOccupancy).toEqual(expect.arrayContaining([{ townId: 'home', occupied: 1 }, { townId: 'other', occupied: 1 }]));
+  expect(status.resources.maxVisitorsPerSourceTown).toBe(1);
+});
+
+test('source policy is administrator-only, audited, defaults unlimited and reducing it preserves existing work', async () => {
+  const { t } = await setup(); await peer(t);
+  const worldId = await world(t, true);
+  await t.run(ctx => dispatchLedgerMessage(ctx, reserveMessage(1)));
+  await t.run(ctx => dispatchLedgerMessage(ctx, reserveMessage(2)));
+  expect((await t.query(queryRef('admin/status'), { adminToken })).resources.maxVisitorsPerSourceTown).toBeNull();
+  for (const limit of [-1, 0.5, 1001]) await expect(t.mutation(mutationRef('resourceMonitoring/configureSourceQuota'), { adminToken, maxVisitorsPerSourceTown: limit })).rejects.toThrow('INVALID_SOURCE_VISITOR_QUOTA');
+  await expect(t.mutation(mutationRef('resourceMonitoring/configureSourceQuota'), { adminToken: 'invalid', maxVisitorsPerSourceTown: 1 })).rejects.toThrow();
+  await t.mutation(mutationRef('resourceMonitoring/configureSourceQuota'), { adminToken, maxVisitorsPerSourceTown: 0 });
+  await t.run(ctx => dispatchLedgerMessage(ctx, reserveMessage(3)));
+  const ledgers = await t.run(ctx => ctx.db.query('visitLedger').collect());
+  expect(ledgers.filter(l => l.state === 'RESERVED')).toHaveLength(2);
+  expect(ledgers.find(l => l.visitId === 'visit-3')?.lastError).toBe('HOST_SOURCE_QUOTA_EXCEEDED');
+  expect((await t.run(ctx => ctx.db.get(worldId)))?.agents).toHaveLength(1);
+  expect((await t.query(queryRef('admin/status'), { adminToken })).resources.audit[0]).toMatchObject({ operation: 'SOURCE_QUOTA_CHANGED', previous: null, next: 0 });
+  await t.mutation(mutationRef('resourceMonitoring/configureSourceQuota'), { adminToken, maxVisitorsPerSourceTown: null });
+  await t.run(ctx => dispatchLedgerMessage(ctx, reserveMessage(4)));
+  expect((await t.run(ctx => ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', 'visit-4')).unique()))?.state).toBe('RESERVED');
+});
+
+test('only unique durably accepted inbound events are measured and failed transactions cannot inflate the rate', async () => {
+  const { t } = await setup(); await peer(t);
+  const message = reserveMessage(1);
+  const accept = () => t.mutation(mutationRef('transport/acceptMessage'), { message, payloadDigest: 'same-reservation' });
+  await accept(); await accept();
+  const status = await t.query(queryRef('admin/status'), { adminToken });
+  expect(status.resources.measurements.inboundEvents).toBe(1);
+  expect(status.resources.measurements.inboundEventsPerSecond).toBeCloseTo(1000 / (status.resources.measurements.measuredAt - status.resources.measurements.windowStartedAt));
+  const invalid = { ...reserveMessage(2), senderDeploymentEpoch: 99 };
+  await expect(t.mutation(mutationRef('transport/acceptMessage'), { message: invalid, payloadDigest: 'invalid' })).rejects.toThrow('SENDER_DEPLOYMENT_MISMATCH');
+  expect((await t.query(queryRef('admin/status'), { adminToken })).resources.measurements.inboundEvents).toBe(1);
+  expect(status.resources.cpu).toBeNull(); expect(status.resources.memory).toBeNull();
 });

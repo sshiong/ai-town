@@ -1,4 +1,5 @@
 import { residentChatCompletion } from './resources';
+import { recordResourceMetric } from './resourceMonitoring';
 import { v } from 'convex/values';
 import {
   ActionCtx,
@@ -265,10 +266,12 @@ export const finish = internalMutation({
       job.deadline <= Date.now()
     ) {
       await ctx.db.patch(job._id, { state: 'EXPIRED' });
+      await recordResourceMetric(ctx, 'DECISION_FAILURE', Math.max(0, Date.now() - job.createdAt));
       return;
     }
     if (args.error || !args.action) {
       await ctx.db.patch(job._id, { state: 'FAILED', error: args.error ?? 'EMPTY_DECISION' });
+      await recordResourceMetric(ctx, 'DECISION_FAILURE', Math.max(0, Date.now() - job.createdAt));
       return;
     }
     const action = validateObservedDecision(
@@ -287,6 +290,7 @@ export const finish = internalMutation({
       },
     });
     await ctx.db.patch(job._id, { state: 'COMMITTED' });
+    await recordResourceMetric(ctx, 'DECISION_SUCCESS', Math.max(0, Date.now() - job.createdAt));
   },
 });
 export const run = internalAction({

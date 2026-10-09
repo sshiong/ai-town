@@ -445,16 +445,8 @@ export async function dispatchRuntimeMessage(ctx: MutationCtx, message: Federati
       .withIndex('event', (q) => q.eq('eventId', payload.eventId))
       .unique();
     if (existing) return;
-    const pending = await ctx.db
-      .query('federationDecisionJobs')
-      .withIndex('state', (q) => q.eq('state', 'PENDING'))
-      .filter(q => q.gt(q.field('deadline'), Date.now()))
-      .take(1001);
-    const running = await ctx.db.query('federationDecisionJobs')
-      .withIndex('state', q => q.eq('state', 'RUNNING'))
-      .filter(q => q.gt(q.field('deadline'), Date.now())).take(1001);
     const limits = await configuredResourceLimits(ctx.db);
-    if (pending.length + running.length >= limits.maxPendingDecisions) throw new Error('DECISION_QUEUE_FULL');
+    if (await pendingDecisionCount(ctx.db) >= limits.maxPendingDecisions) throw new Error('DECISION_QUEUE_FULL');
     if (
       payload.conversation &&
       payload.federationConversationId &&

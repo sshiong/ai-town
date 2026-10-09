@@ -4,7 +4,8 @@ import { convexTest } from 'convex-test';
 import { makeFunctionReference } from 'convex/server';
 import schema from '../schema';
 import { Id } from '../_generated/dataModel';
-import { createIdentityKeys, digest } from './security';
+import { convexToJson, type Value } from 'convex/values';
+import { createIdentityKeys, digest, sign } from './security';
 import { BackupBundle, decodeRow, encodeRow, validateBundle } from './backupHelpers';
 import { embeddingFingerprint } from '../models/compatibility';
 import { applyBackupData } from './backup';
@@ -256,6 +257,126 @@ async function rewrite(
   return updated;
 }
 
+async function residentRestoreArgs(t: Awaited<ReturnType<typeof town>>['t'], bundle: BackupBundle, targetWorldId: Id<'worlds'>) {
+  const args = { adminToken, bundle, mode: 'restore' as const, sourceStopped: true, targetWorldId };
+  const preflight = await t.action(action('federation/backup:preflight'), args);
+  return { ...args, residentRestore: { expectedTargetDigest: preflight.residentRestorePlan!.targetDigest,
+    confirmOverwrite: true, operator: 'Home administrator', reason: 'Restore the resident archive' } };
+}
+
+test('original Home resident restore retains identity and fixed Chat ownership without changing main or other residents', async () => {
+  const { t, worldId, agentGlobalId, memoryId } = await town();
+  await t.run(async ctx => {
+    const world = (await ctx.db.get(worldId))!;
+    await ctx.db.patch(worldId, { players: [...world.players, { id: 'p:2', lastInput: 1, position: { x: 2, y: 2 }, facing: { dx: 1, dy: 0 }, speed: 0 }],
+      agents: [...world.agents, { id: 'a:3', playerId: 'p:2', inProgressOperation: { name: 'agentDoSomething', operationId: 'other-operation', started: 1 } }], nextId: 4 });
+    await ctx.db.insert('memories', { worldId, playerId: 'p:2', description: 'Other resident private memory', importance: 3, lastAccess: 1, data: { type: 'reflection', relatedMemoryIds: [] } });
+    const reflection = await ctx.db.query('memories').withIndex('resident', q => q.eq('worldId', worldId).eq('playerId', 'p:0'))
+      .filter(q => q.eq(q.field('data.type'), 'reflection')).first();
+    await ctx.db.insert('memories', { worldId, playerId: 'p:0', agentGlobalId, description: 'My relationship', importance: 8, lastAccess: 1,
+      data: { type: 'relationship', agentGlobalId: 'town:foreign/agent:ava', evidenceMemoryIds: [reflection!._id, memoryId] } });
+  });
+  const bundle = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  expect(bundle.sections.memories.map(decodeRow).some((m: Record<string, any>) => m.playerId === 'p:2')).toBe(false);
+  await t.run(async ctx => {
+    await ctx.db.patch(memoryId, { description: 'Accidentally damaged memory' });
+    const settings = (await ctx.db.query('modelSettings').unique())!;
+    const binding = (await ctx.db.query('residentModelBindings').unique())!;
+    const main = await ctx.db.insert('chatProfiles', { name: 'New main', provider: 'custom', url: 'https://new-main.example', model: 'new-main', stopWords: [], createdAt: 2 });
+    await ctx.db.patch(settings._id, { mainChatProfileId: main });
+    await ctx.db.patch(binding._id, { chatProfileId: main });
+    const world = (await ctx.db.get(worldId))!;
+    await ctx.db.patch(worldId, { agents: world.agents.map(a => a.id === 'a:1' ? { ...a, inProgressOperation: { name: 'agentDoSomething', operationId: 'old-local-operation', started: 1 } } : a) });
+    await ctx.db.insert('memories', { worldId, playerId: 'p:0', agentGlobalId, description: 'Newer memory preserved', importance: 8, lastAccess: 2, data: { type: 'reflection', relatedMemoryIds: [] } });
+  });
+  const before = await t.query(async ctx => ({ local: await ctx.db.query('federationIdentity').unique(), settings: await ctx.db.query('modelSettings').unique(),
+    other: await ctx.db.query('memories').withIndex('resident', q => q.eq('worldId', worldId).eq('playerId', 'p:2')).collect(), world: await ctx.db.get(worldId) }));
+  const args = await residentRestoreArgs(t, bundle, worldId);
+  const result = await t.action(action('federation/backup:importBackup'), args);
+  const after = await t.query(async ctx => ({ local: await ctx.db.query('federationIdentity').unique(), settings: await ctx.db.query('modelSettings').unique(),
+    binding: await ctx.db.query('residentModelBindings').unique(), memories: await ctx.db.query('memories').collect(), profiles: await ctx.db.query('chatProfiles').collect(),
+    world: await ctx.db.get(worldId), audit: await ctx.db.query('backupImports').unique(), runtime: await ctx.db.query('federationAgentRuntimes').unique() }));
+  expect(after.local).toEqual(before.local);
+  expect(after.settings).toEqual(before.settings);
+  expect(after.binding).toMatchObject({ worldId, playerId: 'p:0', agentGlobalId, chatProfileId: decodeRow(bundle.sections.chatProfiles[0])._id });
+  expect(after.profiles.find(p => p._id === after.binding!.chatProfileId)?.model).toBe('chat-original');
+  expect(after.memories.filter(m => m.playerId === 'p:2')).toEqual(before.other);
+  expect(after.memories.find(m => m._id === memoryId)?.description).toBe('I met Ava abroad.');
+  expect(after.memories.some(m => m.description === 'Newer memory preserved')).toBe(true);
+  const relationship = after.memories.find(m => m.description === 'My relationship')!;
+  const reflection = after.memories.find(m => m.description === 'Ava is a friend.')!;
+  expect(relationship.data).toMatchObject({ evidenceMemoryIds: [reflection._id, memoryId] });
+  expect(after.world!.agents.find(a => a.id === 'a:3')).toEqual(before.world!.agents.find(a => a.id === 'a:3'));
+  expect(after.world!.agents.find(a => a.id === 'a:1')?.inProgressOperation).toBeUndefined();
+  expect(after.runtime).toMatchObject({ agentGlobalId, state: 'HOME_ACTIVE', agentAuthorityEpoch: 4 });
+  expect(after.audit!.runtimeSnapshot.scope).toBe('resident');
+  expect(after.audit!.runtimeSnapshot.targetSnapshot.memories.some((m: any) => m.description === 'Accidentally damaged memory')).toBe(true);
+  expect(after.audit!.manifest.residentRestore.operator).toBe('Home administrator');
+  expect(result.worldIds).toEqual([worldId]);
+});
+
+test('original Home resident restore repairs deleted local data without importing runtime or replacing a changed shared profile', async () => {
+  const { t, worldId, agentGlobalId } = await town();
+  const bundle = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  await t.run(async ctx => {
+    const world = (await ctx.db.get(worldId))!;
+    await ctx.db.patch(worldId, { agents: [], players: [] });
+    for (const name of ['memories', 'residentModelBindings', 'federationAgentRuntimes', 'playerDescriptions', 'agentDescriptions'] as const)
+      for (const row of await ctx.db.query(name).collect()) await ctx.db.delete(row._id);
+    const profile = (await ctx.db.query('chatProfiles').unique())!;
+    await ctx.db.patch(profile._id, { model: 'Changed model used by main' });
+  });
+  const args = await residentRestoreArgs(t, bundle, worldId);
+  await t.action(action('federation/backup:importBackup'), args);
+  const after = await t.query(async ctx => ({ world: await ctx.db.get(worldId), binding: await ctx.db.query('residentModelBindings').unique(),
+    runtimes: await ctx.db.query('federationAgentRuntimes').collect(), memories: await ctx.db.query('memories').collect(), profiles: await ctx.db.query('chatProfiles').collect(), settings: await ctx.db.query('modelSettings').unique() }));
+  expect(after.world!.agents).toEqual([{ id: 'a:1', playerId: 'p:0' }]);
+  expect(after.world!.players[0].id).toBe('p:0');
+  expect(after.binding!.agentGlobalId).toBe(agentGlobalId);
+  expect(after.runtimes).toEqual([]);
+  expect(after.profiles.find(p => p._id === after.binding!.chatProfileId)?.model).toBe('chat-original');
+  expect(after.profiles.find(p => p._id === after.settings!.mainChatProfileId)?.model).toBe('Changed model used by main');
+  const reflection = after.memories.find(m => m.data.type === 'reflection')!;
+  expect(reflection.data).toEqual({ type: 'reflection', relatedMemoryIds: [after.memories.find(m => m.data.type === 'travel')!._id] });
+});
+
+test('resident restore rejects unsigned archives, foreign ownership, missing references and active source travel before writes', async () => {
+  const { t, worldId } = await town();
+  const original = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  const base = { adminToken, mode: 'restore' as const, targetWorldId: worldId, sourceStopped: true };
+  await expect(t.action(action('federation/backup:preflight'), { ...base, bundle: { ...original, signature: undefined } })).rejects.toThrow('RESIDENT_RESTORE_SIGNED_BACKUP_REQUIRED');
+  const key = (await t.query(ctx => ctx.db.query('federationIdentity').unique()))!.privateKeyEncrypted;
+  for (const [section, change, error] of [
+    ['memories', (row: any) => { row.playerId = 'p:2'; }, 'RESIDENT_BACKUP_MEMORY_OWNER_MISMATCH'],
+    ['memories', (row: any) => { row.data = { type: 'reflection', relatedMemoryIds: ['missing-memory'] }; }, 'RESIDENT_BACKUP_REFERENCE_MISSING'],
+    ['federationAgentRuntimes', (row: any) => { row.visitId = 'old-visit'; row.state = 'TRAVELING'; }, 'RECONCILE_SOURCE_RESIDENT_TRAVEL_FIRST'],
+  ] as const) {
+    const bundle = await rewrite(original, section, change);
+    bundle.signature = await sign(bundle.manifest, key);
+    await expect(t.action(action('federation/backup:preflight'), { ...base, bundle })).rejects.toThrow(error);
+  }
+  expect(await t.query(ctx => ctx.db.query('backupImports').collect())).toEqual([]);
+});
+
+test('resident restore requires confirmation, detects changed target and rolls back all writes after a late scheduler failure', async () => {
+  const { t, worldId, memoryId } = await town();
+  const bundle = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  const args = await residentRestoreArgs(t, bundle, worldId);
+  await expect(t.action(action('federation/backup:importBackup'), { ...args, residentRestore: undefined })).rejects.toThrow('RESIDENT_RESTORE_CONFIRMATION_REQUIRED');
+  await t.run(ctx => ctx.db.patch(memoryId, { description: 'Changed after preflight' }));
+  await expect(t.action(action('federation/backup:importBackup'), args)).rejects.toThrow('RESIDENT_RESTORE_TARGET_CHANGED');
+  const currentArgs = await residentRestoreArgs(t, bundle, worldId);
+  const read = async () => t.query(async ctx => ({ world: await ctx.db.get(worldId), local: await ctx.db.query('federationIdentity').unique(),
+    binding: await ctx.db.query('residentModelBindings').collect(), memories: await ctx.db.query('memories').collect(), vectors: await ctx.db.query('modelMemoryVectors').collect(),
+    descriptions: await ctx.db.query('agentDescriptions').collect(), runtime: await ctx.db.query('federationAgentRuntimes').collect(), audits: await ctx.db.query('backupImports').collect() }));
+  const before = await read();
+  await expect(t.run(async ctx => {
+    ctx.scheduler.runAfter = async () => { throw new Error('RESIDENT_RESTORE_INJECTED_SCHEDULER_FAILURE'); };
+    return applyBackupData(ctx, currentArgs);
+  })).rejects.toThrow('RESIDENT_RESTORE_INJECTED_SCHEDULER_FAILURE');
+  expect(await read()).toEqual(before);
+});
+
 test('full-town export is signed, versioned, binary-safe and excludes private keys and peer credentials', async () => {
   const { t } = await town();
   const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
@@ -308,6 +429,56 @@ test('restoring a nonzero source input cursor preserves its audit snapshot and e
     expect((await ctx.db.get(engine._id))!.processedInputNumber).toBe(0);
     expect((await ctx.db.get(worldId))!.players.some(p => p.human === 'restored-human')).toBe(true);
   });
+});
+
+test('atomic recovery cannot overwrite an unresolved identity quarantine', async () => {
+  const { t } = await town();
+  const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  await t.run(async ctx => {
+    const local = (await ctx.db.query('federationIdentity').unique())!;
+    await ctx.db.patch(local._id, { mode: 'QUARANTINED', quarantinePreviousMode: local.mode });
+  });
+  const before = await t.query(async ctx => ({
+    identity: await ctx.db.query('federationIdentity').unique(),
+    memories: await ctx.db.query('memories').collect(),
+  }));
+  await expect(t.action(action('federation/backup:importBackup'), {
+    adminToken, bundle, mode: 'restore', sourceStopped: true,
+  })).rejects.toThrow('TOWN_CLONE_CONFLICT');
+  expect(await t.query(async ctx => ({
+    identity: await ctx.db.query('federationIdentity').unique(),
+    memories: await ctx.db.query('memories').collect(),
+  }))).toEqual(before);
+});
+
+test('atomic restore keeps autonomous authorization and audit while marking the interrupted decision stale', async () => {
+  const { t, worldId, agentGlobalId } = await town();
+  await t.run(async ctx => {
+    const policyId = await ctx.db.insert('autonomousTravelPolicies', {
+      worldId, agentGlobalId, playerId: 'p:0', enabled: true, allowedPeerTownIds: ['town:friend'],
+      decisionIntervalMs: 60000, dailyRequestLimit: 2, revision: 7, nextDecisionAt: 1,
+      operator: 'admin', reason: 'Visit this friend', updatedAt: 1,
+    });
+    for (const state of ['RUNNING', 'STAY'])
+      await ctx.db.insert('autonomousTravelDecisions', {
+        policyId, policyRevision: 7, worldId, agentGlobalId, playerId: 'p:0', agentId: 'a:1',
+        operationId: `operation-${state}`, state, createdAt: 1, deadline: 2,
+        ...(state === 'STAY' ? { completedAt: 2, reason: 'Stay home' } : {}),
+      });
+  });
+  const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  const beforeApply = Date.now();
+  await t.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'restore', sourceStopped: true });
+  const result = await t.query(async ctx => ({
+    policy: await ctx.db.query('autonomousTravelPolicies').unique(),
+    decisions: await ctx.db.query('autonomousTravelDecisions').collect(),
+    binding: await ctx.db.query('residentModelBindings').unique(),
+  }));
+  expect(result.policy!.nextDecisionAt).toBeGreaterThanOrEqual(beforeApply + 60000);
+  expect(result.policy).toMatchObject({ revision: 7, enabled: true, allowedPeerTownIds: ['town:friend'], agentGlobalId, worldId: result.binding!.worldId });
+  expect(result.decisions.every(d => d.policyId === result.policy!._id && d.worldId === result.binding!.worldId)).toBe(true);
+  expect(result.decisions.find(d => d.operationId === 'operation-RUNNING')).toMatchObject({ state: 'STALE', error: 'BACKUP_RESTORE_INTERRUPTED_DECISION' });
+  expect(result.decisions.find(d => d.operationId === 'operation-STAY')).toMatchObject({ state: 'STAY', completedAt: 2, reason: 'Stay home' });
 });
 
 test('restore atomically remaps core data while preserving identities, profiles, maps, conversations and reflection pointers', async () => {
@@ -786,4 +957,190 @@ test('canonical completed travel transcripts and relationship evidence survive s
   const both = await check();
   expect(both).toHaveLength(2);
   expect(new Set(both.map(tr => tr.agentGlobalId)).size).toBe(2);
+});
+
+test('resident restore retains cyclic memory references through a whole-town ID remap and repeated restore', async () => {
+  const { t, worldId, memoryId } = await town();
+  await t.run(async ctx => {
+    const reflection = (await ctx.db.query('memories').filter(q => q.eq(q.field('data.type'), 'reflection')).unique())!;
+    await ctx.db.patch(memoryId, { data: { type: 'reflection', relatedMemoryIds: [reflection._id] } });
+  });
+  const resident = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  const full = await t.action(action('federation/backup:exportTown'), { adminToken });
+  const restored = await t.action(action('federation/backup:importBackup'), { adminToken, bundle: full, mode: 'restore', sourceStopped: true });
+  const targetWorldId = restored.worldIds[0] as Id<'worlds'>;
+  const first = await t.action(action('federation/backup:importBackup'), await residentRestoreArgs(t, resident, targetWorldId));
+  const second = await t.action(action('federation/backup:importBackup'), await residentRestoreArgs(t, resident, targetWorldId));
+  expect(first.mapping[memoryId]).toBe(restored.mapping[memoryId]);
+  expect(second.mapping[memoryId]).toBe(first.mapping[memoryId]);
+  const memories = await t.query(ctx => ctx.db.query('memories').collect());
+  expect(memories).toHaveLength(2);
+  for (const memory of memories) {
+    expect(memory.worldId).toBe(targetWorldId);
+    expect(memory.data).toMatchObject({ type: 'reflection', relatedMemoryIds: [memories.find(m => m._id !== memory._id)!._id] });
+  }
+});
+
+test('resident restore refuses pending input, live model permits and an active local operation before writing', async () => {
+  const { t, worldId } = await town();
+  const bundle = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  const args = { adminToken, bundle, mode: 'restore', targetWorldId: worldId, sourceStopped: true };
+  const inputId = await t.run(async ctx => {
+    const status = (await ctx.db.query('worldStatus').unique())!;
+    return engineInsertInput(ctx, status.engineId, 'moveTo', { playerId: 'p:0', destination: { x: 1, y: 2 } });
+  });
+  await expect(t.action(action('federation/backup:preflight'), args)).rejects.toThrow('DRAIN_TARGET_WORK_BEFORE_RESIDENT_RESTORE');
+  await t.run(ctx => ctx.db.delete(inputId));
+  const permitId = await t.run(ctx => ctx.db.insert('federationLlmRequests', { state: 'RUNNING', createdAt: Date.now(), startedAt: Date.now(), deadline: Date.now() + 90000, queueDeadline: Date.now() + 30000, expiresAt: Date.now() + 95000 }));
+  await expect(t.action(action('federation/backup:preflight'), args)).rejects.toThrow('DRAIN_TARGET_WORK_BEFORE_RESIDENT_RESTORE');
+  await t.run(ctx => ctx.db.delete(permitId));
+  await t.run(async ctx => {
+    const world = (await ctx.db.get(worldId))!;
+    await ctx.db.patch(worldId, { agents: world.agents.map(agent => ({ ...agent, inProgressOperation: { name: 'agentRememberConversation', operationId: 'active-operation', started: Date.now() } })) });
+  });
+  await expect(t.action(action('federation/backup:preflight'), args)).rejects.toThrow('DRAIN_TARGET_WORK_BEFORE_RESIDENT_RESTORE');
+  expect(await t.query(ctx => ctx.db.query('backupImports').collect())).toEqual([]);
+});
+
+test('resident restore maps durable travel pages and their evidence without replaying a running source summary', async () => {
+  const { t, worldId, agentGlobalId } = await town();
+  await t.run(async ctx => {
+    const ledgerId = await ctx.db.insert('visitLedger', { visitId: 'resident-transcript', agentGlobalId, homeTownId: 'town:original', hostTownId: 'town:foreign',
+      homeDeploymentEpoch: 4, hostDeploymentEpoch: 2, agentAuthorityEpoch: 2, visitLeaseVersion: 1, leaseExpiry: 1, fencingToken: 'fence',
+      role: 'home', state: 'COMPLETED', worldId, homePlayerId: 'p:0', profile: {}, createdAt: 1, updatedAt: 1 });
+    await receiveConversationEnded(ctx, (await ctx.db.get(ledgerId))!, { eventId: 'resident-page', transcriptId: 'resident-conversation',
+      federationConversationId: 'town:foreign/world/c:1', endedAt: 3, pageNumber: 0, finalPage: true,
+      participants: [{ playerId: 'p:9', agentGlobalId, name: 'Ada', homeTownId: 'town:original' }, { playerId: 'p:0', agentGlobalId: 'town:foreign/ava', name: 'Ava', homeTownId: 'town:foreign' }],
+      messages: [{ messageId: 'durable-message', text: 'p:0', author: 'p:9', occurredAt: 1 }] });
+    const transcript = (await ctx.db.query('homeTravelTranscripts').unique())!;
+    await ctx.db.patch(transcript._id, { summaryState: 'RUNNING', summaryStartedAt: 1 });
+  });
+  const bundle = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  await t.run(async ctx => {
+    for (const name of ['memories', 'homeTravelTranscripts', 'homeTravelTranscriptPages'] as const)
+      for (const row of await ctx.db.query(name).collect()) await ctx.db.delete(row._id);
+  });
+  const result = await t.action(action('federation/backup:importBackup'), await residentRestoreArgs(t, bundle, worldId));
+  const after = await t.query(async ctx => ({ transcript: await ctx.db.query('homeTravelTranscripts').unique(), page: await ctx.db.query('homeTravelTranscriptPages').unique(), memories: await ctx.db.query('memories').collect() }));
+  expect(after.transcript).toMatchObject({ agentGlobalId, worldId, playerId: 'p:0', state: 'COMPLETE', summaryState: 'FAILED', summaryError: 'BACKUP_RESTORE_INTERRUPTED_SUMMARY' });
+  expect(after.transcript!.summaryStartedAt).toBeUndefined();
+  expect(after.memories.some(memory => memory._id === after.transcript!.endMemoryId)).toBe(true);
+  expect(after.page!.memoryIds).toEqual(decodeRow(bundle.sections.homeTravelTranscriptPages[0]).memoryIds.map((id: string) => result.mapping[id]));
+  expect(after.page!.messages[0].text).toBe('p:0');
+  expect(after.page!.memoryIds.every(id => after.memories.some(memory => memory._id === id))).toBe(true);
+});
+
+test('small town archives restore source quota and its audit, exclude rolling metrics and accept older packages without quota sections', async () => {
+  const { t, worldId } = await town();
+  await t.run(async ctx => {
+    await ctx.db.insert('federationResourcePolicy', { maxVisitorsPerSourceTown: 3 });
+    await ctx.db.insert('federationResourceAudit', { operation: 'SOURCE_QUOTA_CHANGED', previous: null, next: 3, createdAt: 1 });
+    await ctx.db.insert('federationResourceMetrics', { kind: 'INBOUND_EVENT', bucketStart: Date.now(), count: 1, durationCount: 0, durationSumMs: 0, samples: [] });
+  });
+  const full = await t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(full.sections.federationResourcePolicy.map(decodeRow)).toMatchObject([{ maxVisitorsPerSourceTown: 3 }]);
+  expect(full.sections.federationResourceAudit.map(decodeRow)).toMatchObject([{ operation: 'SOURCE_QUOTA_CHANGED' }]);
+  expect(full.sections.federationResourceMetrics).toBeUndefined();
+  const resident = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  expect(resident.sections.federationResourcePolicy).toEqual([]);
+  expect(resident.sections.federationResourceAudit).toEqual([]);
+  await t.action(action('federation/backup:importBackup'), { adminToken, bundle: full, mode: 'restore', sourceStopped: true });
+  expect(await t.query(ctx => ctx.db.query('federationResourcePolicy').collect())).toMatchObject([{ maxVisitorsPerSourceTown: 3 }]);
+  expect(await t.query(ctx => ctx.db.query('federationResourceAudit').collect())).toMatchObject([{ next: 3 }]);
+  const legacy = structuredClone(full);
+  delete legacy.signature;
+  for (const name of ['federationResourcePolicy', 'federationResourceAudit']) {
+    delete legacy.sections[name];
+    delete legacy.manifest.sections[name];
+  }
+  const identity = (await t.query(ctx => ctx.db.query('federationIdentity').unique()))!;
+  legacy.signature = await sign(legacy.manifest, identity.privateKeyEncrypted);
+  await t.action(action('federation/backup:importBackup'), { adminToken, bundle: legacy, mode: 'restore', sourceStopped: true });
+  expect(await t.query(ctx => ctx.db.query('federationResourcePolicy').collect())).toEqual([]);
+});
+
+
+test('resident restore confirmation binds the reviewed source archive as well as the target snapshot', async () => {
+  const { t, worldId } = await town();
+  const original = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  const args = await residentRestoreArgs(t, original, worldId);
+  const different = await rewrite(original, 'agentDescriptions', row => { row.identity = 'A different archived persona'; });
+  const local = (await t.query(ctx => ctx.db.query('federationIdentity').unique()))!;
+  different.signature = await sign(different.manifest, local.privateKeyEncrypted);
+  await expect(t.action(action('federation/backup:importBackup'), { ...args, bundle: different })).rejects.toThrow('RESIDENT_RESTORE_TARGET_CHANGED');
+  expect(await t.query(ctx => ctx.db.query('backupImports').collect())).toEqual([]);
+});
+
+
+test('small archives cross Convex wire serialization without losing bytes or special numeric runtime data', async () => {
+  const { t } = await town();
+  await t.run(async ctx => {
+    const status = (await ctx.db.query('worldStatus').unique())!;
+    await ctx.db.insert('inputs', { engineId: status.engineId, number: 0, name: 'runtimeEvidence', received: 1,
+      args: { deadline: Infinity, negativeInfinity: -Infinity, missingNumber: NaN, negativeZero: -0, bits: new Uint8Array([0, 127, 255]).buffer } });
+  });
+  const exported = await t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(() => convexToJson(exported as unknown as Value)).not.toThrow();
+  expect(typeof exported.sections.inputs[0]).toBe('string');
+  const check = (bundle: BackupBundle) => {
+    const data = decodeRow(bundle.sections.inputs[0]).args;
+    expect(data.deadline).toBe(Infinity);
+    expect(data.negativeInfinity).toBe(-Infinity);
+    expect(Number.isNaN(data.missingNumber)).toBe(true);
+    expect(Object.is(data.negativeZero, -0)).toBe(true);
+    expect([...new Uint8Array(data.bits)]).toEqual([0, 127, 255]);
+  };
+  check(await validateBundle(JSON.stringify(exported)));
+  await t.action(action('federation/backup:importBackup'), { adminToken, bundleJson: JSON.stringify(exported), mode: 'restore', sourceStopped: true });
+  const audit = (await t.query(ctx => ctx.db.query('backupImports').unique()))!;
+  check({ ...exported, sections: { inputs: audit.runtimeSnapshot.inputs } });
+  expect(() => convexToJson(audit as Value)).not.toThrow();
+});
+
+test('legacy object-row archives preserve signed special values when imported using JSON file transport', async () => {
+  const { t } = await town();
+  await t.run(async ctx => {
+    const status = (await ctx.db.query('worldStatus').unique())!;
+    await ctx.db.insert('inputs', { engineId: status.engineId, number: 0, name: 'runtimeEvidence', received: 1,
+      args: { deadline: Infinity, bits: new Uint8Array([8, 9]).buffer } });
+  });
+  const exported = await t.action(action('federation/backup:exportTown'), { adminToken });
+  const legacy: BackupBundle = structuredClone(exported);
+  for (const [name, rows] of Object.entries(legacy.sections)) {
+    legacy.sections[name] = rows.map(row => JSON.parse(row as string));
+    legacy.manifest.sections[name] = { count: rows.length, digest: await digest(legacy.sections[name]),
+      bytes: new TextEncoder().encode(JSON.stringify(legacy.sections[name])).length };
+  }
+  const local = (await t.query(ctx => ctx.db.query('federationIdentity').unique()))!;
+  legacy.signature = await sign(legacy.manifest, local.privateKeyEncrypted);
+  expect(() => convexToJson(legacy as unknown as Value)).toThrow();
+  await expect(validateBundle(JSON.stringify(legacy))).resolves.toEqual(legacy);
+  await expect(t.action(action('federation/backup:preflight'), { adminToken, bundleJson: JSON.stringify(legacy), mode: 'restore', sourceStopped: true })).resolves.toMatchObject({ valid: true });
+  await expect(t.action(action('federation/backup:importBackup'), { adminToken, bundleJson: JSON.stringify(legacy), mode: 'restore', sourceStopped: true })).resolves.toMatchObject({ mode: 'restore' });
+});
+
+test('encoded string rows cannot hide credentials from archive validation', async () => {
+  const { t } = await town();
+  const exported = await t.action(action('federation/backup:exportTown'), { adminToken });
+  const unsafe = await rewrite(exported, 'chatProfiles', row => { row.apiKey = 'forbidden-test-value'; });
+  await expect(validateBundle(unsafe)).rejects.toThrow('BACKUP_CONTAINS_CREDENTIALS');
+});
+
+
+test('resident file restore preserves the real player negative-zero direction through Convex RPC', async () => {
+  const { t, worldId } = await town();
+  await t.run(async ctx => {
+    const world = (await ctx.db.get(worldId))!;
+    await ctx.db.patch(worldId, { players: world.players.map(player => ({ ...player, facing: { dx: 1, dy: -0 } })) });
+  });
+  const bundle = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  expect(() => convexToJson(bundle as unknown as Value)).not.toThrow();
+  expect(Object.is(decodeRow(bundle.sections.worlds[0]).players[0].facing.dy, -0)).toBe(true);
+  await t.run(ctx => ctx.db.patch(worldId, { players: [] }));
+  const args = { adminToken, bundle: JSON.stringify(bundle), mode: 'restore', targetWorldId: worldId, sourceStopped: true };
+  const report = await t.action(action('federation/backup:preflight'), args);
+  await t.action(action('federation/backup:importBackup'), { ...args, bundle: undefined, bundleJson: args.bundle,
+    residentRestore: { expectedTargetDigest: report.residentRestorePlan!.targetDigest, confirmOverwrite: true, operator: 'Home administrator', reason: 'Verify original direction' } });
+  const restored = (await t.query(ctx => ctx.db.get(worldId)))!;
+  expect(Object.is(restored.players[0].facing.dy, -0)).toBe(true);
 });

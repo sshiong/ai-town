@@ -21,6 +21,7 @@ import {
   remapValue,
   stripSystem,
   snapshotTables,
+  restoredAutonomyFields,
 } from './backupHelpers';
 import {
   ChunkDescriptor,
@@ -45,6 +46,7 @@ import { rowMetadata, relationKey, leaseEvidence } from './backupLargeHelpers';
 import { validateConnection } from '../models/profiles';
 import { defaultStoragePolicy } from './storagePolicy';
 import { embeddingFingerprint } from '../models/compatibility';
+import { assertNoIdentityConflict } from './identityConflict';
 
 type Job = Doc<'backupLargeJobs'>;
 const args = { adminToken: v.string(), jobId: v.id('backupLargeJobs') };
@@ -490,9 +492,11 @@ export const createImportJob = internalMutation({
   handler: async (ctx, a) => {
     requireAdmin(a.adminToken);
     await assertTownUnlocked(ctx);
+    await assertNoIdentityConflict(ctx);
     const local = await stable(ctx, a.mode === 'clone');
     await validateManifest(a.manifest, a.signature);
     const source = a.manifest.source;
+    if (source.mode === 'QUARANTINED') throw new Error('TOWN_CLONE_CONFLICT');
     if (a.mode === 'clone') {
       if (!a.targetEndpoint) throw new Error('CLONE_ENDPOINT_REQUIRED');
       normalizeEndpoint(a.targetEndpoint);
@@ -799,6 +803,17 @@ export const validatePage = internalMutation({
         if (binding?.metadata.agentGlobalId !== m.agentGlobalId)
           throw new Error('BACKUP_MEMORY_OWNER_MISMATCH');
       }
+      if (row.table === 'autonomousTravelPolicies') {
+        const binding = await relatedRow(ctx, job._id, 'residentModelBindings', `${m.worldId}:${m.playerId}`);
+        if (binding?.metadata.agentGlobalId !== m.agentGlobalId)
+          throw new Error('BACKUP_AUTONOMOUS_POLICY_OWNER_MISMATCH');
+      }
+      if (row.table === 'autonomousTravelDecisions') {
+        const policy = await sourceRow(ctx, job._id, m.policyId);
+        if (policy?.table !== 'autonomousTravelPolicies' || policy.metadata.worldId !== m.worldId ||
+            policy.metadata.playerId !== m.playerId || policy.metadata.agentGlobalId !== m.agentGlobalId)
+          throw new Error('BACKUP_AUTONOMOUS_DECISION_OWNER_MISMATCH');
+      }
       await ctx.db.patch(row._id, { state: 'VALIDATED' });
     }
     await ctx.db.patch(job._id, {
@@ -920,6 +935,14 @@ export const deleteOldPage = internalMutation({
     });
   },
 });
+function allocationMemoryFields(fields: BackupRow): BackupRow {
+  // Memory links may point forward or form cycles. Allocate every ID before the REMAP pass.
+  if (fields.data.type === 'reflection')
+    return { ...fields, data: { ...fields.data, relatedMemoryIds: [] } };
+  if (fields.data.type === 'relationship' && fields.data.evidenceMemoryIds)
+    return { ...fields, data: { ...fields.data, evidenceMemoryIds: [] } };
+  return fields;
+}
 function activeFields(name: string, row: BackupRow, job: Job, allocation: boolean): BackupRow {
   let fields = stripSystem(row);
   if (name === 'engines')
@@ -929,8 +952,7 @@ function activeFields(name: string, row: BackupRow, job: Job, allocation: boolea
   if (name === 'memories') {
     const { embeddingId, embeddingSpaceId, ...canonical } = fields;
     fields = canonical;
-    if (allocation && fields.data.type === 'reflection')
-      fields = { ...fields, data: { type: 'reflection', relatedMemoryIds: [] } };
+    if (allocation) fields = allocationMemoryFields(fields);
   }
   if (name === 'worlds') {
     fields = {
@@ -993,7 +1015,7 @@ function activeFields(name: string, row: BackupRow, job: Job, allocation: boolea
       failure: undefined,
     };
   if (name === 'storagePolicies') fields = { ...fields, lastVerifiedBackupAt: undefined };
-  return fields;
+  return restoredAutonomyFields(name, fields);
 }
 async function mappingFor(
   ctx: { db: DatabaseReader },
@@ -1087,8 +1109,7 @@ export const applyChunk = internalMutation({
         if (rollback && !remapping && chunk.table === 'memories') {
           const { embeddingId, ...canonical } = fields;
           fields = canonical;
-          if (fields.data.type === 'reflection')
-            fields = { ...fields, data: { type: 'reflection', relatedMemoryIds: [] } };
+          fields = allocationMemoryFields(fields);
         }
         const mapping = await mappingFor(ctx, job, role, fields);
         if (!rollback)
@@ -1132,6 +1153,7 @@ export const finalizeImport = internalMutation({
   handler: async (ctx, a) => {
     const job = await owned(ctx, a.jobId);
     if (job.phase !== 'FINALIZE') throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    await assertNoIdentityConflict(ctx);
     const source = job.source;
     const now = Date.now();
     let local = await identity(ctx);

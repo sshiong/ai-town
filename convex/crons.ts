@@ -20,6 +20,7 @@ crons.interval(
   { seconds: 10 },
   internal.federation.transport.tick,
 );
+crons.interval('federation endpoint update retries', { seconds: 10 }, internal.federation.endpoints.retryPending);
 crons.interval('federation final conversation delivery', { seconds: 10 }, internal.federation.transcripts.flushPending);
 crons.interval('retry complete travel conversation summaries', { seconds: 60 }, internal.agent.travelTranscript.retrySummaries);
 crons.interval('remote decision deadlines', { seconds: 10 }, internal.federation.decision.recover);

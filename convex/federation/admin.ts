@@ -6,6 +6,8 @@ import { identity } from './store';
 import { normalizeEndpoint } from './protocol';
 import { actionRef, mutationRef } from './refs';
 import { resourceLimits, validateResourceLimits, configuredResourceLimits, pendingDecisionCount } from './resources';
+import { resourceMeasurements, sourceVisitorQuota } from './resourceMonitoring';
+import { commitLocalEndpoint } from './endpoints';
 export const configureResources = mutation({
   args: { adminToken: v.string(), limits: resourceLimits },
   handler: async (ctx, args) => {
@@ -14,6 +16,8 @@ export const configureResources = mutation({
     const local = await identity(ctx);
     if (!local) throw new Error('INITIALIZE_IDENTITY_FIRST');
     // Reducing a budget pauses new admissions; existing residents and work are retained.
+    await ctx.db.insert('federationResourceAudit', { operation: 'LIMITS_CHANGED',
+      previous: local.resourceLimits ?? await configuredResourceLimits(ctx.db), next: args.limits, createdAt: Date.now() });
     await ctx.db.patch(local._id, { resourceLimits: args.limits });
   },
 });
@@ -129,6 +133,8 @@ export const status = query({
       .withIndex('state_expiry', q => q.eq('state', 'RUNNING').gt('expiresAt', now)).take(33);
     const sessions = await ctx.db.query('transportSessions').take(100);
     const requests = await ctx.db.query('pairRequests').order('desc').take(100);
+    const unreadRequests = await ctx.db.query('pairRequests').withIndex('direction_read', q => q.eq('direction', 'INBOUND').eq('readAt', undefined)).take(1001);
+    const visibleRequests = [...unreadRequests.slice(0, 100), ...requests.filter(request => !unreadRequests.some(unread => unread._id === request._id))].slice(0, 100);
     const visits = await ctx.db.query('visitLedger').order('desc').take(100);
     const slots = await ctx.db
       .query('visitReservations')
@@ -150,6 +156,11 @@ export const status = query({
     const admissionState = !local?.enabled || local.mode !== 'ACTIVE' ? 'CLOSED'
       : activeSlots.length >= local.maxVisitors || reservations >= limits.maxVisitReservations ? 'FULL'
       : pendingDecisions >= limits.maxPendingDecisions || chatQueueFull || !limits.maxConcurrentLocalLLM ? 'DEGRADED' : 'OPEN';
+    const sourceOccupancy = new Map<string, number>();
+    for (const slot of activeSlots) {
+      const ledger = slotLedgers[slots.indexOf(slot)];
+      if (ledger?.role === 'host') sourceOccupancy.set(ledger.homeTownId, (sourceOccupancy.get(ledger.homeTownId) ?? 0) + 1);
+    }
     return {
       resources: {
         limits, admissionState,
@@ -157,6 +168,10 @@ export const status = query({
         humans: worlds.reduce((count, world) => count + world.players.filter(p => p.human).length, 0),
         reservations, pendingDecisions, pendingLocalLLM: pendingChat.length, runningLocalLLM: runningChat.length,
         cpu: null, memory: null,
+        measurements: await resourceMeasurements(ctx.db, now),
+        maxVisitorsPerSourceTown: await sourceVisitorQuota(ctx.db),
+        sourceOccupancy: [...sourceOccupancy].map(([townId, occupied]) => ({ townId, occupied })),
+        audit: await ctx.db.query('federationResourceAudit').withIndex('created').order('desc').take(25),
       },
       capacity: {
         reserved: slots.filter(
@@ -225,17 +240,23 @@ export const status = query({
           };
         },
       ),
-      pairRequests: requests.map((r) => ({
+      unreadPairRequests: unreadRequests.length,
+      pairRequests: visibleRequests.map((r) => ({
         pairRequestId: r.pairRequestId,
         direction: r.direction,
         state:
-          r.expiresAt < Date.now() && !['TRUSTED', 'REJECTED'].includes(r.state)
+          r.expiresAt <= now && !['TRUSTED', 'REJECTED', 'AUTH_FAILED', 'CANCELLED', 'CANCEL_PENDING'].includes(r.state)
             ? 'EXPIRED'
             : r.state,
         endpoint: r.endpoint,
-        claimedTownId: r.request.townId,
-        claimedTownName: r.request.townName,
-        fingerprint: r.request.fingerprint,
+        claimedTownId: r.direction === 'INBOUND' ? r.request.townId : r.request.targetTownId,
+        claimedTownName: r.direction === 'INBOUND' ? r.request.townName : r.targetIdentity?.townName,
+        fingerprint: r.direction === 'INBOUND' ? r.request.fingerprint : r.targetIdentity?.fingerprint,
+        protocol: r.direction === 'INBOUND' ? r.request.protocol : r.targetIdentity?.protocol,
+        identityVerified: r.state === 'TRUSTED',
+        unread: r.direction === 'INBOUND' && r.readAt === undefined,
+        requestedAt: r.requestedAt,
+        retryAfter: r.requestedAt + 60_000,
         expiresAt: r.expiresAt,
       })),
       visits: visits.map(
@@ -268,32 +289,10 @@ export const status = query({
 });
 
 export const updateLocalEndpoint = mutation({
-  args: { adminToken: v.string(), endpoint: v.string() },
+  args: { adminToken: v.string(), endpoint: v.string(), operator: v.optional(v.string()), reason: v.optional(v.string()) },
   handler: async (ctx, args) => {
     requireAdmin(args.adminToken);
-    const local = await identity(ctx);
-    if (!local) throw new Error('INITIALIZE_IDENTITY_FIRST');
-    if (local.mode !== 'ACTIVE') throw new Error('DEPLOYMENT_NOT_ACTIVE');
-    const endpoint = normalizeEndpoint(args.endpoint);
-    if (local.endpoint === endpoint) return { townId: local.townId, endpoint };
-    await ctx.db.patch(local._id, { endpoint });
-    const connections = await ctx.db.query('transportSessions').collect();
-    for (const connection of connections) {
-      await ctx.db.patch(connection._id, {
-        channelState: 'TRANSPORT_TESTING',
-        inboundVerifiedAt: undefined,
-        outboundVerifiedAt: undefined,
-        lastError: undefined,
-      });
-      const remote = await ctx.db
-        .query('federationPeers')
-        .withIndex('townId', (q) => q.eq('townId', connection.peerTownId))
-        .unique();
-      if (local.enabled && remote?.trustState === 'TRUSTED')
-        await ctx.scheduler.runAfter(0, actionRef('transport/probeInternal'), {
-          peerTownId: remote.townId,
-        });
-    }
-    return { townId: local.townId, endpoint };
+    return commitLocalEndpoint(ctx, { endpoint: args.endpoint,
+      operator: args.operator ?? 'Local administrator', reason: args.reason ?? 'Administrator changed the town address' });
   },
 });

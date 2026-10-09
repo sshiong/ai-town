@@ -3,10 +3,11 @@ import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import schema from '../schema';
 import { actionRef, mutationRef, queryRef } from './refs';
-import { createIdentityKeys, digest, randomSecret, sealSecret, signPacket } from './security';
+import { createIdentityKeys, digest, randomSecret, sealSecret, sign, signPacket } from './security';
 import { FederationMessage, PROTOCOL, streamKey } from './protocol';
 import { homeFrozen, hostCreated, hostRemoved, homeResumed } from './ledger';
 import { enqueueMessage } from './queue';
+import { resourceMeasurements } from './resourceMonitoring';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 const modules = {
@@ -17,6 +18,7 @@ const modules = {
   '../federation/runtime.ts': () => import('./runtime'),
   '../federation/peers.ts': () => import('./peers'),
   '../federation/admin.ts': () => import('./admin'),
+  '../federation/identityConflict.ts': () => import('./identityConflict'),
   '../http.ts': async () => {
     const { httpRouter } = await import('convex/server');
     const { registerPairingRoutes } = await import('./peers');
@@ -111,6 +113,23 @@ test('four epochs are independent and authentication rejects forged packets befo
   packet.mac = 'forged';
   await expect(b.t.action(actionRef('transport/receiveMessage'), { packet })).rejects.toThrow('MESSAGE_AUTH_FAILED');
   expect(await b.t.run(ctx => ctx.db.query('federationInbox').collect())).toEqual([]);
+  expect((await b.t.run(ctx => resourceMeasurements(ctx.db))).inboundEvents).toBe(0);
+});
+
+test('authenticated Inbox metrics count unique accepted events once across signed retries and conflicts', async () => {
+  const { a, b, credentialEncrypted } = await setup();
+  await seedVisit(b, a, 'host');
+  const msg = visitMessage(a, b, 'VISIT_CONFIRM', 1);
+  const packet = await signPacket(msg, a.keys.privateKeyEncrypted, credentialEncrypted);
+  expect((await b.t.action(actionRef('transport/receiveMessage'), { packet })).body.status).toBe('COMMITTED');
+  expect((await b.t.action(actionRef('transport/receiveMessage'), { packet })).body.status).toBe('COMMITTED');
+  const conflict = await signPacket({ ...msg, payload: { ...msg.payload, extra: true } }, a.keys.privateKeyEncrypted, credentialEncrypted);
+  await expect(b.t.action(actionRef('transport/receiveMessage'), { packet: conflict })).rejects.toThrow('MESSAGE_ID_CONFLICT');
+  const forged = await signPacket({ ...msg, messageId: crypto.randomUUID(), nonce: crypto.randomUUID() }, a.keys.privateKeyEncrypted, credentialEncrypted);
+  forged.mac = 'forged';
+  await expect(b.t.action(actionRef('transport/receiveMessage'), { packet: forged })).rejects.toThrow('MESSAGE_AUTH_FAILED');
+  expect(await b.t.run(ctx => ctx.db.query('federationInbox').collect())).toHaveLength(1);
+  expect((await b.t.run(ctx => resourceMeasurements(ctx.db))).inboundEvents).toBe(1);
 });
 
 test('reservation capacity is atomic, retries are idempotent, and trust without ready refuses travel', async () => {
@@ -369,6 +388,193 @@ test('pair approval with a different local secret cannot create trust', async ()
   await expect(b.t.action(actionRef('peers/approvePair'), { adminToken, pairRequestId: pair.pairRequestId, pairingSecret: randomSecret() })).rejects.toThrow('AUTH_FAILED');
   expect((await b.t.run(ctx => ctx.db.query('pairRequests').unique()))?.state).toBe('AUTH_FAILED');
   expect(await b.t.run(ctx => ctx.db.query('federationPeers').collect())).toEqual([]);
+});
+
+async function freshPairingTowns() {
+  process.env.FEDERATION_ADMIN_TOKEN = adminToken;
+  process.env.FEDERATION_KEY_ENCRYPTION_KEY = randomSecret();
+  const towns = { a: await town('town-a', await createIdentityKeys()), b: await town('town-b', await createIdentityKeys()) };
+  globalThis.fetch = (async (url: any, init: any) => {
+    const target = String(url).includes('town-a.example') ? towns.a : towns.b;
+    return target.t.fetch(new URL(String(url)).pathname, { method: init?.method ?? 'GET', headers: init?.headers, body: init?.body });
+  }) as typeof fetch;
+  return towns;
+}
+
+// Recreate the complete test runtime from persisted documents. No closures,
+// action state or scheduler state survives; pairing must use its stored keys.
+async function restartPairingTown(local: Town) {
+  const tables = ['federationIdentity', 'pairRequests', 'federationPeers', 'transportSessions', 'federationReplayNonces'] as const;
+  const snapshots = await local.t.run(async ctx => Promise.all(tables.map(table => ctx.db.query(table).collect())));
+  const t = convexTest(schema, modules);
+  await t.run(async ctx => {
+    for (let index = 0; index < tables.length; index++) {
+      for (const { _id, _creationTime, ...record } of snapshots[index]) await ctx.db.insert(tables[index], record as any);
+    }
+  });
+  return { ...local, t };
+}
+
+test('inbound unread notifications persist through restart and reads never approve or expose secrets', async () => {
+  const towns = await freshPairingTowns();
+  const pair = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: randomSecret() });
+  towns.b = await restartPairingTown(towns.b);
+  const status = await towns.b.t.query(queryRef('admin/status'), { adminToken });
+  expect(status.unreadPairRequests).toBe(1);
+  expect(status.pairRequests[0]).toMatchObject({ pairRequestId: pair.pairRequestId, unread: true, identityVerified: false, claimedTownId: towns.a.townId, protocol: PROTOCOL });
+  expect(JSON.stringify(status)).not.toMatch(/secretEncrypted|privateKeyEncrypted|ephemeralPrivateEncrypted|credentialEncrypted|"proof"/);
+  await expect(towns.b.t.mutation(mutationRef('peers/markPairRead'), { adminToken: 'incorrect', pairRequestId: pair.pairRequestId })).rejects.toThrow();
+  await towns.b.t.mutation(mutationRef('peers/markPairRead'), { adminToken, pairRequestId: pair.pairRequestId });
+  towns.b = await restartPairingTown(towns.b);
+  expect((await towns.b.t.query(queryRef('admin/status'), { adminToken })).unreadPairRequests).toBe(0);
+  expect((await towns.b.t.run(ctx => ctx.db.query('pairRequests').unique()))?.state).toBe('PENDING_APPROVAL');
+  expect(await towns.b.t.run(ctx => ctx.db.query('federationPeers').collect())).toEqual([]);
+  const outbound = await towns.a.t.query(queryRef('admin/status'), { adminToken });
+  expect(outbound.pairRequests[0]).toMatchObject({ claimedTownId: towns.b.townId, claimedTownName: towns.b.townId, fingerprint: towns.b.keys.fingerprint, unread: false, identityVerified: false });
+});
+
+test('rejection remains queryable across both restarts, retries cool down and create a new unread request ID', async () => {
+  const towns = await freshPairingTowns(), secret = randomSecret();
+  const old = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: secret });
+  await towns.b.t.mutation(mutationRef('peers/rejectPair'), { adminToken, pairRequestId: old.pairRequestId });
+  towns.a = await restartPairingTown(towns.a); towns.b = await restartPairingTown(towns.b);
+  expect((await towns.a.t.action(actionRef('peers/continuePair'), { adminToken, pairRequestId: old.pairRequestId })).state).toBe('REJECTED');
+  await expect(towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: secret })).rejects.toThrow('PAIR_RATE_LIMITED');
+  jest.setSystemTime(Date.now() + 60_001);
+  const next = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: secret });
+  expect(next.pairRequestId).not.toBe(old.pairRequestId);
+  const records = await towns.b.t.run(ctx => ctx.db.query('pairRequests').collect());
+  expect(records).toHaveLength(2);
+  expect(records.find(p => p.pairRequestId === old.pairRequestId)?.state).toBe('REJECTED');
+  expect((await towns.b.t.query(queryRef('admin/status'), { adminToken })).unreadPairRequests).toBe(1);
+  await towns.b.t.action(actionRef('peers/approvePair'), { adminToken, pairRequestId: next.pairRequestId, pairingSecret: secret });
+  expect((await towns.a.t.action(actionRef('peers/continuePair'), { adminToken, pairRequestId: next.pairRequestId })).state).toBe('TRUSTED');
+  for (const local of [towns.a, towns.b]) expect(await local.t.run(ctx => ctx.db.query('federationPeers').collect())).toHaveLength(1);
+});
+
+test('outbound cancellation survives a lost acknowledgement, cannot be resurrected and retries idempotently after restart', async () => {
+  const towns = await freshPairingTowns(), secret = randomSecret();
+  const pair = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: secret });
+  const directFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: any, init: any) => {
+    const result = await directFetch(url, init);
+    if (init?.body && JSON.parse(init.body).operation === 'cancel') throw new Error('lost cancel acknowledgement');
+    return result;
+  }) as typeof fetch;
+  await expect(towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('lost cancel acknowledgement');
+  const local = (await towns.a.t.run(ctx => ctx.db.query('pairRequests').unique()))!;
+  expect(local.state).toBe('CANCEL_PENDING');
+  expect(local.secretEncrypted).toBeUndefined(); expect(local.ephemeralPrivateEncrypted).toBeUndefined();
+  expect((await towns.b.t.run(ctx => ctx.db.query('pairRequests').unique()))?.state).toBe('CANCELLED');
+  await towns.a.t.mutation(mutationRef('peers/updatePairState'), { pairRequestId: pair.pairRequestId, state: 'PENDING_APPROVAL' });
+  await expect(towns.a.t.action(actionRef('peers/continuePair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('PAIR_NOT_PENDING');
+  await expect(towns.b.t.action(actionRef('peers/approvePair'), { adminToken, pairRequestId: pair.pairRequestId, pairingSecret: secret })).rejects.toThrow('PAIR_NOT_PENDING');
+  towns.a = await restartPairingTown(towns.a); towns.b = await restartPairingTown(towns.b); globalThis.fetch = directFetch;
+  expect((await towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).state).toBe('CANCELLED');
+  expect((await towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).state).toBe('CANCELLED');
+  for (const town of [towns.a, towns.b]) expect(await town.t.run(ctx => ctx.db.query('federationPeers').collect())).toEqual([]);
+});
+
+test('local inbound cancellation erases an approved credential and the initiator learns the terminal result', async () => {
+  const towns = await freshPairingTowns(), secret = randomSecret();
+  const pair = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: secret });
+  await towns.b.t.action(actionRef('peers/approvePair'), { adminToken, pairRequestId: pair.pairRequestId, pairingSecret: secret });
+  await expect(towns.b.t.action(actionRef('peers/cancelPair'), { adminToken: 'incorrect', pairRequestId: pair.pairRequestId })).rejects.toThrow();
+  expect((await towns.b.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).state).toBe('CANCELLED');
+  const record = (await towns.b.t.run(ctx => ctx.db.query('pairRequests').unique()))!;
+  expect(record.credentialEncrypted).toBeUndefined();
+  towns.b = await restartPairingTown(towns.b);
+  expect((await towns.a.t.action(actionRef('peers/continuePair'), { adminToken, pairRequestId: pair.pairRequestId })).state).toBe('CANCELLED');
+  await expect(towns.b.t.mutation(mutationRef('peers/finalizePair'), { pairRequestId: pair.pairRequestId, remote: {}, credentialEncrypted: 'invalid' })).rejects.toThrow('PAIR_NOT_CONFIRMABLE');
+  for (const town of [towns.a, towns.b]) expect(await town.t.run(ctx => ctx.db.query('federationPeers').collect())).toEqual([]);
+});
+
+test('cancel controls require the bound requester signature and fresh nonce, and cannot revoke trusted pairing', async () => {
+  const towns = await freshPairingTowns(), secret = randomSecret();
+  const pair = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: secret });
+  const body = { pairRequestId: pair.pairRequestId, townId: towns.a.townId, nonce: crypto.randomUUID(), expiresAt: Date.now() + 30_000 };
+  const send = (signature: string) => towns.b.t.fetch('/federation/v1/pair', { method: 'POST', body: JSON.stringify({ operation: 'cancel', body, signature }) });
+  expect((await send(await sign(body, towns.b.keys.privateKeyEncrypted))).status).toBe(400);
+  expect((await towns.b.t.run(ctx => ctx.db.query('pairRequests').unique()))?.state).toBe('PENDING_APPROVAL');
+  const signature = await sign(body, towns.a.keys.privateKeyEncrypted);
+  expect((await send(signature)).status).toBe(200);
+  expect(await (await send(signature)).json()).toMatchObject({ error: 'REPLAYED_NONCE' });
+  jest.setSystemTime(Date.now() + 60_001);
+  const next = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: secret });
+  await towns.b.t.action(actionRef('peers/approvePair'), { adminToken, pairRequestId: next.pairRequestId, pairingSecret: secret });
+  await towns.a.t.action(actionRef('peers/continuePair'), { adminToken, pairRequestId: next.pairRequestId });
+  for (const local of [towns.a, towns.b]) await expect(local.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: next.pairRequestId })).rejects.toThrow('PAIR_NOT_CANCELLABLE');
+});
+
+test('both-confirm waiting and a lost final response recover from persisted records after both towns restart', async () => {
+  const towns = await freshPairingTowns(), secret = randomSecret();
+  const pair = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: secret });
+  await towns.b.t.action(actionRef('peers/approvePair'), { adminToken, pairRequestId: pair.pairRequestId, pairingSecret: secret });
+  towns.a = await restartPairingTown(towns.a); towns.b = await restartPairingTown(towns.b);
+  expect((await towns.b.t.query(queryRef('admin/status'), { adminToken })).pairRequests[0].state).toBe('PENDING_BOTH_CONFIRM');
+  expect(await towns.b.t.run(ctx => ctx.db.query('federationPeers').collect())).toEqual([]);
+  const directFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: any, init: any) => {
+    const result = await directFetch(url, init);
+    if (init?.body && JSON.parse(init.body).operation === 'confirm') throw new Error('lost final acknowledgement');
+    return result;
+  }) as typeof fetch;
+  await expect(towns.a.t.action(actionRef('peers/continuePair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('lost final acknowledgement');
+  expect((await towns.a.t.run(ctx => ctx.db.query('pairRequests').unique()))?.state).toBe('PENDING_BOTH_CONFIRM');
+  expect((await towns.b.t.run(ctx => ctx.db.query('pairRequests').unique()))?.state).toBe('TRUSTED');
+  await expect(towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('PAIR_NOT_CANCELLABLE');
+  towns.a = await restartPairingTown(towns.a); towns.b = await restartPairingTown(towns.b); globalThis.fetch = directFetch;
+  expect((await towns.a.t.action(actionRef('peers/continuePair'), { adminToken, pairRequestId: pair.pairRequestId })).state).toBe('TRUSTED');
+  for (const local of [towns.a, towns.b]) expect(await local.t.run(ctx => ctx.db.query('federationPeers').collect())).toHaveLength(1);
+});
+
+test('cancellation wins over a delayed approved status and prevents any late confirmation from being sent', async () => {
+  const towns = await freshPairingTowns(), secret = randomSecret();
+  const pair = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: secret });
+  await towns.b.t.action(actionRef('peers/approvePair'), { adminToken, pairRequestId: pair.pairRequestId, pairingSecret: secret });
+  const directFetch = globalThis.fetch;
+  let releaseStatus!: () => void, statusArrived!: () => void;
+  const blocked = new Promise<void>(resolve => { releaseStatus = resolve; });
+  const arrived = new Promise<void>(resolve => { statusArrived = resolve; });
+  let confirmations = 0;
+  globalThis.fetch = (async (url: any, init: any) => {
+    const operation = init?.body ? JSON.parse(init.body).operation : undefined;
+    if (operation === 'confirm') confirmations++;
+    const result = await directFetch(url, init);
+    if (operation === 'status') { statusArrived(); await blocked; }
+    return result;
+  }) as typeof fetch;
+  const continuing = towns.a.t.action(actionRef('peers/continuePair'), { adminToken, pairRequestId: pair.pairRequestId });
+  await arrived;
+  await towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId });
+  const failure = expect(continuing).rejects.toThrow('PAIR_NOT_CONFIRMABLE');
+  releaseStatus(); await failure;
+  expect(confirmations).toBe(0);
+  for (const local of [towns.a, towns.b]) {
+    expect((await local.t.run(ctx => ctx.db.query('pairRequests').unique()))?.state).toBe('CANCELLED');
+    expect(await local.t.run(ctx => ctx.db.query('federationPeers').collect())).toEqual([]);
+  }
+});
+
+test('once an outbound final confirmation is claimed stale approval cannot reopen cancellation', async () => {
+  const towns = await freshPairingTowns();
+  const pair = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: randomSecret() });
+  await towns.a.t.mutation(mutationRef('peers/beginConfirmation'), { pairRequestId: pair.pairRequestId });
+  await towns.a.t.mutation(mutationRef('peers/updatePairState'), { pairRequestId: pair.pairRequestId, state: 'PENDING_APPROVAL' });
+  expect((await towns.a.t.run(ctx => ctx.db.query('pairRequests').unique()))?.state).toBe('PENDING_BOTH_CONFIRM');
+  await expect(towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('PAIR_NOT_CANCELLABLE');
+});
+
+test('an unreachable cancelled request can close locally after its shared deadline without recreating credentials', async () => {
+  const towns = await freshPairingTowns();
+  const pair = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: randomSecret() });
+  globalThis.fetch = (async () => { throw new Error('offline peer'); }) as typeof fetch;
+  await expect(towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('offline peer');
+  jest.setSystemTime(Date.now() + 600_001);
+  expect((await towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).state).toBe('CANCELLED');
+  const local = (await towns.a.t.run(ctx => ctx.db.query('pairRequests').unique()))!;
+  expect(local.secretEncrypted).toBeUndefined(); expect(local.ephemeralPrivateEncrypted).toBeUndefined();
+  await expect(towns.b.t.mutation(mutationRef('peers/finalizePair'), { pairRequestId: pair.pairRequestId, remote: {}, credentialEncrypted: 'invalid' })).rejects.toThrow('PAIR_NOT_CONFIRMABLE');
 });
 
 test('resync retries a ledger snapshot after cleanup and resets only the terminated stream', async () => {

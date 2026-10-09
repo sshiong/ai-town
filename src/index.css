@@ -215,6 +215,7 @@ p[contenteditable='true']:empty::before {
 .admin-list { padding: 0; list-style: none; }
 .admin-list > li { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 18px 0; border-bottom: 2px solid #4f3c46; }
 .admin-list code, .admin-facts code { display: block; overflow-wrap: anywhere; font-size: 12px; color: #c8b6a8; line-height: 1.6; }
+.admin-list strong { overflow-wrap: anywhere; }
 .admin-peer { width: 100%; }
 .admin-badge { display: inline-block; font-size: 11px; border: 1px solid #987458; color: #ffe2a2; padding: 3px 7px; margin: 4px 2px; overflow-wrap: anywhere; }
 .admin-inline-form { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin: 14px 0; }

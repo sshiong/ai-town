@@ -2,12 +2,14 @@ import { v } from 'convex/values';
 import { internalMutation, mutation, MutationCtx } from '../maintenanceFunctions';
 import { Doc } from '../_generated/dataModel';
 import { requireAdmin } from './security';
+import { assertNoIdentityConflict } from './identityConflict';
 import { identity, peer, ready, session, visit } from './store';
 import { enqueueMessage } from './queue';
 import { mutationRef } from './refs';
 import { FederationMessage, LEASE_SAFETY_MS } from './protocol';
 import { syncResidentRuntimes } from './runtime';
 import { configuredResourceLimits, pendingDecisionCount } from './resources';
+import { sourceVisitorQuota } from './resourceMonitoring';
 
 const TERMINAL = new Set(['COMPLETED', 'REJECTED']);
 const RESERVATION_MS = 30_000;
@@ -42,10 +44,8 @@ export async function assertVisitAuthority(ctx: MutationCtx, message: Federation
   return ledger;
 }
 
-export const startVisit = mutation({
-  args: { adminToken: v.string(), peerTownId: v.string(), worldId: v.id('worlds'), homePlayerId: v.string() },
-  handler: async (ctx, args) => {
-    requireAdmin(args.adminToken);
+export async function startResidentVisit(ctx: MutationCtx, args: { peerTownId: string; worldId: Doc<'worlds'>['_id']; homePlayerId: string }): Promise<{ visitId: string; state: string }> {
+    await assertNoIdentityConflict(ctx, args.peerTownId);
     const local = await identity(ctx), remote = await peer(ctx, args.peerTownId), connection = await session(ctx, args.peerTownId);
     if (!local?.enabled || local.mode !== 'ACTIVE') throw new Error('FEDERATION_DISABLED');
     if (!remote || remote.trustState !== 'TRUSTED' || !remote.outboundVisitsAllowed || !ready(connection) || connection!.localDeploymentEpoch !== local.deploymentEpoch || connection!.verifiedPeerDeploymentEpoch !== remote.deploymentEpoch) throw new Error('DIRECT_PEER_NOT_MUTUALLY_REACHABLE');
@@ -67,6 +67,13 @@ export const startVisit = mutation({
     await ctx.db.patch(resident._id, { state: 'TRAVEL_PREPARING', visitId, agentAuthorityEpoch, updatedAt: now });
     await enqueueMessage(ctx, { peerTownId: remote.townId, type: 'VISIT_RESERVE', visitId, payload: { profile, leaseExpiry, fencingToken } });
     return { visitId, state: 'REQUESTED' };
+}
+
+export const startVisit = mutation({
+  args: { adminToken: v.string(), peerTownId: v.string(), worldId: v.id('worlds'), homePlayerId: v.string() },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    return await startResidentVisit(ctx, args);
   },
 });
 
@@ -108,6 +115,7 @@ export const returnVisit = mutation({ args: { adminToken: v.string(), visitId: v
 
 export const renewVisit = mutation({ args: { adminToken: v.string(), visitId: v.string() }, handler: async (ctx, args) => {
   requireAdmin(args.adminToken);
+  await assertNoIdentityConflict(ctx);
   const ledger = await visit(ctx, args.visitId), local = await identity(ctx);
   if (!ledger || ledger.role !== 'home' || ledger.state !== 'ACTIVE' || ledger.leaseExpiry <= Date.now() || !local?.enabled || local.mode !== 'ACTIVE') throw new Error('VISIT_NOT_RENEWABLE');
   const remote = await peer(ctx, ledger.hostTownId), connection = await session(ctx, ledger.hostTownId);
@@ -136,6 +144,10 @@ async function receiveReserve(ctx: MutationCtx, message: FederationMessage) {
   const slotLedgers = await Promise.all(slots.map(slot => visit(ctx, slot.visitId)));
   const occupiedSlots = slots.filter((slot, index) => slot.expiresAt > now || slotLedgers[index]?.role === 'host' && ['CREATING', 'ACTIVE', 'REMOVING'].includes(slotLedgers[index]!.state)).length;
   const reservedSlots = slots.filter((slot, index) => slot.expiresAt > now && slotLedgers[index]?.state === 'RESERVED').length;
+  const sourceQuota = await sourceVisitorQuota(ctx.db);
+  const sourceSlots = slots.filter((slot, index) =>
+    slotLedgers[index]?.homeTownId === message.fromTownId &&
+    (slot.expiresAt > now || slotLedgers[index]?.role === 'host' && ['CREATING', 'ACTIVE', 'REMOVING'].includes(slotLedgers[index]!.state))).length;
   const limits = await configuredResourceLimits(ctx.db);
   const pending = await pendingDecisionCount(ctx.db, now);
   const queuedChat = await ctx.db.query('federationLlmRequests')
@@ -151,6 +163,7 @@ async function receiveReserve(ctx: MutationCtx, message: FederationMessage) {
   else if (activeAgent.some(l => l.agentAuthorityEpoch >= message.agentAuthorityEpoch!)) refusal = 'STALE_AGENT_AUTHORITY';
   else if (occupiedSlots >= local.maxVisitors) refusal = 'HOST_CAPACITY_EXCEEDED';
   else if (reservedSlots >= limits.maxVisitReservations) refusal = 'HOST_RESERVATION_CAPACITY_EXCEEDED';
+  else if (sourceQuota !== null && sourceSlots >= sourceQuota) refusal = 'HOST_SOURCE_QUOTA_EXCEEDED';
   else if (pending >= limits.maxPendingDecisions || chatQueueFull || !limits.maxConcurrentLocalLLM) refusal = 'HOST_RESOURCE_DEGRADED';
   const state = refusal ? 'REJECTED' : 'RESERVED';
   const id = await ctx.db.insert('visitLedger', { visitId: message.visitId!, agentGlobalId: message.agentGlobalId!, homeTownId: message.fromTownId, hostTownId: local.townId,

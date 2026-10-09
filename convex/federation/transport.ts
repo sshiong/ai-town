@@ -10,6 +10,8 @@ import { enqueueMessage } from './queue';
 import { assertVisitAuthority, beginReturn, dispatchLedgerMessage } from './ledger';
 import { dispatchRuntimeMessage } from './runtime';
 import { Doc } from '../_generated/dataModel';
+import { observeSignedIdentity } from './identityConflict';
+import { recordResourceMetric } from './resourceMonitoring';
 
 const CLEANUP_TYPES = new Set(['VISIT_RETURN', 'VISIT_CLEANED', 'SESSION_RESYNC', 'STREAM_NACK']);
 const VISIT_TYPES = new Set(['VISIT_RESERVE', 'VISIT_RESERVED', 'VISIT_CONFIRM', 'VISIT_ACTIVE', 'VISIT_REJECT', 'VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_RENEW']);
@@ -39,6 +41,8 @@ async function verifiedContext(ctx: any, packet: SignedPacket<FederationMessage>
   validateEnvelope(packet?.body);
   const data = await ctx.runQuery(queryRef('store/context'), { peerTownId: packet.body.fromTownId });
   if (!data.identity || !data.peer || !await verifyPacket(packet, data.peer.publicKey, data.peer.credentialEncrypted)) throw new Error('MESSAGE_AUTH_FAILED');
+  if (packet.body.senderDeploymentInstanceId !== data.peer.deploymentInstanceId || packet.body.senderDeploymentEpoch !== data.peer.deploymentEpoch)
+    await observeSignedIdentity(ctx, packet, 'MESSAGE');
   return data;
 }
 async function authenticateIdentity(ctx: MutationCtx, message: FederationMessage) {
@@ -85,7 +89,7 @@ export const acceptProbe = internalMutation({ args: { message: v.any() }, handle
   return { protocol: PROTOCOL, type: 'TRANSPORT_PROBE_ACK', fromTownId: local.townId, toTownId: message.fromTownId,
     senderDeploymentInstanceId: local.deploymentInstanceId, senderDeploymentEpoch: local.deploymentEpoch,
     expectedRecipientDeploymentEpoch: message.senderDeploymentEpoch, credentialId: message.credentialId,
-    probeId: message.payload.probeId, nonce: message.nonce, messageId: message.messageId, expiresAt: Math.min(message.expiresAt, now() + 30_000) };
+    probeId: message.payload.probeId, nonce: message.nonce, messageId: message.messageId, endpoint: local.endpoint, endpointSequence: local.endpointSequence ?? 0, sentAt: now(), expiresAt: Math.min(message.expiresAt, now() + 30_000) };
 } });
 export const receiveProbe = internalAction({ args: { packet: v.any() }, handler: async (ctx, { packet }) => {
   const data = await verifiedContext(ctx, packet);
@@ -103,6 +107,8 @@ export const probeInternal = internalAction({ args: { peerTownId: v.string() }, 
   try {
     const ack = await directRequest(remote.endpoint, '/probe', await signPacket(message, local.privateKeyEncrypted, remote.credentialEncrypted));
     const body = ack?.body;
+    if (body && (body.senderDeploymentInstanceId !== remote.deploymentInstanceId || body.senderDeploymentEpoch !== remote.deploymentEpoch))
+      await observeSignedIdentity(ctx, ack, 'ACK');
     if (!body || !await verifyPacket(ack, remote.publicKey, remote.credentialEncrypted) || body.protocol !== PROTOCOL || body.type !== 'TRANSPORT_PROBE_ACK' || body.fromTownId !== remote.townId || body.toTownId !== local.townId || body.senderDeploymentInstanceId !== remote.deploymentInstanceId || body.senderDeploymentEpoch !== remote.deploymentEpoch || body.expectedRecipientDeploymentEpoch !== local.deploymentEpoch || body.credentialId !== remote.credentialId || body.probeId !== message.payload.probeId || body.nonce !== message.nonce || body.messageId !== message.messageId || body.expiresAt <= now() || body.expiresAt > message.expiresAt) throw new Error('INVALID_PROBE_ACK');
     return { channelState: await ctx.runMutation(mutationRef('transport/recordProbe'), { ...probeContext, success: true }) };
   } catch (error) {
@@ -202,6 +208,7 @@ export const acceptMessage = internalMutation({ args: { message: v.any(), payloa
   const pending = await ctx.db.query('federationInbox').withIndex('status', q => q.eq('status', 'BUFFERED')).take(257);
   if (pending.length >= 256) throw new Error('INBOX_CAPACITY_EXCEEDED');
   const inboxId = await ctx.db.insert('federationInbox', { messageId: message.messageId, fromTownId: message.fromTownId, payloadDigest: args.payloadDigest, envelope: message, status: 'RECEIVED', receivedAt: now() });
+  await recordResourceMetric(ctx, 'INBOUND_EVENT');
   if (CONTROL_TYPES.has(message.type)) {
     await dispatch(ctx, message);
     const ack = ackFor(message, 'COMMITTED'); await ctx.db.patch(inboxId, { status: 'COMMITTED', processedAt: now(), ack }); return ack;
@@ -246,7 +253,7 @@ export const receiveMessage = internalAction({ args: { packet: v.any() }, handle
   const result = await ctx.runMutation(mutationRef('transport/acceptMessage'), { message: packet.body, payloadDigest: await messageDigest(packet.body) });
   const body = { protocol: PROTOCOL, type: 'MESSAGE_ACK', fromTownId: data.identity.townId, toTownId: data.peer.townId,
     senderDeploymentInstanceId: data.identity.deploymentInstanceId, senderDeploymentEpoch: data.identity.deploymentEpoch,
-    expectedRecipientDeploymentEpoch: data.peer.deploymentEpoch, credentialId: data.peer.credentialId, expiresAt: now() + 30_000, ...result };
+    expectedRecipientDeploymentEpoch: data.peer.deploymentEpoch, credentialId: data.peer.credentialId, sentAt: now(), expiresAt: now() + 30_000, ...result };
   return signPacket(body, data.identity.privateKeyEncrypted, data.peer.credentialEncrypted);
 } });
 export const deliveryContext = internalQuery({ args: { messageId: v.string() }, handler: async (ctx, { messageId }) => {
@@ -299,6 +306,8 @@ export const deliver = internalAction({ args: { messageId: v.string() }, handler
     if (item.envelope.senderDeploymentEpoch !== local.deploymentEpoch || item.envelope.senderDeploymentInstanceId !== local.deploymentInstanceId || item.envelope.expectedRecipientDeploymentEpoch !== remote.deploymentEpoch || item.envelope.credentialId !== remote.credentialId) throw new Error('OUTBOX_DEPLOYMENT_FENCED');
     const packet = await signPacket(item.envelope, local.privateKeyEncrypted, remote.credentialEncrypted);
     const ack = await directRequest(remote.endpoint, '/messages', packet), body = ack?.body;
+    if (body && (body.senderDeploymentInstanceId !== remote.deploymentInstanceId || body.senderDeploymentEpoch !== remote.deploymentEpoch))
+      await observeSignedIdentity(ctx, ack, 'ACK');
     if (!body || !await verifyPacket(ack, remote.publicKey, remote.credentialEncrypted) || body.protocol !== PROTOCOL || body.type !== 'MESSAGE_ACK' || body.fromTownId !== remote.townId || body.toTownId !== local.townId || body.senderDeploymentInstanceId !== remote.deploymentInstanceId || body.senderDeploymentEpoch !== remote.deploymentEpoch || body.expectedRecipientDeploymentEpoch !== local.deploymentEpoch || body.credentialId !== remote.credentialId || body.messageId !== messageId || body.nonce !== item.envelope.nonce || body.expiresAt <= now() || body.expiresAt > now() + 60_000 || !['COMMITTED', 'BUFFERED', 'RESYNC_REQUIRED', 'DISCARDED', 'STALE_SEQUENCE'].includes(body.status)) throw new Error('INVALID_MESSAGE_ACK');
     await ctx.runMutation(mutationRef('transport/markDelivery'), { messageId, status: body.status });
   } catch (error) {
