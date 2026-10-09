@@ -23,6 +23,7 @@ export const dataTables = [
   'modelAudits',
   'federationAgentRuntimes',
   'deploymentRecords',
+  'migrationHandoffRecords',
   'storagePolicies',
   'federationActionFacts',
   'federationEventFacts',
@@ -170,7 +171,7 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
     }
   }
   if (count > 500) throw new Error('BACKUP_ATOMIC_RECORD_LIMIT');
-  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages'].includes(t) && !bundle.sections[t]))
+  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords'].includes(t) && !bundle.sections[t]))
     throw new Error('INCOMPLETE_TOWN_BACKUP');
   const identities = bundle.sections.federationIdentity?.map(decodeRow) ?? [];
   if (identities.length !== 1 || identities[0].townId !== bundle.manifest.sourceTownId)

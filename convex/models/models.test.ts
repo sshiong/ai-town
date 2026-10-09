@@ -11,6 +11,7 @@ import { chatCompletion, fetchEmbeddingBatch } from '../util/llm';
 import { recallHomeMemories } from '../federation/decision';
 
 const modules = {
+  '../federation/resources.ts': () => import('../federation/resources'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../models/profiles.ts': () => import('./profiles'),
   '../models/embeddings.ts': () => import('./embeddings'),
@@ -937,4 +938,38 @@ test('administrator asserted weights and revision cannot authorize cross profile
   await expect(
     t.query(query('models/embeddings:planSwitch'), { adminToken, targetProfileId }),
   ).resolves.toMatchObject({ compatibility: 'REBUILD_REQUIRED', canReuse: false });
+});
+
+test('explicit chat reasoning setting survives profile storage and sends usable-output mode without affecting embedding', async () => {
+  const t = convexTest(schema, modules);
+  const adminToken = process.env.FEDERATION_ADMIN_TOKEN!;
+  const chatProfileId = await t.mutation(mutation('models/profiles:saveChatProfile'), {
+    adminToken,
+    name: 'Local chat',
+    provider: 'ollama',
+    url: 'http://localhost:11434',
+    model: 'qwen3.5:4b',
+    reasoningEffort: 'none',
+    stopWords: [],
+  });
+  const request = jest
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(
+      new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), { status: 200 }),
+    );
+  await expect(
+    t.action(makeFunctionReference<'action'>('models/profiles:probeChat'), {
+      adminToken,
+      chatProfileId,
+    }),
+  ).resolves.toMatchObject({ ok: true, model: 'qwen3.5:4b' });
+  expect(JSON.parse(request.mock.calls[0][1]!.body as string)).toMatchObject({
+    model: 'qwen3.5:4b',
+    reasoning_effort: 'none',
+    max_tokens: 256,
+  });
+  const profiles = await t.query(makeFunctionReference<'query'>('models/profiles:list'), {
+    adminToken,
+  });
+  expect(profiles.embeddingProfiles).toEqual([]);
 });

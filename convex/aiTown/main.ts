@@ -101,6 +101,7 @@ export const runStep = internalAction({
     maxDuration: v.number(),
   },
   handler: async (ctx, args) => {
+    let persistedGenerationNumber = args.generationNumber;
     try {
       const { engine, gameState } = await ctx.runQuery(internal.aiTown.game.loadWorld, {
         worldId: args.worldId,
@@ -111,6 +112,7 @@ export const runStep = internalAction({
       let now = Date.now();
       const deadline = now + args.maxDuration;
       while (now < deadline) {
+        persistedGenerationNumber = game.engine.generationNumber;
         await game.runStep(ctx, now);
         const sleepUntil = Math.min(now + game.stepDuration, deadline);
         await sleep(sleepUntil - now);
@@ -123,6 +125,14 @@ export const runStep = internalAction({
       });
     } catch (e: unknown) {
       if (e instanceof ConvexError) {
+        if (e.data.kind === 'resourceBudgetChanged') {
+          // Retry from the persisted generation so inputs are rejected using the new
+          // budget without stopping movement or other residents' operations.
+          await ctx.scheduler.runAfter(1000, internal.aiTown.main.runStep, {
+            ...args, generationNumber: persistedGenerationNumber,
+          });
+          return;
+        }
         if (e.data.kind === 'engineNotRunning') {
           console.debug(`Engine is not running: ${e.message}`);
           return;

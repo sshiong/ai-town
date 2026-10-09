@@ -202,6 +202,96 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                 </AdminButton>
               </div>
             </form>
+            {data.resources && (
+              <>
+                <h3>Town capacity</h3>
+                <p className="admin-muted">
+                  Admission: <strong>{data.resources.admissionState}</strong> ·{' '}
+                  {data.resources.residents} residents · {data.resources.humans} people ·{' '}
+                  {data.resources.reservations} reservations. Model requests:{' '}
+                  {data.resources.runningLocalLLM} running, {data.resources.pendingLocalLLM} queued.{' '}
+                  Pending visitor decisions: {data.resources.pendingDecisions}.
+                </p>
+                <form
+                  className="admin-form"
+                  key={JSON.stringify(data.resources.limits)}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const fields = new FormData(event.currentTarget);
+                    void task.run('Saving town capacity', async () => {
+                      await convex.mutation(api.federation.admin.configureResources, {
+                        adminToken,
+                        limits: {
+                          maxResidentAgents: Number(fields.get('maxResidentAgents')),
+                          maxHumanPlayers: Number(fields.get('maxHumanPlayers')),
+                          maxVisitReservations: Number(fields.get('maxVisitReservations')),
+                          maxConcurrentLocalLLM: Number(fields.get('maxConcurrentLocalLLM')),
+                          maxPendingDecisions: Number(fields.get('maxPendingDecisions')),
+                          maxPendingLocalLLM: Number(fields.get('maxPendingLocalLLM')),
+                        },
+                      });
+                      await refresh();
+                    });
+                  }}
+                >
+                  {(
+                    [
+                      [
+                        'maxResidentAgents',
+                        'Resident limit',
+                        'Includes residents currently traveling.',
+                      ],
+                      [
+                        'maxHumanPlayers',
+                        'People limit',
+                        'Limits new human players across this town.',
+                      ],
+                      [
+                        'maxVisitReservations',
+                        'Reservation limit',
+                        'Limits visits reserved before arrival.',
+                      ],
+                      [
+                        'maxConcurrentLocalLLM',
+                        'Concurrent model requests',
+                        'Shared by resident conversations, visiting brains and memory work.',
+                      ],
+                      [
+                        'maxPendingDecisions',
+                        'Pending visitor decisions',
+                        'Limits outstanding remote decision turns.',
+                      ],
+                      [
+                        'maxPendingLocalLLM',
+                        'Queued model requests',
+                        'Requests wait in order for up to 30 seconds within their overall deadline.',
+                      ],
+                    ] as const
+                  ).map(([key, label, hint]) => (
+                    <Field key={key} label={label} hint={hint}>
+                      <input
+                        name={key}
+                        type="number"
+                        min={0}
+                        max={key === 'maxConcurrentLocalLLM' ? 32 : 1000}
+                        step={1}
+                        defaultValue={data.resources.limits[key]}
+                        required
+                      />
+                    </Field>
+                  ))}
+                  <div className="admin-form-actions">
+                    <AdminButton type="submit" disabled={!!task.pending}>
+                      Save capacity
+                    </AdminButton>
+                  </div>
+                </form>
+                <p className="admin-muted">
+                  Reducing limits preserves existing residents and work. Zero pauses new admissions
+                  or requests for that budget. CPU and memory measurements are unavailable.
+                </p>
+              </>
+            )}
             <p className="admin-warning">
               Unencrypted HTTP is disabled (DISABLED). The required authentication library is
               unavailable in this build. HTTP-SIGNED-PLAINTEXT would expose chat, observations and

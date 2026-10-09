@@ -11,6 +11,7 @@ export async function enqueueMessage(ctx: MutationCtx, args: EnqueueArgs): Promi
   if (!local || !remote || remote.trustState !== 'TRUSTED' && !['VISIT_RETURN', 'VISIT_CLEANED', 'SESSION_RESYNC', 'STREAM_NACK'].includes(args.type)) throw new Error('PEER_NOT_TRUSTED');
   const queued = await ctx.db.query('federationOutbox').withIndex('retry', (q) => q.eq('ackedAt', undefined)).take(1001);
   const critical = ['VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_REJECT', 'SESSION_RESYNC', 'STREAM_NACK'].includes(args.type);
+  if (local.mode !== 'ACTIVE' && !critical) throw new Error('DEPLOYMENT_NOT_ACTIVE');
   // Keep admission headroom for lease termination and recovery controls.
   if (queued.length >= (critical ? 1000 : 900)) throw new Error('OUTBOX_CAPACITY_EXCEEDED');
   const ledger = args.visitId ? await visit(ctx, args.visitId) : null;

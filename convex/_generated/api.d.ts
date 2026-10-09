@@ -55,6 +55,7 @@ import type * as federation_identityRecovery from "../federation/identityRecover
 import type * as federation_identityRecoverySchema from "../federation/identityRecoverySchema.js";
 import type * as federation_ledger from "../federation/ledger.js";
 import type * as federation_maintenanceLock from "../federation/maintenanceLock.js";
+import type * as federation_migration from "../federation/migration.js";
 import type * as federation_peers from "../federation/peers.js";
 import type * as federation_presence from "../federation/presence.js";
 import type * as federation_protocol from "../federation/protocol.js";
@@ -63,6 +64,7 @@ import type * as federation_queue from "../federation/queue.js";
 import type * as federation_refs from "../federation/refs.js";
 import type * as federation_remoteTick from "../federation/remoteTick.js";
 import type * as federation_replyPolicy from "../federation/replyPolicy.js";
+import type * as federation_resources from "../federation/resources.js";
 import type * as federation_runtime from "../federation/runtime.js";
 import type * as federation_runtimeSchema from "../federation/runtimeSchema.js";
 import type * as federation_schema from "../federation/schema.js";
@@ -152,6 +154,7 @@ import type * as world from "../world.js";
 "federation/identityRecoverySchema": typeof federation_identityRecoverySchema,
 "federation/ledger": typeof federation_ledger,
 "federation/maintenanceLock": typeof federation_maintenanceLock,
+"federation/migration": typeof federation_migration,
 "federation/peers": typeof federation_peers,
 "federation/presence": typeof federation_presence,
 "federation/protocol": typeof federation_protocol,
@@ -160,6 +163,7 @@ import type * as world from "../world.js";
 "federation/refs": typeof federation_refs,
 "federation/remoteTick": typeof federation_remoteTick,
 "federation/replyPolicy": typeof federation_replyPolicy,
+"federation/resources": typeof federation_resources,
 "federation/runtime": typeof federation_runtime,
 "federation/runtimeSchema": typeof federation_runtimeSchema,
 "federation/schema": typeof federation_schema,

@@ -3,6 +3,7 @@ import { replyTimeoutMs } from './replyPolicy';
 import { tickRemoteVisitor } from './remoteTick';
 import type { Game } from '../aiTown/game';
 import type { Player } from '../aiTown/player';
+import { DEFAULT_RESOURCE_LIMITS } from './resources';
 
 beforeAll(() =>
   Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true }),
@@ -22,8 +23,15 @@ test('remote turns use Host SLA and cannot outlive the visitor lease', () => {
     replyTimeoutMs: 90_000,
     pendingTurn: undefined,
   } as Player['remoteVisitor'];
-  const game = { world: { playerConversation: () => undefined } } as unknown as Game;
   const player = { id: 'p:2', remoteVisitor: visitor } as Player;
+  const game = {
+    world: {
+      playerConversation: () => undefined,
+      players: new Map([[player.id, player]]),
+    },
+    resourceLimits: { ...DEFAULT_RESOURCE_LIMITS },
+    otherPendingDecisions: 0,
+  } as unknown as Game;
   tickRemoteVisitor(game, now, player);
   expect(visitor!.pendingTurn!.deadline).toBe(now + 90_000);
   visitor!.pendingTurn = undefined;

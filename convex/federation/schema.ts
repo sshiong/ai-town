@@ -1,7 +1,21 @@
 import { defineTable } from 'convex/server';
 import { v } from 'convex/values';
+import { resourceLimits } from './resources';
 
 export const federationTables = {
+  migrationHandoffRecords: defineTable({
+    handoffId: v.string(), townId: v.string(), body: v.any(), signature: v.string(),
+    role: v.string(), acceptedAt: v.number(),
+  }).index('handoffId', ['handoffId']).index('townId', ['townId']),
+  migrationPeerExchanges: defineTable({
+    handoffId: v.string(), peerTownId: v.string(), direction: v.string(),
+    request: v.any(), response: v.optional(v.any()),
+    ephemeralPrivateEncrypted: v.optional(v.string()), state: v.string(), createdAt: v.number(),
+  }).index('exchange', ['handoffId', 'peerTownId', 'direction']),
+  federationLlmRequests: defineTable({
+    state: v.string(), createdAt: v.number(), deadline: v.number(),
+    queueDeadline: v.number(), expiresAt: v.number(),
+  }).index('state_created', ['state', 'createdAt']).index('state_expiry', ['state', 'expiresAt']),
   federationTranscriptJobs: defineTable({
     transcriptId: v.string(), visitId: v.string(), worldId: v.id('worlds'),
     conversationId: v.string(), federationConversationId: v.string(), endedAt: v.number(),
@@ -17,7 +31,9 @@ export const federationTables = {
     fingerprint: v.string(), deploymentInstanceId: v.string(), deploymentEpoch: v.number(),
     endpoint: v.string(), enabled: v.boolean(), allowIncomingPairRequests: v.boolean(),
     allowUnencryptedHttp: v.boolean(), allowPublicHttp: v.boolean(), maxVisitors: v.number(),
-    maxVisitDurationMs: v.number(), replyTimeoutMs: v.optional(v.number()), mode: v.string(), createdAt: v.number(),
+    maxVisitDurationMs: v.number(), replyTimeoutMs: v.optional(v.number()), resourceLimits: v.optional(resourceLimits), mode: v.string(), createdAt: v.number(),
+    migrationFrozenAt: v.optional(v.number()), migrationOperator: v.optional(v.string()),
+    activeHandoffId: v.optional(v.string()),
   }),
   deploymentRecords: defineTable({ townId: v.string(), deploymentInstanceId: v.string(), deploymentEpoch: v.number(), mode: v.string(), createdAt: v.number() }).index('townId', ['townId']),
   pairRequests: defineTable({
@@ -31,6 +47,7 @@ export const federationTables = {
     deploymentInstanceId: v.string(), deploymentEpoch: v.number(), endpoint: v.string(),
     credentialId: v.string(), credentialEncrypted: v.string(), trustState: v.string(),
     inboundVisitsAllowed: v.boolean(), outboundVisitsAllowed: v.boolean(), pairedAt: v.number(),
+    verifiedHandoffId: v.optional(v.string()),
   }).index('townId', ['townId']),
   transportSessions: defineTable({
     peerTownId: v.string(), channelState: v.string(), transportType: v.string(),

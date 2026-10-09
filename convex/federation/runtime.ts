@@ -1,5 +1,6 @@
 import { MAX_REPLY_TIMEOUT_MS, replyTimeoutMs } from './replyPolicy';
 import { v } from 'convex/values';
+import { configuredResourceLimits, pendingDecisionCount } from './resources';
 import { internalMutation, mutation, query, MutationCtx } from '../maintenanceFunctions';
 import { Doc, Id } from '../_generated/dataModel';
 import { parseGameId } from '../aiTown/ids';
@@ -309,6 +310,8 @@ export async function collectObservations(ctx: MutationCtx, worldId: Id<'worlds'
   const world = await ctx.db.get(worldId);
   if (!world) return;
   const now = Date.now();
+  const limits = await configuredResourceLimits(ctx.db);
+  let pendingCount = await pendingDecisionCount(ctx.db, now);
   for (const player of world.players.filter((p) => p.remoteVisitor)) {
     const visitor = player.remoteVisitor!;
     const ledger = await visit(ctx, visitor.visitId);
@@ -320,6 +323,7 @@ export async function collectObservations(ctx: MutationCtx, worldId: Id<'worlds'
       .withIndex('turn', (q) => q.eq('turnId', pendingTurn.turnId))
       .unique();
     if (existingTurn) continue;
+    if (pendingCount >= limits.maxPendingDecisions) continue;
     const conversation = world.conversations.find((c) =>
       c.participants.some((m) => m.playerId === player.id),
     );
@@ -402,6 +406,7 @@ export async function collectObservations(ctx: MutationCtx, worldId: Id<'worlds'
       expectedNumMessages: conversation?.numMessages,
       state: 'PENDING',
     });
+    pendingCount++;
     await enqueueMessage(ctx, {
       peerTownId: ledger.homeTownId,
       type: 'OBSERVATION',
@@ -443,8 +448,13 @@ export async function dispatchRuntimeMessage(ctx: MutationCtx, message: Federati
     const pending = await ctx.db
       .query('federationDecisionJobs')
       .withIndex('state', (q) => q.eq('state', 'PENDING'))
-      .take(101);
-    if (pending.length >= 100) throw new Error('DECISION_QUEUE_FULL');
+      .filter(q => q.gt(q.field('deadline'), Date.now()))
+      .take(1001);
+    const running = await ctx.db.query('federationDecisionJobs')
+      .withIndex('state', q => q.eq('state', 'RUNNING'))
+      .filter(q => q.gt(q.field('deadline'), Date.now())).take(1001);
+    const limits = await configuredResourceLimits(ctx.db);
+    if (pending.length + running.length >= limits.maxPendingDecisions) throw new Error('DECISION_QUEUE_FULL');
     if (
       payload.conversation &&
       payload.federationConversationId &&

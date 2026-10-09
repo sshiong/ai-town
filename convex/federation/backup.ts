@@ -453,6 +453,7 @@ export async function applyBackupData(
     for (const name of [
       ...snapshotTables,
       'pairRequests',
+      'migrationPeerExchanges',
       'visitReservations',
       'transportSessions',
       'federationReplayNonces',
@@ -480,6 +481,9 @@ export async function applyBackupData(
         enabled: false,
         allowIncomingPairRequests: false,
         mode: 'DISABLED',
+        activeHandoffId: undefined,
+        migrationFrozenAt: undefined,
+        migrationOperator: undefined,
         createdAt: Date.now(),
       } as never);
     } else {
@@ -489,11 +493,15 @@ export async function applyBackupData(
         townName: source.townName,
         maxVisitors: source.maxVisitors,
         maxVisitDurationMs: source.maxVisitDurationMs,
+        resourceLimits: source.resourceLimits,
         allowUnencryptedHttp: false,
         allowPublicHttp: false,
         enabled: false,
         allowIncomingPairRequests: false,
         mode: 'NEEDS_RECONCILIATION',
+        activeHandoffId: undefined,
+        migrationFrozenAt: undefined,
+        migrationOperator: undefined,
       });
     }
   }
@@ -577,7 +585,8 @@ export async function applyBackupData(
     for (const row of rows[name] ?? []) {
       let fields = stripSystem(row);
       if (name === 'engines')
-        fields = { ...fields, running: false, generationNumber: fields.generationNumber + 1 };
+        // Runtime inputs are audit snapshots, not the new active input queue.
+        fields = { ...fields, running: false, generationNumber: fields.generationNumber + 1, processedInputNumber: undefined };
       if (name === 'worldStatus') fields = { ...fields, status: 'stoppedByDeveloper' };
       if (name === 'memories') {
         const { embeddingId, embeddingSpaceId, ...text } = fields;

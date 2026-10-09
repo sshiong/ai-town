@@ -1,3 +1,4 @@
+import { residentChatCompletion } from '../federation/resources';
 import { v } from 'convex/values';
 import {
   ActionCtx,
@@ -8,7 +9,7 @@ import {
 } from '../maintenanceFunctions';
 import { Doc, Id } from '../_generated/dataModel';
 import { internal } from '../_generated/api';
-import { LLMMessage, chatCompletion, ChatConfig } from '../util/llm';
+import { LLMMessage, ChatConfig } from '../util/llm';
 import { chatConfigForResident } from '../models/profiles';
 import { activeRoute, ensureEmbeddingSpace } from '../models/embeddings';
 import { cosineSimilarity, validateVector } from '../models/compatibility';
@@ -23,6 +24,10 @@ export const MEMORY_ACCESS_THROTTLE = 300_000; // In ms
 // We fetch 10x the number of memories by relevance, to have more candidates
 // for sorting by relevance + recency + importance.
 const MEMORY_OVERFETCH = 10;
+const MEMORY_VECTOR_PAGE_SIZE = 64;
+const MEMORY_VECTOR_PAGE_BYTES = 512 * 1024;
+// Leave time for ranking and the caller's model request within an action.
+const MEMORY_SEARCH_TIMEOUT_MS = 60_000;
 const selfInternal = internal.agent.memory;
 
 export type Memory = Doc<'memories'>;
@@ -142,7 +147,8 @@ export async function rememberConversation(
   }
   llmMessages.push({ role: 'user', content: 'Summary:' });
   const chatConfig = await chatConfigForResident(ctx, worldId, playerId);
-  const { content } = await chatCompletion(
+  const { content } = await residentChatCompletion(
+    ctx,
     {
       messages: llmMessages,
       max_tokens: 500,
@@ -152,7 +158,7 @@ export async function rememberConversation(
   const description = `Conversation with ${otherPlayer.name} at ${new Date(
     data.conversation._creationTime,
   ).toLocaleString()}: ${content}`;
-  const importance = await calculateImportance(description, chatConfig);
+  const importance = await calculateImportance(ctx, description, chatConfig);
   const route = await activeRoute(ctx);
   const embedding = await embeddingsCache.fetch(ctx, description, { route, inputMode: 'document' });
   authors.delete(player.id as GameId<'players'>);
@@ -273,22 +279,47 @@ export async function searchMemories(
   spaceId?: Id<'embeddingSpaces'>,
 ) {
   if (!worldId) throw new Error('MEMORY_WORLD_REQUIRED');
+  validateSearchLimit(n);
   const route = spaceId
     ? await ctx.runQuery(internal.models.embeddings.getRoute, { spaceId })
     : await activeRoute(ctx);
   validateVector(searchEmbedding, route.profile.dimensions);
-  const vectors = await ctx.runQuery(selfInternal.getSpaceVectors, {
-    worldId,
-    playerId,
-    spaceId: route.space._id,
-  });
-  const candidates = vectors
-    .map((vector) => ({
-      memoryId: vector.memoryId,
-      _score: cosineSimilarity(searchEmbedding, vector.embedding),
-    }))
-    .sort((a, b) => b._score - a._score)
-    .slice(0, n * MEMORY_OVERFETCH);
+  const startedAt = Date.now();
+  let cursor: string | null = null;
+  let upperCreationTime: number | undefined;
+  let candidates: { memoryId: Id<'memories'>; _score: number }[] = [];
+  // Exact retrieval across the retained history, with bounded query reads and
+  // action memory. Pin both the space and database creation time for all pages;
+  // concurrent writes cannot keep extending this scan indefinitely.
+  while (true) {
+    if (Date.now() - startedAt >= MEMORY_SEARCH_TIMEOUT_MS)
+      throw new Error('MEMORY_SEARCH_TIMEOUT: full history retrieval did not complete');
+    const page: {
+      candidates: { memoryId: Id<'memories'>; _score: number }[];
+      isDone: boolean;
+      continueCursor: string;
+      upperCreationTime: number;
+    } = await ctx.runQuery(selfInternal.searchSpaceVectorPage, {
+      worldId,
+      playerId,
+      spaceId: route.space._id,
+      searchEmbedding,
+      dimensions: route.profile.dimensions,
+      n,
+      cursor,
+      upperCreationTime,
+    });
+    upperCreationTime = page.upperCreationTime;
+    if (Date.now() - startedAt >= MEMORY_SEARCH_TIMEOUT_MS)
+      throw new Error('MEMORY_SEARCH_TIMEOUT: full history retrieval did not complete');
+    candidates = [...candidates, ...page.candidates]
+      .sort((a, b) => b._score - a._score)
+      .slice(0, n * MEMORY_OVERFETCH);
+    if (page.isDone) break;
+    if (page.continueCursor === cursor)
+      throw new Error('MEMORY_SEARCH_CURSOR_STALLED');
+    cursor = page.continueCursor;
+  }
   const ranked = await ctx.runMutation(selfInternal.rankSpaceMemories, {
     candidates,
     n,
@@ -309,18 +340,52 @@ export const canonicalMemories = internalQuery({
       .take(args.n);
   },
 });
-export const getSpaceVectors = internalQuery({
-  args: { worldId: v.id('worlds'), playerId, spaceId: v.id('embeddingSpaces') },
-  handler: async (ctx, args) => {
-    const vectors = await ctx.db
+function validateSearchLimit(n: number) {
+  if (!Number.isSafeInteger(n) || n < 1 || n > 100)
+    throw new Error('INVALID_MEMORY_SEARCH_LIMIT');
+}
+
+export const searchSpaceVectorPage = internalQuery({
+  args: {
+    worldId: v.id('worlds'), playerId, spaceId: v.id('embeddingSpaces'),
+    searchEmbedding: v.array(v.float64()), dimensions: v.number(), n: v.number(),
+    cursor: v.union(v.string(), v.null()), upperCreationTime: v.optional(v.number()),
+  },
+  handler: async (ctx, args): Promise<{
+    candidates: { memoryId: Id<'memories'>; _score: number }[];
+    isDone: boolean;
+    continueCursor: string;
+    upperCreationTime: number;
+  }> => {
+    validateSearchLimit(args.n);
+    validateVector(args.searchEmbedding, args.dimensions);
+    // Capture the high watermark in the database snapshot, rather than using
+    // the action worker's clock (which may precede a committed creation time).
+    const upperCreationTime = args.upperCreationTime ?? (
+      await ctx.db.query('modelMemoryVectors').withIndex('resident_space', (q) =>
+        q.eq('worldId', args.worldId).eq('playerId', args.playerId).eq('spaceId', args.spaceId),
+      ).order('desc').first()
+    )?._creationTime ?? 0;
+    const page = await ctx.db
       .query('modelMemoryVectors')
       .withIndex('resident_space', (q) =>
-        q.eq('worldId', args.worldId).eq('playerId', args.playerId).eq('spaceId', args.spaceId),
+        q.eq('worldId', args.worldId).eq('playerId', args.playerId).eq('spaceId', args.spaceId)
+          .lte('_creationTime', upperCreationTime),
       )
-      .take(2001);
-    if (vectors.length > 2000)
-      throw new Error('MEMORY_VECTOR_BUDGET_EXCEEDED: archive or increase the search budget');
-    return vectors;
+      .paginate({
+        cursor: args.cursor,
+        numItems: MEMORY_VECTOR_PAGE_SIZE,
+        maximumRowsRead: MEMORY_VECTOR_PAGE_SIZE,
+        maximumBytesRead: MEMORY_VECTOR_PAGE_BYTES,
+      });
+    const candidates = page.page.map((vector) => {
+      validateVector(vector.embedding, args.dimensions);
+      const score = cosineSimilarity(args.searchEmbedding, vector.embedding);
+      if (!Number.isFinite(score)) throw new Error('INVALID_MEMORY_RELEVANCE_SCORE');
+      return { memoryId: vector.memoryId, _score: score };
+    }).sort((a, b) => b._score - a._score).slice(0, args.n * MEMORY_OVERFETCH);
+    // Return only IDs and scores. High-dimensional vectors stay in this query.
+    return { candidates, isDone: page.isDone, continueCursor: page.continueCursor, upperCreationTime };
   },
 });
 export const rankSpaceMemories = internalMutation({
@@ -331,14 +396,16 @@ export const rankSpaceMemories = internalMutation({
     candidates: v.array(v.object({ memoryId: v.id('memories'), _score: v.number() })),
   },
   handler: async (ctx, args) => {
-    if (!Number.isInteger(args.n) || args.n < 1 || args.n > 100)
-      throw new Error('INVALID_MEMORY_SEARCH_LIMIT');
+    validateSearchLimit(args.n);
+    if (args.candidates.length > args.n * MEMORY_OVERFETCH)
+      throw new Error('INVALID_MEMORY_CANDIDATE_COUNT');
     const now = Date.now();
     const rows = [];
     for (const candidate of args.candidates) {
       const memory = await ctx.db.get(candidate.memoryId);
       if (!memory || memory.worldId !== args.worldId || memory.playerId !== args.playerId)
         throw new Error('MEMORY_OWNER_MISMATCH');
+      if (!Number.isFinite(candidate._score)) throw new Error('INVALID_MEMORY_RELEVANCE_SCORE');
       rows.push({
         ...candidate,
         memory,
@@ -443,8 +510,9 @@ export const loadMessages = internalQuery({
   },
 });
 
-async function calculateImportance(description: string, config: ChatConfig) {
-  const { content: importanceRaw } = await chatCompletion(
+async function calculateImportance(ctx: ActionCtx, description: string, config: ChatConfig) {
+  const { content: importanceRaw } = await residentChatCompletion(
+    ctx,
     {
       messages: [
         {
@@ -600,7 +668,8 @@ export async function reflectOnMemories(
 
   const chatConfig = await chatConfigForResident(ctx, worldId, playerId);
   const route = await activeRoute(ctx);
-  const { content: reflection } = await chatCompletion(
+  const { content: reflection } = await residentChatCompletion(
+    ctx,
     {
       messages: [
         {
@@ -616,7 +685,7 @@ export async function reflectOnMemories(
     const insights = JSON.parse(reflection) as { insight: string; statementIds: number[] }[];
     const memoriesToSave = await asyncMap(insights, async (item) => {
       const relatedMemoryIds = item.statementIds.map((idx: number) => memories[idx]._id);
-      const importance = await calculateImportance(item.insight, chatConfig);
+      const importance = await calculateImportance(ctx, item.insight, chatConfig);
       const embedding = await embeddingsCache.fetch(ctx, item.insight, {
         route,
         inputMode: 'document',

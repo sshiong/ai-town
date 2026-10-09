@@ -13,7 +13,7 @@ import { Doc, Id } from '../_generated/dataModel';
 import { GameId, parseGameId, playerId } from '../aiTown/ids';
 import { assertFederationAdmin } from '../federation/auth';
 import { ChatConfig, chatCompletion, getChatConfig } from '../util/llm';
-import { connectionFields } from './schema';
+import { chatOptions, connectionFields } from './schema';
 
 export function validateConnection(profile: {
   name: string;
@@ -64,7 +64,12 @@ export async function audit(
   });
 }
 export const saveChatProfile = mutation({
-  args: { adminToken: v.string(), ...connectionFields, stopWords: v.optional(v.array(v.string())) },
+  args: {
+    adminToken: v.string(),
+    ...connectionFields,
+    ...chatOptions,
+    stopWords: v.optional(v.array(v.string())),
+  },
   handler: async (ctx, { adminToken, stopWords, ...profile }): Promise<Id<'chatProfiles'>> => {
     assertFederationAdmin(adminToken);
     validateConnection(profile);
@@ -250,6 +255,7 @@ export function profileChatConfig(profile: Doc<'chatProfiles'>): ChatConfig {
     url: profile.url,
     chatModel: profile.model,
     stopWords: profile.stopWords,
+    reasoningEffort: profile.reasoningEffort,
     apiKey,
   };
 }

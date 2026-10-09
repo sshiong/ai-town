@@ -169,60 +169,67 @@ export const federationInputs = {
       const conversation = game.world.playerConversation(player);
       if (!visitor.pendingTurn || visitor.pendingTurn.turnId !== args.turnId)
         throw new Error('STALE_TURN');
-      if (
-        args.conversationId &&
-        (conversation?.id !== args.conversationId ||
-          conversation.numMessages !== args.expectedNumMessages)
-      )
-        throw new Error('STALE_TURN');
-      const action = args.action;
-      if (action.type === 'moveTo') {
-        const { destination } = action;
+      // A fenced, matching decision consumes its turn even if Host rules reject it.
+      // Otherwise a bad destination can block fresh invitation observations until timeout.
+      try {
         if (
-          !Number.isInteger(destination.x) ||
-          !Number.isInteger(destination.y) ||
-          blocked(game, now, destination, player.id)
+          args.conversationId &&
+          (conversation?.id !== args.conversationId ||
+            conversation.numMessages !== args.expectedNumMessages)
         )
-          throw new Error('INVALID_DESTINATION');
-        const route = findRoute(game, now, player, destination);
-        if (!route || route.newDestination) throw new Error('DESTINATION_UNREACHABLE');
-        movePlayer(game, now, player, destination);
-      } else if (action.type === 'inviteToTalk') {
-        const invitee = game.world.players.get(parseGameId('players', action.playerId));
-        if (!invitee) throw new Error('INVITEE_NOT_FOUND');
-        const result = Conversation.start(game, now, player, invitee);
-        if (result.error) throw new Error(result.error);
-      } else if (action.type === 'say') {
-        if (
-          !conversation ||
-          conversation.participants.get(player.id)?.status.kind !== 'participating'
-        ) {
-          throw new Error('CONVERSATION_CLOSED');
-        }
-        if (!action.text.trim() || action.text.length > 2000) throw new Error('INVALID_TEXT');
-        if (conversation.isTyping && conversation.isTyping.playerId !== player.id)
           throw new Error('STALE_TURN');
-        // Persistence happens in the same mutation that commits this engine step.
-        conversation.lastMessage = { author: player.id, timestamp: wallNow };
-        conversation.numMessages++;
-        delete conversation.isTyping;
-      } else if (action.type === 'acceptInvite' || action.type === 'rejectInvite') {
-        if (!conversation) throw new Error('CONVERSATION_CLOSED');
-        if (action.type === 'acceptInvite') conversation.acceptInvite(game, player);
-        else conversation.rejectInvite(game, now, player);
-      } else if (action.type === 'leaveConversation') {
-        if (!conversation) throw new Error('CONVERSATION_CLOSED');
-        conversation.leave(game, now, player);
-      } else if (action.type === 'leaveTown') {
-        player.leave(game, now);
+        const action = args.action;
+        if (action.type === 'moveTo') {
+          const { destination } = action;
+          if (
+            !Number.isInteger(destination.x) ||
+            !Number.isInteger(destination.y) ||
+            blocked(game, now, destination, player.id)
+          )
+            throw new Error('INVALID_DESTINATION');
+          const route = findRoute(game, now, player, destination);
+          if (!route || route.newDestination) throw new Error('DESTINATION_UNREACHABLE');
+          movePlayer(game, now, player, destination);
+        } else if (action.type === 'inviteToTalk') {
+          const invitee = game.world.players.get(parseGameId('players', action.playerId));
+          if (!invitee) throw new Error('INVITEE_NOT_FOUND');
+          const result = Conversation.start(game, now, player, invitee);
+          if (result.error) throw new Error(result.error);
+        } else if (action.type === 'say') {
+          if (
+            !conversation ||
+            conversation.participants.get(player.id)?.status.kind !== 'participating'
+          ) {
+            throw new Error('CONVERSATION_CLOSED');
+          }
+          if (!action.text.trim() || action.text.length > 2000) throw new Error('INVALID_TEXT');
+          if (conversation.isTyping && conversation.isTyping.playerId !== player.id)
+            throw new Error('STALE_TURN');
+          // Persistence happens in the same mutation that commits this engine step.
+          conversation.lastMessage = { author: player.id, timestamp: wallNow };
+          conversation.numMessages++;
+          delete conversation.isTyping;
+        } else if (action.type === 'acceptInvite' || action.type === 'rejectInvite') {
+          if (!conversation) throw new Error('CONVERSATION_CLOSED');
+          if (action.type === 'acceptInvite') conversation.acceptInvite(game, player);
+          else conversation.rejectInvite(game, now, player);
+        } else if (action.type === 'leaveConversation') {
+          if (!conversation) throw new Error('CONVERSATION_CLOSED');
+          conversation.leave(game, now, player);
+        } else if (action.type === 'leaveTown') {
+          player.leave(game, now);
+        }
+        return {
+          actionId: args.actionId,
+          conversationId: args.conversationId ?? null,
+          text: action.type === 'say' ? action.text : null,
+        };
+      } finally {
+        delete visitor.pendingTurn;
+        if (conversation?.federationTurn?.turnId === args.turnId)
+          delete conversation.federationTurn;
+        if (conversation?.isTyping?.messageUuid === args.turnId) delete conversation.isTyping;
       }
-      delete visitor.pendingTurn;
-      if (conversation?.federationTurn?.turnId === args.turnId) delete conversation.federationTurn;
-      return {
-        actionId: args.actionId,
-        conversationId: args.conversationId ?? null,
-        text: action.type === 'say' ? action.text : null,
-      };
     },
   }),
 };

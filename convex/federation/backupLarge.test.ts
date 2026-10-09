@@ -3,9 +3,13 @@ import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import { makeFunctionReference } from 'convex/server';
 import schema from '../schema';
+import { DEFAULT_RESOURCE_LIMITS } from './resources';
 import { Id } from '../_generated/dataModel';
 import { createIdentityKeys, sign } from './security';
 import { decodeRow, encodeRow } from './backupHelpers';
+import { Game } from '../aiTown/game';
+import { engineInsertInput } from '../engine/abstractGame';
+import type { ActionCtx } from '../_generated/server';
 import {
   descriptor,
   LargeChunk,
@@ -19,6 +23,8 @@ const modules = {
   '../federation/backupLarge.ts': () => import('./backupLarge'),
   '../federation/backup.ts': () => import('./backup'),
   '../models/embeddings.ts': () => import('../models/embeddings'),
+  '../engine/abstractGame.ts': () => import('../engine/abstractGame'),
+  '../aiTown/game.ts': () => import('../aiTown/game'),
 };
 jest.setTimeout(60000);
 const adminToken = 'large-backup-admin-token-32-characters';
@@ -51,6 +57,7 @@ async function town(memoryCount = 2) {
       allowPublicHttp: false,
       maxVisitors: 8,
       maxVisitDurationMs: 300000,
+      resourceLimits: { ...DEFAULT_RESOURCE_LIMITS, maxConcurrentLocalLLM: 1, maxVisitReservations: 3 },
       mode: 'ACTIVE',
       createdAt: 1,
     });
@@ -191,6 +198,10 @@ async function staged(
 test('large signed export and restore preserve all canonical memories, cyclic references and fixed model ownership', async () => {
   const { t, agentGlobalId } = await town(510);
   const archive = await exported(t);
+  await t.run(async ctx => {
+    const local = (await ctx.db.query('federationIdentity').unique())!;
+    await ctx.db.patch(local._id, { resourceLimits: DEFAULT_RESOURCE_LIMITS });
+  });
   expect(
     archive.manifest.chunks.filter((c) => c.table === 'memories').reduce((n, c) => n + c.count, 0),
   ).toBe(510);
@@ -221,6 +232,7 @@ test('large signed export and restore preserve all canonical memories, cyclic re
   expect(result.profiles[0].model).toBe('fixed');
   expect(result.bindings[0].chatProfileId).toBe(result.profiles[0]._id);
   expect(result.local!.deploymentEpoch).toBe(4);
+  expect(result.local!.resourceLimits).toEqual({ ...DEFAULT_RESOURCE_LIMITS, maxConcurrentLocalLLM: 1, maxVisitReservations: 3 });
   expect(result.lock).toBeNull();
   expect(result.inputs).toHaveLength(0);
   const first = result.memories.find((m) => m.description === 'Canonical memory 0')!;
@@ -230,6 +242,50 @@ test('large signed export and restore preserve all canonical memories, cyclic re
   await expect(
     t.action(action('getChunk'), { adminToken, jobId, index: archive.chunks.length }),
   ).rejects.toThrow('BACKUP_MANIFEST_NOT_READY');
+});
+
+test('chunked restore resets a nonzero source cursor and commits the first new engine input zero', async () => {
+  jest.useFakeTimers();
+  try {
+    const { t, engineId } = await town();
+    await t.run(async ctx => {
+      await ctx.db.patch(engineId, { processedInputNumber: 58 });
+      await ctx.db.insert('inputs', { engineId, number: 58, name: 'join', args: {}, received: 1, returnValue: { kind: 'ok', value: 'source-only-input' } });
+    });
+    const archive = await exported(t);
+    const sourceEngine = archive.chunks.find(c => c.table === 'engines' && c.rows.length)!;
+    expect(decodeRow(sourceEngine.rows[0]).processedInputNumber).toBe(58);
+    const sourceInputs = archive.chunks.find(c => c.table === 'inputs' && c.rows.length)!;
+    expect(decodeRow(sourceInputs.rows[0]).number).toBe(58);
+    const jobId = await staged(t, archive);
+    await drive(t, jobId, 'import', 'READY');
+    await t.mutation(mutation('startApply'), { adminToken, jobId });
+    await drive(t, jobId, 'import', 'COMPLETE');
+    const { engine, worldId, inputId } = await t.run(async ctx => {
+      const engine = (await ctx.db.query('engines').unique())!;
+      const status = (await ctx.db.query('worldStatus').unique())!;
+      expect(engine.processedInputNumber).toBeUndefined();
+      expect(await ctx.db.query('inputs').collect()).toEqual([]);
+      const audit = (await ctx.db.query('backupImports').unique())!;
+      expect(audit.runtimeSnapshot.largeJobId).toBe(jobId);
+      await ctx.db.patch(engine._id, { running: true });
+      const inputId = await engineInsertInput(ctx, engine._id, 'join', { name: 'First chunk restored human', character: 'f1', description: 'First input after chunk restore', tokenIdentifier: 'chunk-restored-human' });
+      return { engine, worldId: status.worldId, inputId };
+    });
+    const loaded = await t.run(ctx => Game.load(ctx.db, worldId, engine.generationNumber));
+    const game = new Game(loaded.engine, worldId, loaded.gameState);
+    jest.spyOn(game, 'tick').mockImplementation(() => {});
+    await game.runStep({ runQuery: (ref: any, args: any) => t.query(ref, args), runMutation: (ref: any, args: any) => t.mutation(ref, args) } as ActionCtx, Date.now());
+    await t.run(async ctx => {
+      const input = (await ctx.db.get(inputId))!;
+      expect(input.number).toBe(0);
+      expect(input.returnValue?.kind).toBe('ok');
+      expect((await ctx.db.get(engine._id))!.processedInputNumber).toBe(0);
+      expect((await ctx.db.get(worldId))!.players.some(p => p.human === 'chunk-restored-human')).toBe(true);
+    });
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test('tampered chunk is rejected before staging and retry is idempotent; cross-chunk missing references fail before writes', async () => {

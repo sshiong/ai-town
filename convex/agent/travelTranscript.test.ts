@@ -9,6 +9,7 @@ import { recallConversationMemories } from './conversation';
 import { parseGameId } from '../aiTown/ids';
 
 const modules = {
+  '../federation/resources.ts': () => import('../federation/resources'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../agent/travelTranscript.ts': () => import('./travelTranscript'),
   '../agent/travelMemory.ts': () => import('./travelMemory'),

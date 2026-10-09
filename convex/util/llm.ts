@@ -5,6 +5,7 @@ export interface ChatConfig {
   provider: ModelProvider;
   url: string;
   chatModel: string;
+  reasoningEffort?: 'none';
   stopWords: string[];
   apiKey?: string;
 }
@@ -131,7 +132,10 @@ export async function chatCompletion(
 ) {
   const config = configOverride ?? getChatConfig();
   body.model = body.model ?? config.chatModel;
-  body = { ...body };
+  body = {
+    ...body,
+    ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
+  };
   const stopWords = body.stop ? (typeof body.stop === 'string' ? [body.stop] : body.stop) : [];
   if (config.stopWords) stopWords.push(...config.stopWords);
   if (stopWords.length) body.stop = [...new Set(stopWords)];
@@ -164,7 +168,7 @@ export async function chatCompletion(
         const error = await result.text();
         console.error({ error });
         if (result.status === 404 && config.provider === 'ollama') {
-          await tryPullOllama(body.model!, error, config.url);
+          await tryPullOllama(body.model!, error, config.url, controller?.signal);
         }
         throw {
           retry: result.status === 429 || result.status >= 500,
@@ -208,7 +212,12 @@ export async function chatCompletion(
   }
 }
 
-export async function tryPullOllama(model: string, error: string, url = getChatConfig().url) {
+export async function tryPullOllama(
+  model: string,
+  error: string,
+  url = getChatConfig().url,
+  signal?: AbortSignal,
+) {
   if (error.includes('try pulling')) {
     console.error('Embedding model not found, pulling from Ollama');
     const pullResp = await fetch(url + '/api/pull', {
@@ -217,6 +226,7 @@ export async function tryPullOllama(model: string, error: string, url = getChatC
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ name: model }),
+      signal,
     });
     console.log('Pull response', await pullResp.text());
     throw { retry: true, error: `Dynamically pulled model. Original error: ${error}` };

@@ -8,6 +8,9 @@ export const provider = v.union(
   v.literal('ollama'),
   v.literal('custom'),
 );
+export const chatOptions = {
+  reasoningEffort: v.optional(v.literal('none')),
+};
 export const connectionFields = {
   name: v.string(),
   provider,
@@ -29,6 +32,7 @@ export const embeddingProfileFields = {
 export const modelTables = {
   chatProfiles: defineTable({
     ...connectionFields,
+    ...chatOptions,
     stopWords: v.array(v.string()),
     createdAt: v.number(),
     legacy: v.optional(v.boolean()),

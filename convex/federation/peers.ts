@@ -24,6 +24,8 @@ export const requestPair = action({ args: { adminToken: v.string(), endpoint: v.
   return { pairRequestId, state: response.body.state as string };
 } });
 export const storeOutbound = internalMutation({ args: { request: v.any(), endpoint: v.string(), secretEncrypted: v.string(), ephemeralPrivateEncrypted: v.string() }, handler: async (ctx, args) => {
+  const local = await identity(ctx);
+  if (!local?.enabled || local.mode !== 'ACTIVE' || args.request.deploymentInstanceId !== local.deploymentInstanceId || args.request.deploymentEpoch !== local.deploymentEpoch) throw new Error('DEPLOYMENT_NOT_ACTIVE');
   const existing = await pairById(ctx, args.request.pairRequestId); if (existing) return;
   const recent = await ctx.db.query('pairRequests').order('desc').take(100);
   if (recent.some((r) => r.endpoint === args.endpoint && r.direction === 'OUTBOUND' && r.requestedAt > Date.now() - 60_000)) throw new Error('PAIR_RATE_LIMITED');
@@ -63,6 +65,8 @@ export const approvePair = action({ args: { adminToken: v.string(), pairRequestI
   return { pairRequestId: args.pairRequestId, state: 'PENDING_BOTH_CONFIRM' };
 } });
 export const storeApproval = internalMutation({ args: { pairRequestId: v.string(), response: v.any(), credentialEncrypted: v.string() }, handler: async (ctx, args) => {
+  const local = await identity(ctx);
+  if (!local?.enabled || local.mode !== 'ACTIVE') throw new Error('DEPLOYMENT_NOT_ACTIVE');
   const pair = await pairById(ctx, args.pairRequestId);
   if (!pair || pair.direction !== 'INBOUND' || pair.state !== 'PENDING_APPROVAL' || pair.expiresAt <= Date.now()) throw new Error('PAIR_NOT_PENDING');
   await ctx.db.patch(pair._id, { state: 'PENDING_BOTH_CONFIRM', response: args.response, credentialEncrypted: args.credentialEncrypted });
@@ -79,7 +83,7 @@ export const continuePair = action({ args: { adminToken: v.string(), pairRequest
   requireAdmin(args.adminToken);
   const data = await ctx.runQuery(queryRef('store/context'), { pairRequestId: args.pairRequestId });
   const pair = data.pair; const local = data.identity;
-  if (!pair || pair.direction !== 'OUTBOUND' || !local || pair.expiresAt <= Date.now() || !pair.secretEncrypted || !pair.ephemeralPrivateEncrypted) throw new Error('PAIR_NOT_PENDING');
+  if (!pair || pair.direction !== 'OUTBOUND' || !local?.enabled || local.mode !== 'ACTIVE' || pair.expiresAt <= Date.now() || !pair.secretEncrypted || !pair.ephemeralPrivateEncrypted) throw new Error('PAIR_NOT_PENDING');
   const query = { pairRequestId: pair.pairRequestId, townId: local.townId, nonce: crypto.randomUUID(), expiresAt: Date.now() + 30_000 };
   const status = await directRequest(pair.endpoint, '/pair', { operation: 'status', body: query, signature: await sign(query, local.privateKeyEncrypted) });
   if (!status.body || !await verifySignature(status.body, status.signature, status.body.publicKey) || status.body.pairRequestId !== pair.pairRequestId || status.body.townId !== pair.request.targetTownId) throw new Error('INVALID_PAIR_STATUS');

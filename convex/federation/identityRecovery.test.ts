@@ -5,6 +5,7 @@ import { makeFunctionReference } from 'convex/server';
 import schema from '../schema';
 import { createIdentityKeys, openSecret, sign, verifySignature } from './security';
 import type { IdentityRecoveryPackage } from './identityRecovery';
+import { DEFAULT_RESOURCE_LIMITS } from './resources';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
@@ -45,6 +46,7 @@ async function source() {
       allowPublicHttp: false,
       maxVisitors: 8,
       maxVisitDurationMs: 300_000,
+      resourceLimits: { ...DEFAULT_RESOURCE_LIMITS, maxConcurrentLocalLLM: 1, maxPendingLocalLLM: 3 },
       createdAt: 1,
     }),
   );
@@ -79,6 +81,7 @@ test('recovery keeps signing identity while rewrapping on an independent destina
   expect(result.deploymentInstanceId).not.toBe('old-instance');
   const restored = await destination.run((ctx) => ctx.db.query('federationIdentity').unique());
   expect(restored!.privateKeyEncrypted).not.toBe(keys.privateKeyEncrypted);
+  expect(restored!.resourceLimits).toEqual({ ...DEFAULT_RESOURCE_LIMITS, maxConcurrentLocalLLM: 1, maxPendingLocalLLM: 3 });
   const proof = { challenge: 'new deployment proof' };
   expect(
     await verifySignature(proof, await sign(proof, restored!.privateKeyEncrypted), keys.publicKey),

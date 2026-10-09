@@ -31,6 +31,9 @@ export function tickRemoteVisitor(game: Game, now: number, player: Player) {
     return;
   }
   if (visitor.pendingTurn && visitor.pendingTurn.deadline > now) return;
+  const pending = [...game.world.players.values()].filter(p =>
+    p.remoteVisitor?.pendingTurn && p.remoteVisitor.pendingTurn.deadline > now).length;
+  if (pending + game.otherPendingDecisions >= game.resourceLimits.maxPendingDecisions) return;
   if (visitor.lastObservationAt + 5000 > now) return;
   if (conversation?.federationTurn && conversation.federationTurn.deadline > now) return;
   if (conversation?.isTyping && conversation.isTyping.playerId !== player.id) return;

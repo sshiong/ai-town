@@ -1,4 +1,5 @@
-import { Infer, v } from 'convex/values';
+import { ConvexError, Infer, v } from 'convex/values';
+import { configuredResourceLimits, DEFAULT_RESOURCE_LIMITS, ResourceLimits, resourceLimits } from '../federation/resources';
 import { Doc, Id } from '../_generated/dataModel';
 import {
   ActionCtx,
@@ -35,6 +36,7 @@ import {
 } from '../federation/runtime';
 
 const gameState = v.object({
+  resourceBudget: v.optional(v.object({ limits: resourceLimits, otherResidents: v.number(), otherHumans: v.number(), otherPendingDecisions: v.number() })),
   world: v.object(serializedWorld),
   playerDescriptions: v.array(v.object(serializedPlayerDescription)),
   agentDescriptions: v.array(v.object(serializedAgentDescription)),
@@ -67,6 +69,10 @@ export class Game extends AbstractGame {
   agentDescriptions: Map<GameId<'agents'>, AgentDescription>;
 
   pendingOperations: Array<{ name: string; args: any }> = [];
+  resourceLimits: ResourceLimits;
+  otherResidents: number;
+  otherHumans: number;
+  otherPendingDecisions: number;
 
   numPathfinds: number;
 
@@ -76,6 +82,10 @@ export class Game extends AbstractGame {
     state: GameState,
   ) {
     super(engine);
+    this.resourceLimits = state.resourceBudget?.limits ?? DEFAULT_RESOURCE_LIMITS;
+    this.otherResidents = state.resourceBudget?.otherResidents ?? 0;
+    this.otherHumans = state.resourceBudget?.otherHumans ?? 0;
+    this.otherPendingDecisions = state.resourceBudget?.otherPendingDecisions ?? 0;
 
     this.world = new World(state.world);
     delete this.world.historicalLocations;
@@ -103,6 +113,11 @@ export class Game extends AbstractGame {
     if (!worldDoc) {
       throw new Error(`No world found with id ${worldId}`);
     }
+    const limits = await configuredResourceLimits(db);
+    const others = (await db.query('worlds').collect()).filter(world => world._id !== worldId);
+    const otherPending = await db.query('federationTurns')
+      .withIndex('state_deadline', q => q.eq('state', 'PENDING').gt('deadline', Date.now()))
+      .filter(q => q.neq(q.field('worldId'), worldId)).take(1001);
     const worldStatus = await db
       .query('worldStatus')
       .withIndex('worldId', (q) => q.eq('worldId', worldId))
@@ -148,6 +163,12 @@ export class Game extends AbstractGame {
     return {
       engine,
       gameState: {
+        resourceBudget: {
+          limits,
+          otherResidents: others.reduce((count, world) => count + world.agents.length, 0),
+          otherHumans: others.reduce((count, world) => count + world.players.filter(p => p.human).length, 0),
+          otherPendingDecisions: otherPending.length,
+        },
         world,
         playerDescriptions,
         agentDescriptions,
@@ -266,6 +287,17 @@ export class Game extends AbstractGame {
       throw new Error(`No world found with id ${worldId}`);
     }
     const newWorld = diff.world;
+    // Validate additions transactionally as well as at the engine input boundary.
+    // Another world or an administrator may have changed capacity since the action loaded.
+    const limits = await configuredResourceLimits(ctx.db);
+    const others = (await ctx.db.query('worlds').collect()).filter(world => world._id !== worldId);
+    const otherResidents = others.reduce((count, world) => count + world.agents.length, 0);
+    const otherHumans = others.reduce((count, world) => count + world.players.filter(p => p.human).length, 0);
+    const oldHumans = existingWorld.players.filter(p => p.human).length;
+    const newHumans = newWorld.players.filter(p => p.human).length;
+    if (newWorld.agents.length > existingWorld.agents.length && newWorld.agents.length + otherResidents > limits.maxResidentAgents ||
+      newHumans > oldHumans && newHumans + otherHumans > limits.maxHumanPlayers)
+      throw new ConvexError({ kind: 'resourceBudgetChanged' });
     // Archive newly deleted players, conversations, and agents.
     for (const player of existingWorld.players) {
       if (

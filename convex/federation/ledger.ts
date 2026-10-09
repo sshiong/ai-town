@@ -7,6 +7,7 @@ import { enqueueMessage } from './queue';
 import { mutationRef } from './refs';
 import { FederationMessage, LEASE_SAFETY_MS } from './protocol';
 import { syncResidentRuntimes } from './runtime';
+import { configuredResourceLimits, pendingDecisionCount } from './resources';
 
 const TERMINAL = new Set(['COMPLETED', 'REJECTED']);
 const RESERVATION_MS = 30_000;
@@ -134,12 +135,23 @@ async function receiveReserve(ctx: MutationCtx, message: FederationMessage) {
   const slots = await ctx.db.query('visitReservations').withIndex('active', q => q.eq('reservedSlot', true)).collect();
   const slotLedgers = await Promise.all(slots.map(slot => visit(ctx, slot.visitId)));
   const occupiedSlots = slots.filter((slot, index) => slot.expiresAt > now || slotLedgers[index]?.role === 'host' && ['CREATING', 'ACTIVE', 'REMOVING'].includes(slotLedgers[index]!.state)).length;
+  const reservedSlots = slots.filter((slot, index) => slot.expiresAt > now && slotLedgers[index]?.state === 'RESERVED').length;
+  const limits = await configuredResourceLimits(ctx.db);
+  const pending = await pendingDecisionCount(ctx.db, now);
+  const queuedChat = await ctx.db.query('federationLlmRequests')
+    .withIndex('state_expiry', q => q.eq('state', 'PENDING').gt('expiresAt', now)).take(1001);
+  const runningChat = await ctx.db.query('federationLlmRequests')
+    .withIndex('state_expiry', q => q.eq('state', 'RUNNING').gt('expiresAt', now)).take(33);
+  const chatQueueFull = queuedChat.length >= limits.maxPendingLocalLLM &&
+    (queuedChat.length > 0 || runningChat.length >= limits.maxConcurrentLocalLLM);
   const connection = await session(ctx, remote.townId);
   let refusal: string | undefined;
   if (!local.enabled || local.mode !== 'ACTIVE' || !remote.inboundVisitsAllowed || !ready(connection) || connection!.localDeploymentEpoch !== local.deploymentEpoch || connection!.verifiedPeerDeploymentEpoch !== remote.deploymentEpoch) refusal = 'VISITS_NOT_ALLOWED';
   else if (activeAgent.some(l => !TERMINAL.has(l.state))) refusal = 'AGENT_ALREADY_PRESENT';
   else if (activeAgent.some(l => l.agentAuthorityEpoch >= message.agentAuthorityEpoch!)) refusal = 'STALE_AGENT_AUTHORITY';
   else if (occupiedSlots >= local.maxVisitors) refusal = 'HOST_CAPACITY_EXCEEDED';
+  else if (reservedSlots >= limits.maxVisitReservations) refusal = 'HOST_RESERVATION_CAPACITY_EXCEEDED';
+  else if (pending >= limits.maxPendingDecisions || chatQueueFull || !limits.maxConcurrentLocalLLM) refusal = 'HOST_RESOURCE_DEGRADED';
   const state = refusal ? 'REJECTED' : 'RESERVED';
   const id = await ctx.db.insert('visitLedger', { visitId: message.visitId!, agentGlobalId: message.agentGlobalId!, homeTownId: message.fromTownId, hostTownId: local.townId,
     homeDeploymentEpoch: message.senderDeploymentEpoch, hostDeploymentEpoch: message.expectedRecipientDeploymentEpoch,

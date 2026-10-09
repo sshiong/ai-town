@@ -273,6 +273,8 @@ export const deliver = internalAction({ args: { messageId: v.string() }, handler
   if (item.envelope.expiresAt <= now()) { await ctx.runMutation(mutationRef('transport/markDelivery'), { messageId, status: 'EXPIRED' }); return; }
   try {
     if (remote.trustState !== 'TRUSTED' && !CLEANUP_TYPES.has(item.envelope.type)) throw new Error('PEER_NOT_TRUSTED');
+    if (local.mode !== 'ACTIVE' && !CLEANUP_TYPES.has(item.envelope.type)) throw new Error('DEPLOYMENT_NOT_ACTIVE');
+    if (item.envelope.senderDeploymentEpoch !== local.deploymentEpoch || item.envelope.senderDeploymentInstanceId !== local.deploymentInstanceId || item.envelope.expectedRecipientDeploymentEpoch !== remote.deploymentEpoch || item.envelope.credentialId !== remote.credentialId) throw new Error('OUTBOX_DEPLOYMENT_FENCED');
     const packet = await signPacket(item.envelope, local.privateKeyEncrypted, remote.credentialEncrypted);
     const ack = await directRequest(remote.endpoint, '/messages', packet), body = ack?.body;
     if (!body || !await verifyPacket(ack, remote.publicKey, remote.credentialEncrypted) || body.protocol !== PROTOCOL || body.type !== 'MESSAGE_ACK' || body.fromTownId !== remote.townId || body.toTownId !== local.townId || body.senderDeploymentInstanceId !== remote.deploymentInstanceId || body.senderDeploymentEpoch !== remote.deploymentEpoch || body.expectedRecipientDeploymentEpoch !== local.deploymentEpoch || body.credentialId !== remote.credentialId || body.messageId !== messageId || body.nonce !== item.envelope.nonce || body.expiresAt <= now() || body.expiresAt > now() + 60_000 || !['COMMITTED', 'BUFFERED', 'RESYNC_REQUIRED', 'DISCARDED', 'STALE_SEQUENCE'].includes(body.status)) throw new Error('INVALID_MESSAGE_ACK');

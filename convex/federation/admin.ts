@@ -5,6 +5,18 @@ import { createIdentityKeys, requireAdmin, randomSecret } from './security';
 import { identity } from './store';
 import { normalizeEndpoint } from './protocol';
 import { actionRef, mutationRef } from './refs';
+import { resourceLimits, validateResourceLimits, configuredResourceLimits, pendingDecisionCount } from './resources';
+export const configureResources = mutation({
+  args: { adminToken: v.string(), limits: resourceLimits },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    validateResourceLimits(args.limits);
+    const local = await identity(ctx);
+    if (!local) throw new Error('INITIALIZE_IDENTITY_FIRST');
+    // Reducing a budget pauses new admissions; existing residents and work are retained.
+    await ctx.db.patch(local._id, { resourceLimits: args.limits });
+  },
+});
 export const initialize = action({
   args: {
     adminToken: v.string(),
@@ -91,6 +103,7 @@ export const configure = mutation({
       args.maxVisitDurationMs > 30 * 60_000
     )
       throw new Error('INVALID_CAPACITY_OR_DURATION');
+    if (local.mode !== 'ACTIVE' && args.enabled) throw new Error('DEPLOYMENT_NOT_ACTIVE');
     await ctx.db.patch(local._id, {
       enabled: args.enabled,
       allowIncomingPairRequests: args.allowIncomingPairRequests,
@@ -106,6 +119,14 @@ export const status = query({
     requireAdmin(args.adminToken);
     const local = await identity(ctx);
     const peers = await ctx.db.query('federationPeers').take(100);
+    const limits = await configuredResourceLimits(ctx.db);
+    const worlds = await ctx.db.query('worlds').collect();
+    const now = Date.now();
+    const pendingDecisions = await pendingDecisionCount(ctx.db, now);
+    const pendingChat = await ctx.db.query('federationLlmRequests')
+      .withIndex('state_expiry', q => q.eq('state', 'PENDING').gt('expiresAt', now)).take(1001);
+    const runningChat = await ctx.db.query('federationLlmRequests')
+      .withIndex('state_expiry', q => q.eq('state', 'RUNNING').gt('expiresAt', now)).take(33);
     const sessions = await ctx.db.query('transportSessions').take(100);
     const requests = await ctx.db.query('pairRequests').order('desc').take(100);
     const visits = await ctx.db.query('visitLedger').order('desc').take(100);
@@ -121,7 +142,22 @@ export const status = query({
           .unique(),
       ),
     );
+    const activeSlots = slots.filter((slot, index) => slot.expiresAt > now ||
+      slotLedgers[index]?.role === 'host' && ['CREATING', 'ACTIVE', 'REMOVING'].includes(slotLedgers[index]!.state));
+    const reservations = slots.filter((slot, index) => slot.expiresAt > now && slotLedgers[index]?.state === 'RESERVED').length;
+    const chatQueueFull = pendingChat.length >= limits.maxPendingLocalLLM &&
+      (pendingChat.length > 0 || runningChat.length >= limits.maxConcurrentLocalLLM);
+    const admissionState = !local?.enabled || local.mode !== 'ACTIVE' ? 'CLOSED'
+      : activeSlots.length >= local.maxVisitors || reservations >= limits.maxVisitReservations ? 'FULL'
+      : pendingDecisions >= limits.maxPendingDecisions || chatQueueFull || !limits.maxConcurrentLocalLLM ? 'DEGRADED' : 'OPEN';
     return {
+      resources: {
+        limits, admissionState,
+        residents: worlds.reduce((count, world) => count + world.agents.length, 0),
+        humans: worlds.reduce((count, world) => count + world.players.filter(p => p.human).length, 0),
+        reservations, pendingDecisions, pendingLocalLLM: pendingChat.length, runningLocalLLM: runningChat.length,
+        cpu: null, memory: null,
+      },
       capacity: {
         reserved: slots.filter(
           (slot, index) =>

@@ -10,11 +10,17 @@ import { embeddingFingerprint } from '../models/compatibility';
 import { applyBackupData } from './backup';
 import { defaultStoragePolicy } from './storagePolicy';
 import { receiveConversationEnded } from '../agent/travelTranscript';
+import { DEFAULT_RESOURCE_LIMITS } from './resources';
+import { Game } from '../aiTown/game';
+import { engineInsertInput } from '../engine/abstractGame';
+import type { ActionCtx } from '../_generated/server';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/backup.ts': () => import('./backup'),
   '../models/embeddings.ts': () => import('../models/embeddings'),
+  '../engine/abstractGame.ts': () => import('../engine/abstractGame'),
+  '../aiTown/game.ts': () => import('../aiTown/game'),
 };
 const action = (name: string) => makeFunctionReference<'action'>(name);
 const adminToken = 'test-admin-token-24-characters';
@@ -47,6 +53,7 @@ async function town() {
       allowPublicHttp: false,
       maxVisitors: 8,
       maxVisitDurationMs: 300000,
+      resourceLimits: { ...DEFAULT_RESOURCE_LIMITS, maxConcurrentLocalLLM: 1, maxVisitReservations: 3 },
       mode: 'ACTIVE',
       createdAt: 1,
     });
@@ -268,10 +275,46 @@ test('full-town export is signed, versioned, binary-safe and excludes private ke
   await expect(validateBundle(bad)).rejects.toThrow('BACKUP_CHECKSUM_MISMATCH');
 });
 
+test('restoring a nonzero source input cursor preserves its audit snapshot and executes the new queue input zero', async () => {
+  const { t } = await town();
+  await t.run(async ctx => {
+    const engine = (await ctx.db.query('engines').unique())!;
+    await ctx.db.patch(engine._id, { processedInputNumber: 37 });
+    await ctx.db.insert('inputs', { engineId: engine._id, number: 37, name: 'join', args: {}, received: 1, returnValue: { kind: 'ok', value: 'source-only-input' } });
+  });
+  const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(decodeRow(bundle.sections.engines[0]).processedInputNumber).toBe(37);
+  await t.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'restore', sourceStopped: true });
+  const { engine, worldId, inputId } = await t.run(async ctx => {
+    const engine = (await ctx.db.query('engines').unique())!;
+    const status = (await ctx.db.query('worldStatus').unique())!;
+    const audit = (await ctx.db.query('backupImports').unique())!;
+    expect(engine.processedInputNumber).toBeUndefined();
+    expect(await ctx.db.query('inputs').collect()).toEqual([]);
+    expect(decodeRow(audit.runtimeSnapshot.inputs[0]).number).toBe(37);
+    await ctx.db.patch(engine._id, { running: true });
+    const inputId = await engineInsertInput(ctx, engine._id, 'join', { name: 'First restored human', character: 'f1', description: 'First input after restore', tokenIdentifier: 'restored-human' });
+    return { engine, worldId: status.worldId, inputId };
+  });
+  const loaded = await t.run(ctx => Game.load(ctx.db, worldId, engine.generationNumber));
+  const game = new Game(loaded.engine, worldId, loaded.gameState);
+  // Keep periodic model jobs out of this deterministic queue/commit regression.
+  jest.spyOn(game, 'tick').mockImplementation(() => {});
+  await game.runStep({ runQuery: (ref: any, args: any) => t.query(ref, args), runMutation: (ref: any, args: any) => t.mutation(ref, args) } as ActionCtx, Date.now());
+  await t.run(async ctx => {
+    const input = (await ctx.db.get(inputId))!;
+    expect(input.number).toBe(0);
+    expect(input.returnValue?.kind).toBe('ok');
+    expect((await ctx.db.get(engine._id))!.processedInputNumber).toBe(0);
+    expect((await ctx.db.get(worldId))!.players.some(p => p.human === 'restored-human')).toBe(true);
+  });
+});
+
 test('restore atomically remaps core data while preserving identities, profiles, maps, conversations and reflection pointers', async () => {
   const { t, agentGlobalId, worldId } = await town();
   const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
   const before = await t.query((ctx) => ctx.db.query('federationIdentity').unique());
+  await t.run(ctx => ctx.db.patch(before!._id, { resourceLimits: DEFAULT_RESOURCE_LIMITS }));
   const result = await t.action(action('federation/backup:importBackup'), {
     adminToken,
     bundle,
@@ -293,6 +336,7 @@ test('restore atomically remaps core data while preserving identities, profiles,
     embeddingProfiles: await ctx.db.query('embeddingProfiles').collect(),
   }));
   expect(snapshot.identity?.townId).toBe(before?.townId);
+  expect(snapshot.identity?.resourceLimits).toEqual(before?.resourceLimits);
   expect(snapshot.identity?.publicKey).toBe(before?.publicKey);
   expect(snapshot.identity?.deploymentInstanceId).not.toBe(before?.deploymentInstanceId);
   expect(snapshot.identity?.deploymentEpoch).toBe(5);
@@ -393,6 +437,11 @@ test('clone has fresh town/key/global ownership and merge allocates local IDs wi
   });
   const destination = await town();
   const prior = await destination.t.query((ctx) => ctx.db.query('federationIdentity').unique());
+  const priorEngine = await destination.t.run(async ctx => {
+    const engine = (await ctx.db.query('engines').unique())!;
+    await ctx.db.patch(engine._id, { processedInputNumber: 21 });
+    return (await ctx.db.get(engine._id))!;
+  });
   await destination.t.action(action('federation/backup:importBackup'), {
     adminToken,
     bundle,
@@ -404,8 +453,10 @@ test('clone has fresh town/key/global ownership and merge allocates local IDs wi
     world: await ctx.db.get(destination.worldId),
     bindings: await ctx.db.query('residentModelBindings').collect(),
     memories: await ctx.db.query('memories').collect(),
+    engines: await ctx.db.query('engines').collect(),
   }));
   expect(merged.identity).toEqual(prior);
+  expect(merged.engines).toEqual([priorEngine]);
   expect(merged.world?.players).toHaveLength(2);
   expect(merged.world?.agents).toHaveLength(2);
   expect(new Set(merged.world?.players.map((p) => p.id)).size).toBe(2);

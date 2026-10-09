@@ -151,6 +151,7 @@ describe('Host action authority', () => {
     expect(() =>
       federationInputs.federationAction.handler(game, now, { ...actionArgs, visitLeaseVersion: 2 }),
     ).toThrow('STALE_AUTHORITY');
+    expect(game.world.players.get(id)!.remoteVisitor!.pendingTurn?.turnId).toBe('turn');
     expect(() =>
       federationInputs.federationAction.handler(game, now, { ...actionArgs, deadline: now - 1 }),
     ).toThrow('STALE_TURN');
@@ -160,10 +161,88 @@ describe('Host action authority', () => {
         action: { type: 'moveTo', destination: { x: -1, y: 0 } },
       }),
     ).toThrow('INVALID_DESTINATION');
-    expect(() => federationInputs.federationAction.handler(game, now, actionArgs)).not.toThrow();
+    expect(game.world.players.get(id)!.remoteVisitor!.pendingTurn).toBeUndefined();
     expect(() => federationInputs.federationAction.handler(game, now, actionArgs)).toThrow(
       'STALE_TURN',
     );
+    const guest = game.world.players.get(id)!;
+    tickRemoteVisitor(game, now + 5001, guest);
+    const freshTurn = guest.remoteVisitor!.pendingTurn!;
+    expect(freshTurn.turnId).not.toBe(actionArgs.turnId);
+    expect(() =>
+      federationInputs.federationAction.handler(game, now + 5001, {
+        ...actionArgs,
+        turnId: freshTurn.turnId,
+        deadline: freshTurn.deadline,
+      }),
+    ).not.toThrow();
+    expect(() => federationInputs.federationAction.handler(game, now, actionArgs)).toThrow(
+      'STALE_TURN',
+    );
+  });
+  test('a rejected action releases a long turn so a new invitation can be accepted', () => {
+    const game = gameFixture(),
+      now = Date.now();
+    const guestId = federationInputs.federationCreateVisitor.handler(game, now, {
+      visitor: {
+        visitId: 'rejected-turn-visit',
+        agentGlobalId: 'town:B/agent:guest',
+        homeTownId: 'town:B',
+        homeTownName: 'B',
+        agentAuthorityEpoch: 2,
+        visitLeaseVersion: 1,
+        leaseExpiry: now + 300000,
+        replyTimeoutMs: 90000,
+        lastObservationAt: 0,
+      },
+      name: 'Guest',
+      character: 'f2',
+      description: 'Visitor',
+    });
+    const guest = game.world.players.get(guestId)!;
+    guest.position = { x: 1, y: 2 };
+    tickRemoteVisitor(game, now, guest);
+    const rejected = guest.remoteVisitor!.pendingTurn!;
+    const args = {
+      playerId: guestId,
+      visitId: 'rejected-turn-visit',
+      actionId: 'rejected',
+      turnId: rejected.turnId,
+      deadline: rejected.deadline,
+      agentAuthorityEpoch: 2,
+      visitLeaseVersion: 1,
+      action: { type: 'moveTo' as const, destination: { x: -1, y: 0 } },
+    };
+    expect(() => federationInputs.federationAction.handler(game, now + 1, args)).toThrow(
+      'INVALID_DESTINATION',
+    );
+    expect(guest.remoteVisitor!.pendingTurn).toBeUndefined();
+    const local = game.world.players.get(parseGameId('players', 'p:0'))!;
+    const { conversationId } = Conversation.start(game, now + 2, local, guest);
+    expect(conversationId).toBeDefined();
+    tickRemoteVisitor(game, now + 5001, guest);
+    const fresh = guest.remoteVisitor!.pendingTurn!;
+    expect(fresh.turnId).not.toBe(rejected.turnId);
+    expect(now + 5001).toBeLessThan(rejected.deadline);
+    expect(() => federationInputs.federationAction.handler(game, now + 5001, args)).toThrow(
+      'STALE_TURN',
+    );
+    expect(guest.remoteVisitor!.pendingTurn?.turnId).toBe(fresh.turnId);
+    federationInputs.federationAction.handler(game, now + 5001, {
+      ...args,
+      actionId: 'accept',
+      turnId: fresh.turnId,
+      deadline: fresh.deadline,
+      conversationId,
+      expectedNumMessages: 0,
+      action: { type: 'acceptInvite' },
+    });
+    const conversation = game.world.conversations.get(conversationId!)!;
+    conversation.tick(game, now + 5002);
+    expect(
+      [...conversation.participants.values()].every((m) => m.status.kind === 'participating'),
+    ).toBe(true);
+    expect(guest.remoteVisitor!.pendingTurn).toBeUndefined();
   });
   test('structured model replies never accept arbitrary code or extra fields', () => {
     expect(() => parseDecision('')).toThrow('EMPTY_MODEL_DECISION');

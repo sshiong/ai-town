@@ -7,6 +7,7 @@ import RecoveryPanel from './RecoveryPanel';
 import ArchivePanel from './ArchivePanel';
 import IdentityRecoveryPanel from './IdentityRecoveryPanel';
 import StoragePolicyPanel from './StoragePolicyPanel';
+import MigrationPanel from './MigrationPanel';
 import {
   AdminButton,
   downloadBundle,
@@ -417,6 +418,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
       </details>
       <ArchivePanel adminToken={adminToken} />
       <IdentityRecoveryPanel adminToken={adminToken} />
+      <MigrationPanel adminToken={adminToken} />
       <StoragePolicyPanel adminToken={adminToken} />
     </section>
   );

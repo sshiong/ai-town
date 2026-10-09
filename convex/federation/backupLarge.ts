@@ -923,7 +923,8 @@ export const deleteOldPage = internalMutation({
 function activeFields(name: string, row: BackupRow, job: Job, allocation: boolean): BackupRow {
   let fields = stripSystem(row);
   if (name === 'engines')
-    fields = { ...fields, running: false, generationNumber: fields.generationNumber + 1 };
+    // Runtime inputs are audit snapshots, not the new active input queue.
+    fields = { ...fields, running: false, generationNumber: fields.generationNumber + 1, processedInputNumber: undefined };
   if (name === 'worldStatus') fields = { ...fields, status: 'stoppedByDeveloper' };
   if (name === 'memories') {
     const { embeddingId, embeddingSpaceId, ...canonical } = fields;
@@ -1148,6 +1149,9 @@ export const finalizeImport = internalMutation({
         allowUnencryptedHttp: false,
         allowPublicHttp: false,
         mode: 'DISABLED',
+        activeHandoffId: undefined,
+        migrationFrozenAt: undefined,
+        migrationOperator: undefined,
         createdAt: now,
       } as never);
       local = await ctx.db.get(id);
@@ -1160,12 +1164,16 @@ export const finalizeImport = internalMutation({
         townName: source.townName,
         maxVisitors: source.maxVisitors,
         maxVisitDurationMs: source.maxVisitDurationMs,
+        resourceLimits: source.resourceLimits,
         endpoint: job.targetEndpoint ? normalizeEndpoint(job.targetEndpoint) : local.endpoint,
         allowUnencryptedHttp: false,
         allowPublicHttp: false,
         enabled: false,
         allowIncomingPairRequests: false,
         mode: 'NEEDS_RECONCILIATION',
+        activeHandoffId: undefined,
+        migrationFrozenAt: undefined,
+        migrationOperator: undefined,
       });
       local = await ctx.db.get(local._id);
     }

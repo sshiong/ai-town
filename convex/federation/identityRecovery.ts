@@ -4,6 +4,7 @@ import { makeFunctionReference } from 'convex/server';
 import { canonicalJson, normalizeEndpoint } from './protocol';
 import { assertTownUnlocked } from './maintenanceLock';
 import { identity } from './store';
+import { resourceLimits, ResourceLimits, validateResourceLimits } from './resources';
 import {
   digest,
   fromBase64,
@@ -160,6 +161,7 @@ export const exportEncryptedIdentity = action({
       privateKey: await openSecret(local.privateKeyEncrypted),
       maxVisitors: local.maxVisitors,
       maxVisitDurationMs: local.maxVisitDurationMs,
+      ...(local.resourceLimits ? { resourceLimits: local.resourceLimits } : {}),
     };
     const ciphertext = toBase64(
       new Uint8Array(
@@ -209,6 +211,7 @@ export const restoreEncryptedIdentity = action({
       privateKey: string;
       maxVisitors: number;
       maxVisitDurationMs: number;
+      resourceLimits?: ResourceLimits;
     };
     try {
       const plaintext = await crypto.subtle.decrypt(
@@ -221,6 +224,7 @@ export const restoreEncryptedIdentity = action({
         fromBase64(ciphertext),
       );
       secret = JSON.parse(new TextDecoder().decode(plaintext));
+      if (secret?.resourceLimits !== undefined) validateResourceLimits(secret.resourceLimits);
       if (
         !secret ||
         typeof secret.townName !== 'string' ||
@@ -261,6 +265,7 @@ export const restoreEncryptedIdentity = action({
       endpoint,
       maxVisitors: secret.maxVisitors,
       maxVisitDurationMs: secret.maxVisitDurationMs,
+      ...(secret.resourceLimits ? { resourceLimits: secret.resourceLimits } : {}),
     });
   },
 });
@@ -275,6 +280,7 @@ export const installIdentity = internalMutation({
     endpoint: v.string(),
     maxVisitors: v.number(),
     maxVisitDurationMs: v.number(),
+    resourceLimits: v.optional(resourceLimits),
   },
   handler: async (ctx, args) => {
     await assertTownUnlocked(ctx);

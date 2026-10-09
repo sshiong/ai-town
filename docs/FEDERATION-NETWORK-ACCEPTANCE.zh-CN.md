@@ -36,7 +36,7 @@ npm test -- --runInBand convex/federation/transport.test.ts convex/federation/ru
 npx tsc --noEmit
 ```
 
-整体联调已在两个独立 Linux Convex 部署完成隔离 CA 的真实 HTTPS 配对、双向 Ready、旅行 Active、Home 思考、Host 发言、Home 记忆保存、自动清理与同一 Player ID 安全返乡。另已通过本机 Qwen 的真实模型探测和 1024 维 Embedding 配置验证与激活。claw 早期返回 400；用户启用模型后简单请求已成功，但旅行决策仍有空正文/超时，最后一次服务连通性检查仍 TCP 超时。确定性测试服务与管理员驱动的链路成功不能当作 claw 自主交流通过。上述为整体联调记录；不等同于生产部署或实际公网可达性验收。
+整体联调已在两个独立 Linux Convex 部署完成隔离 CA 的真实 HTTPS 配对、双向 Ready、旅行 Active、Home 思考、Host 发言、Home 记忆保存、自动清理与同一 Player ID 安全返乡。另已通过本机 Qwen 的真实模型探测和 1024 维 Embedding 配置验证与激活。claw 旧地址曾返回 400、空正文或超时；用户更新 LAN 地址后，保留固定绑定的真实聊天探测与两方向旅行决策、提交回执和原身份返乡均通过。多轮自主交流仍单独验证。确定性测试服务与管理员驱动的链路成功不能当作 claw 自主交流通过。上述为整体联调记录；不等同于生产部署或实际公网可达性验收。
 
 ## 明文 HTTP 保持关闭
 

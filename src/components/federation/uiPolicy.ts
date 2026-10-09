@@ -39,6 +39,16 @@ export function canResumeRestoredResident(
 
 export function adminErrorSummary(message: string) {
   const explanations: Record<string, string> = {
+    RESIDENT_CAPACITY_EXCEEDED:
+      'The resident limit has been reached. Increase capacity before adding another resident.',
+    HUMAN_CAPACITY_EXCEEDED: 'The town has reached its limit for human players.',
+    LOCAL_LLM_PAUSED:
+      'New model requests are paused. Increase the concurrent request limit to resume them.',
+    LOCAL_LLM_QUEUE_FULL:
+      'The model request queue is full. Wait for current requests to finish or increase the queue limit.',
+    LOCAL_LLM_QUEUE_TIMEOUT: 'This model request could not start within the queue wait limit.',
+    CHAT_REQUEST_DEADLINE: 'The model request exceeded its overall deadline.',
+    DECISION_QUEUE_FULL: 'The pending visitor decision limit has been reached.',
     ADMIN_UNAUTHORIZED: "Administrator access was rejected. Check this deployment's admin token.",
     STOP_TARGET_ENGINE_FIRST: 'Pause the target simulation before running import preflight.',
     END_VISITS_BEFORE_STOPPING:

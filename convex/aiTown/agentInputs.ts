@@ -122,6 +122,8 @@ export const agentInputs = {
     },
     handler: (game, now, args) => {
       const description = Descriptions[args.descriptionIndex];
+      if (game.world.agents.size + game.otherResidents >= game.resourceLimits.maxResidentAgents)
+        throw new Error('RESIDENT_CAPACITY_EXCEEDED');
       const playerId = Player.join(
         game,
         now,

@@ -6,7 +6,6 @@ import {
   PATHFINDING_TIMEOUT,
   PATHFINDING_BACKOFF,
   HUMAN_IDLE_TOO_LONG,
-  MAX_HUMAN_PLAYERS,
   MAX_PATHFINDS_PER_STEP,
 } from '../constants';
 import { pointsEqual, pathPosition } from '../util/geometry';
@@ -192,8 +191,8 @@ export class Player {
           throw new Error(`You are already in this game!`);
         }
       }
-      if (numHumans >= MAX_HUMAN_PLAYERS) {
-        throw new Error(`Only ${MAX_HUMAN_PLAYERS} human players allowed at once.`);
+      if (numHumans + game.otherHumans >= game.resourceLimits.maxHumanPlayers) {
+        throw new Error(`Only ${game.resourceLimits.maxHumanPlayers} human players allowed at once.`);
       }
     }
     let position;

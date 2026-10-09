@@ -1,7 +1,8 @@
+import { residentChatCompletion } from '../federation/resources';
 import { v } from 'convex/values';
 import { Id } from '../_generated/dataModel';
 import { ActionCtx, internalQuery } from '../maintenanceFunctions';
-import { LLMMessage, chatCompletion } from '../util/llm';
+import { LLMMessage } from '../util/llm';
 import { chatConfigForResident } from '../models/profiles';
 import { activeRoute } from '../models/embeddings';
 import * as memory from './memory';
@@ -24,14 +25,17 @@ export async function recallConversationMemories(
     ? await ctx.runQuery(internal.agent.memory.participantMemories, { worldId, playerId, agentGlobalId: otherGlobalId })
     : [];
   const combine = (memories: memory.Memory[]) => [...new Map([...social, ...memories].map(m => [m._id, m])).values()];
+  let route;
+  let embedding;
   try {
-    const route = await activeRoute(ctx);
-    const embedding = await embeddingsCache.fetch(ctx, searchText, { route, inputMode: 'query' });
-    return combine(await memory.searchMemories(ctx, playerId, embedding, n, worldId, route.space._id));
+    route = await activeRoute(ctx);
+    embedding = await embeddingsCache.fetch(ctx, searchText, { route, inputMode: 'query' });
   } catch (error) {
     console.warn('CONVERSATION_MEMORY_CANONICAL_FALLBACK', String(error).slice(0, 300));
     return combine(await ctx.runQuery(internal.agent.memory.canonicalMemories, { worldId, playerId, n }));
   }
+  // A retrieval failure must surface; recent text is only a provider-outage fallback.
+  return combine(await memory.searchMemories(ctx, playerId, embedding, n, worldId, route.space._id));
 }
 
 export async function startConversationMessage(
@@ -83,7 +87,8 @@ export async function startConversationMessage(
     { role: 'user', content: lastPrompt },
   ];
 
-  const { content } = await chatCompletion(
+  const { content } = await residentChatCompletion(
+    ctx,
     {
       messages,
       max_tokens: 300,
@@ -155,7 +160,8 @@ export async function continueConversationMessage(
   const lastPrompt = `${player.name} to ${otherPlayer.name}:`;
   llmMessages.push({ role: 'user', content: lastPrompt });
 
-  const { content } = await chatCompletion(
+  const { content } = await residentChatCompletion(
+    ctx,
     {
       messages: llmMessages,
       max_tokens: 300,
@@ -207,7 +213,8 @@ export async function leaveConversationMessage(
   const lastPrompt = `${player.name} to ${otherPlayer.name}:`;
   llmMessages.push({ role: 'user', content: lastPrompt });
 
-  const { content } = await chatCompletion(
+  const { content } = await residentChatCompletion(
+    ctx,
     {
       messages: llmMessages,
       max_tokens: 300,

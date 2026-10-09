@@ -1,3 +1,4 @@
+import { residentChatCompletion } from './resources';
 import { v } from 'convex/values';
 import {
   ActionCtx,
@@ -8,7 +9,7 @@ import {
 import { internal } from '../_generated/api';
 import { Id } from '../_generated/dataModel';
 import { chatConfigForGlobalAgent } from '../models/profiles';
-import { chatCompletion } from '../util/llm';
+
 import { enqueueMessage } from './queue';
 import { visit } from './store';
 import { activeRoute } from '../models/embeddings';
@@ -81,11 +82,6 @@ export const claim = internalMutation({
       return null;
     }
     if (runtime.activeDecisionId) return null;
-    const running = await ctx.db
-      .query('federationDecisionJobs')
-      .withIndex('state', (q) => q.eq('state', 'RUNNING'))
-      .take(3);
-    if (running.length >= 2) return null;
     await ctx.db.patch(jobId, { state: 'RUNNING' });
     await ctx.db.patch(runtime._id, { activeDecisionId: job.eventId, updatedAt: Date.now() });
     const profile = await ctx.db
@@ -123,31 +119,34 @@ export async function recallHomeMemories(
     worldId: args.worldId,
     playerId: args.playerId,
   });
+  let route;
+  let queryEmbedding;
   try {
-    const route = await activeRoute(ctx);
+    route = await activeRoute(ctx);
     const searchText = JSON.stringify(args.observation).slice(0, 6000);
-    const queryEmbedding = await embeddingsCache.fetch(ctx, searchText, {
+    queryEmbedding = await embeddingsCache.fetch(ctx, searchText, {
       route,
       inputMode: 'query',
     });
-    const related = await searchMemories(
-      ctx,
-      parseGameId('players', args.playerId),
-      queryEmbedding,
-      12,
-      args.worldId,
-      route.space._id,
-    );
-    const descriptions = [
-      ...new Set([...related.map((m) => m.description), ...canonical.slice(0, 4)]),
-    ].slice(0, 16);
-    return { descriptions, retrievalMode: 'semantic' };
   } catch (error) {
     // Embedding is a derived retrieval service, independent of the resident's bound Chat model.
     // Retained canonical text remains usable during reindexing and provider outages.
     console.warn('HOME_MEMORY_CANONICAL_FALLBACK', String(error).slice(0, 300));
     return { descriptions: canonical, retrievalMode: 'canonical-fallback' };
   }
+  // Do not disguise an incomplete full-history search as a successful recent-text recall.
+  const related = await searchMemories(
+    ctx,
+    parseGameId('players', args.playerId),
+    queryEmbedding,
+    12,
+    args.worldId,
+    route.space._id,
+  );
+  const descriptions = [
+    ...new Set([...related.map((m) => m.description), ...canonical.slice(0, 4)]),
+  ].slice(0, 16);
+  return { descriptions, retrievalMode: 'semantic' };
 }
 export const finish = internalMutation({
   args: {
@@ -215,7 +214,8 @@ export const run = internalAction({
         playerId: data.runtime.playerId,
         observation,
       });
-      const { content } = await chatCompletion(
+      const { content } = await residentChatCompletion(
+    ctx,
         {
           messages: [
             {

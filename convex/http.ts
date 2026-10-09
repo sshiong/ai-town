@@ -2,6 +2,7 @@ import { httpRouter } from 'convex/server';
 import { handleReplicateWebhook } from './music';
 import { registerFederationRoutes } from './federation/transport';
 import { registerPairingRoutes } from './federation/peers';
+import { registerMigrationRoutes } from './federation/migration';
 
 const http = httpRouter();
 http.route({
@@ -11,4 +12,5 @@ http.route({
 });
 registerFederationRoutes(http);
 registerPairingRoutes(http);
+registerMigrationRoutes(http);
 export default http;

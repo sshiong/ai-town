@@ -1,3 +1,4 @@
+import { residentChatCompletion } from '../federation/resources';
 import { ObjectType, v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
 import {
@@ -11,7 +12,7 @@ import { internal } from '../_generated/api';
 import { canonicalJson } from '../federation/protocol';
 import { digest } from '../federation/security';
 import { chatConfigForGlobalAgent } from '../models/profiles';
-import { chatCompletion } from '../util/llm';
+
 import { persistConfirmedEvent } from './travelMemory';
 import { recordSocialEncounter, reflectOnMemories } from './memory';
 
@@ -451,7 +452,8 @@ export const summarize = internalAction({
     } = await ctx.runQuery(load, args);
     try {
       const config = await chatConfigForGlobalAgent(ctx, data.transcript.agentGlobalId);
-      const { content } = await chatCompletion(
+      const { content } = await residentChatCompletion(
+    ctx,
         {
           messages: [
             {

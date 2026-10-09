@@ -2,9 +2,13 @@ import { convexTest } from 'convex-test';
 import { jest } from '@jest/globals';
 import { makeFunctionReference } from 'convex/server';
 import schema from '../schema';
-import { concernsParticipant } from './memory';
+import { concernsParticipant, searchMemories } from './memory';
 import { recallConversationMemories } from './conversation';
+import { recallHomeMemories } from '../federation/decision';
 import { parseGameId } from '../aiTown/ids';
+import { internal } from '../_generated/api';
+import { Id } from '../_generated/dataModel';
+import { ActionCtx } from '../_generated/server';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
@@ -12,7 +16,231 @@ const modules = {
   '../agent/conversation.ts': () => import('./conversation'),
   '../agent/embeddingsCache.ts': () => import('./embeddingsCache'),
   '../models/embeddings.ts': () => import('../models/embeddings'),
+  '../federation/decision.ts': () => import('../federation/decision'),
 };
+
+async function memorySearchFixture(dimensions = 2) {
+  const t = convexTest(schema, modules);
+  const ids = await t.run(async (ctx) => {
+    const world = { nextId: 1, players: [], agents: [], conversations: [] };
+    const worldId = await ctx.db.insert('worlds', world);
+    const otherWorldId = await ctx.db.insert('worlds', world);
+    const profileId = await ctx.db.insert('embeddingProfiles', {
+      name: 'Fixed embedding', provider: 'custom', url: 'https://embedding.example',
+      model: 'fixed', dimensions, preprocessingRevision: 'newline-to-space-v1',
+      queryPrefix: '', documentPrefix: '', normalization: 'none', fingerprint: 'fixed', createdAt: 1,
+    });
+    const spaceId = await ctx.db.insert('embeddingSpaces', {
+      profileId, fingerprint: 'fixed', status: 'ACTIVE', createdAt: 1,
+    });
+    const otherSpaceId = await ctx.db.insert('embeddingSpaces', {
+      profileId, fingerprint: 'other', status: 'RETIRED', createdAt: 1,
+    });
+    await ctx.db.insert('modelSettings', { key: 'town', activeEmbeddingSpaceId: spaceId });
+    return { worldId, otherWorldId, spaceId, otherSpaceId };
+  });
+  return { t, ...ids };
+}
+
+test.each([{ dimensions: 2, count: 2501 }, { dimensions: 1536, count: 2051 }])(
+  'full-history semantic recall searches $count vectors of $dimensions dimensions and isolates owners/spaces',
+  async ({ dimensions, count }) => {
+  const { t, worldId, otherWorldId, spaceId, otherSpaceId } = await memorySearchFixture(dimensions);
+  const oldQuery = Array.from({ length: dimensions }, (_, i) => i === 0 ? 1 : 0);
+  const lateQuery = Array.from({ length: dimensions }, (_, i) => i === 1 ? 1 : 0);
+  const lastAccess = Date.now() - 60 * 24 * 60 * 60 * 1000;
+  const ids = await t.run(async (ctx) => {
+    const ids = [];
+    for (let i = 0; i < count; i++) {
+      const memoryId = await ctx.db.insert('memories', {
+        worldId, playerId: 'p:0', description: i === 0 ? 'The old red scarf fact' : `Fact ${i}`,
+        importance: 5, lastAccess, data: { type: 'reflection', relatedMemoryIds: [] },
+      });
+      await ctx.db.insert('modelMemoryVectors', {
+        worldId, playerId: 'p:0', spaceId, memoryId,
+        embedding: i === 0 ? oldQuery : i === count - 1 ? lateQuery : Array.from({ length: dimensions }, () => -1),
+      });
+      ids.push(memoryId);
+    }
+    for (const scope of [
+      { worldId: otherWorldId, playerId: 'p:0', spaceId },
+      { worldId, playerId: 'p:1', spaceId },
+      { worldId, playerId: 'p:0', spaceId: otherSpaceId },
+    ]) {
+      const memoryId = await ctx.db.insert('memories', {
+        worldId: scope.worldId, playerId: scope.playerId, description: 'Foreign fact',
+        importance: 9, lastAccess: Date.now(), data: { type: 'reflection', relatedMemoryIds: [] },
+      });
+      // A malformed foreign vector must never even enter this resident-space scan.
+      await ctx.db.insert('modelMemoryVectors', { ...scope, memoryId, embedding: [1] });
+    }
+    return ids;
+  });
+  for (const [embedding, expected] of [[oldQuery, ids[0]], [lateQuery, ids[count - 1]]] as const) {
+    // Keep the weighting inputs identical for the two independent semantic probes.
+    await t.run((ctx) => ctx.db.patch(ids[0], { lastAccess }));
+    const result = await t.action((ctx) =>
+      searchMemories(ctx, parseGameId('players', 'p:0'), [...embedding], 1, worldId, spaceId),
+    );
+    expect(result.map((m) => m._id)).toEqual([expected]);
+  }
+  const retained = await t.query((ctx) => ctx.db.query('memories').collect());
+  expect(retained).toHaveLength(count + 3);
+  expect(retained.find((m) => m._id === ids[0])?.description).toBe('The old red scarf fact');
+  expect(retained.find((m) => m._id === ids[count - 1])?.lastAccess).toBeGreaterThan(lastAccess);
+}, 30_000);
+
+test('wide vectors split on byte budget and pages return only bounded semantic candidates', async () => {
+  const dimensions = 16384;
+  const { t, worldId, spaceId } = await memorySearchFixture(dimensions);
+  const embedding = Array.from({ length: dimensions }, () => 1);
+  await t.run(async (ctx) => {
+    for (let i = 0; i < 12; i++) {
+      const memoryId = await ctx.db.insert('memories', {
+        worldId, playerId: 'p:0', description: `Wide ${i}`, importance: 5,
+        lastAccess: 1, data: { type: 'reflection', relatedMemoryIds: [] },
+      });
+      await ctx.db.insert('modelMemoryVectors', { worldId, playerId: 'p:0', spaceId, memoryId, embedding });
+    }
+  });
+  let upperCreationTime: number | undefined;
+  let cursor: string | null = null;
+  let count = 0;
+  let pages = 0;
+  while (true) {
+    const page: {
+      candidates: { memoryId: Id<'memories'>; _score: number }[];
+      isDone: boolean; continueCursor: string; upperCreationTime: number;
+    } = await t.query(internal.agent.memory.searchSpaceVectorPage, {
+      worldId, playerId: 'p:0', spaceId, searchEmbedding: embedding,
+      dimensions, n: 3, cursor, upperCreationTime,
+    });
+    expect(page.candidates.length).toBeLessThan(12);
+    expect(JSON.stringify(page.candidates).length).toBeLessThan(2048);
+    expect(page.candidates.every((c) => !('embedding' in c) && Number.isFinite(c._score))).toBe(true);
+    count += page.candidates.length;
+    pages++;
+    upperCreationTime = page.upperCreationTime;
+    if (page.isDone) break;
+    expect(page.continueCursor).not.toBe(cursor);
+    cursor = page.continueCursor;
+  }
+  expect(count).toBe(12);
+  expect(pages).toBeGreaterThan(1);
+});
+
+test('relevance candidates retain the original importance and recency ranking', async () => {
+  const { t, worldId, spaceId } = await memorySearchFixture();
+  const ids = await t.run(async (ctx) => {
+    const ids = [];
+    for (const [description, importance, lastAccess, embedding] of [
+      ['Relevant old mundane fact', 0, 1, [1, 0]],
+      ['Important recent reflection', 9, Date.now(), [0.8, 0.6]],
+    ] as const) {
+      const memoryId = await ctx.db.insert('memories', {
+        worldId, playerId: 'p:0', description, importance, lastAccess,
+        data: { type: 'reflection', relatedMemoryIds: [] },
+      });
+      await ctx.db.insert('modelMemoryVectors', {
+        worldId, playerId: 'p:0', spaceId, memoryId, embedding: [...embedding],
+      });
+      ids.push(memoryId);
+    }
+    return ids;
+  });
+  const result = await t.action((ctx) =>
+    searchMemories(ctx, parseGameId('players', 'p:0'), [1, 0], 1, worldId, spaceId),
+  );
+  expect(result.map((m) => m._id)).toEqual([ids[1]]);
+});
+
+test('retrieval corruption is explicit for local and travelling brains, without recent-text fallback', async () => {
+  const { t, worldId, spaceId } = await memorySearchFixture();
+  await t.run(async (ctx) => {
+    const memoryId = await ctx.db.insert('memories', {
+      worldId, playerId: 'p:0', description: 'Retained fact', importance: 5,
+      lastAccess: 1, data: { type: 'reflection', relatedMemoryIds: [] },
+    });
+    await ctx.db.insert('modelMemoryVectors', {
+      worldId, playerId: 'p:0', spaceId, memoryId, embedding: [1],
+    });
+  });
+  const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(() =>
+    Promise.resolve(new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] }))),
+  );
+  const warnMock = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    await expect(t.action((ctx) => recallConversationMemories(
+      ctx, worldId, parseGameId('players', 'p:0'), 'Remember', 3,
+    ))).rejects.toThrow('INVALID_EMBEDDING_VECTOR');
+    await expect(t.action((ctx) => recallHomeMemories(ctx, {
+      worldId, playerId: 'p:0', agentGlobalId: 'home/resident', observation: 'Remember',
+    }))).rejects.toThrow('INVALID_EMBEDDING_VECTOR');
+    expect(warnMock).not.toHaveBeenCalled();
+    expect(await t.query((ctx) => ctx.db.query('memories').collect())).toHaveLength(1);
+  } finally {
+    fetchMock.mockRestore();
+    warnMock.mockRestore();
+  }
+});
+
+test('full-history search times out explicitly and never ranks a partial scan', async () => {
+  const { t, worldId, spaceId } = await memorySearchFixture();
+  const route = await t.query(internal.models.embeddings.getRoute, { spaceId });
+  const runMutation = jest.fn();
+  const clock = jest.spyOn(Date, 'now').mockReturnValue(100_000);
+  const runQuery = jest.fn((_reference, args: { cursor?: string | null }) => {
+    if (args.cursor === undefined) return Promise.resolve(route);
+    clock.mockReturnValue(160_000);
+    return Promise.resolve({ candidates: [], isDone: false, continueCursor: 'next', upperCreationTime: 1 });
+  });
+  try {
+    await expect(searchMemories(
+      { runQuery, runMutation } as unknown as ActionCtx,
+      parseGameId('players', 'p:0'), [1, 0], 3, worldId, spaceId,
+    )).rejects.toThrow('MEMORY_SEARCH_TIMEOUT');
+    expect(runQuery).toHaveBeenCalledTimes(2);
+    expect(runMutation).not.toHaveBeenCalled();
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+test('invalid search limits are rejected before any route or history lookup', async () => {
+  const { worldId, spaceId } = await memorySearchFixture();
+  const runQuery = jest.fn();
+  for (const n of [0, -1, 1.5, 101, NaN, Infinity]) {
+    await expect(searchMemories(
+      { runQuery } as unknown as ActionCtx,
+      parseGameId('players', 'p:0'), [1, 0], n, worldId, spaceId,
+    )).rejects.toThrow('INVALID_MEMORY_SEARCH_LIMIT');
+  }
+  expect(runQuery).not.toHaveBeenCalled();
+});
+
+test('pagination excludes vectors committed after the first database high watermark', async () => {
+  const { t, worldId, spaceId } = await memorySearchFixture();
+  const add = () => t.run(async (ctx) => {
+    const memoryId = await ctx.db.insert('memories', {
+      worldId, playerId: 'p:0', description: 'Fact', importance: 5,
+      lastAccess: 1, data: { type: 'reflection', relatedMemoryIds: [] },
+    });
+    await ctx.db.insert('modelMemoryVectors', {
+      worldId, playerId: 'p:0', spaceId, memoryId, embedding: [1, 0],
+    });
+    return memoryId;
+  });
+  const original = await add();
+  const first = await t.query(internal.agent.memory.searchSpaceVectorPage, {
+    worldId, playerId: 'p:0', spaceId, searchEmbedding: [1, 0], dimensions: 2, n: 3, cursor: null,
+  });
+  await add();
+  const pinned = await t.query(internal.agent.memory.searchSpaceVectorPage, {
+    worldId, playerId: 'p:0', spaceId, searchEmbedding: [1, 0], dimensions: 2, n: 3,
+    cursor: null, upperCreationTime: first.upperCreationTime,
+  });
+  expect(pinned.candidates.map((c) => c.memoryId)).toEqual([original]);
+});
 
 test('a local conversation recalls retained travel text when its independent Embedding provider is down', async () => {
   const t = convexTest(schema, modules);
@@ -42,7 +270,7 @@ test('a local conversation recalls retained travel text when its independent Emb
       status: 'ACTIVE',
       createdAt: 1,
     });
-    await ctx.db.insert('modelSettings', { key: 'local', activeEmbeddingSpaceId });
+    await ctx.db.insert('modelSettings', { key: 'town', activeEmbeddingSpaceId });
     await ctx.db.insert('memories', {
       worldId,
       playerId: 'p:0',

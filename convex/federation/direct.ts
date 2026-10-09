@@ -18,7 +18,7 @@ async function boundedJson(body: ReadableStream<Uint8Array> | null, contentLengt
 }
 export async function directRequest(endpoint: string, path: string, body?: unknown): Promise<any> {
   const base = normalizeEndpoint(endpoint);
-  if (!['/health', '/pair', '/probe', '/messages'].includes(path)) throw new Error('INVALID_FEDERATION_PATH');
+  if (!['/health', '/pair', '/probe', '/messages', '/migration'].includes(path)) throw new Error('INVALID_FEDERATION_PATH');
   const data = body === undefined ? undefined : JSON.stringify(body);
   if (data && new TextEncoder().encode(data).byteLength > MESSAGE_MAX_BYTES) throw new Error('MESSAGE_TOO_LARGE');
   const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 8000);

@@ -53,6 +53,7 @@ export const runtimeTables = {
     expectedNumMessages: v.optional(v.number()),
     state: v.string(),
   })
+    .index('state_deadline', ['state', 'deadline'])
     .index('visit', ['visitId'])
     .index('turn', ['turnId']),
   federationPendingActions: defineTable({
