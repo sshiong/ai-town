@@ -1,5 +1,5 @@
 import { ObjectType, v } from 'convex/values';
-import { MutationCtx, internalMutation } from '../_generated/server';
+import { MutationCtx, internalMutation } from '../maintenanceFunctions';
 import { internal } from '../_generated/api';
 import { digest } from '../federation/security';
 import { playerId } from '../aiTown/ids';

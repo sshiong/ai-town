@@ -98,12 +98,20 @@ for (let i = 0; i < 2; i++) {
       () =>
         host.client.query(api.federation.transport.diagnostics, { adminToken: host.adminToken }),
       (d) =>
-        d.streams.some(
-          (s) =>
-            s.visitIdOrPairSessionId === visitId &&
-            s.streamId === 'home-actions' &&
-            s.direction === 'inbound' &&
-            s.nextExpectedSequence > 1,
+        d.actions.some(
+          (action) => action.visitId === visitId && action.state === 'COMMITTED' && action.accepted,
+        ),
+    );
+    await waitFor(
+      'committed action receipt at Home',
+      () =>
+        home.client.query(api.federation.transport.diagnostics, { adminToken: home.adminToken }),
+      (d) =>
+        d.inbox.some(
+          (item) =>
+            item.visitId === visitId &&
+            item.type === 'ACTION_RESULT' &&
+            item.status === 'COMMITTED',
         ),
     );
     console.log(`Direction ${i + 1}: authenticated travel and remote decision verified`);

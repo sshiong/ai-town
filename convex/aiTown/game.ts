@@ -6,7 +6,7 @@ import {
   MutationCtx,
   internalMutation,
   internalQuery,
-} from '../_generated/server';
+} from '../maintenanceFunctions';
 import { World, serializedWorld } from './world';
 import { WorldMap, serializedWorldMap } from './worldMap';
 import { PlayerDescription, serializedPlayerDescription } from './playerDescription';

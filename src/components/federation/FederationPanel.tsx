@@ -144,6 +144,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     allowIncomingPairRequests: fields.get('incoming') === 'on',
                     maxVisitors: Number(fields.get('maxVisitors')),
                     maxVisitDurationMs: Number(fields.get('duration')) * 60000,
+                    replyTimeoutMs: Number(fields.get('replyTimeout')) * 1000,
                   });
                   await refresh();
                 });
@@ -178,6 +179,20 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   min={1}
                   max={30}
                   defaultValue={data.settings.maxVisitDurationMs / 60000}
+                  required
+                />
+              </Field>
+              <Field
+                label="Host decision wait (seconds)"
+                hint="Allow 5–120 seconds for a visiting resident's model reply. Expired decisions are discarded; visit leases still apply."
+              >
+                <input
+                  name="replyTimeout"
+                  type="number"
+                  min={5}
+                  max={120}
+                  step={1}
+                  defaultValue={(data.settings.replyTimeoutMs ?? 25000) / 1000}
                   required
                 />
               </Field>

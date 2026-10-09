@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { internal } from './_generated/api';
-import { DatabaseReader, MutationCtx, mutation } from './_generated/server';
+import { DatabaseReader, MutationCtx, mutation } from './maintenanceFunctions';
 import { Descriptions } from '../data/characters';
 import * as map from '../data/gentle';
 import { insertInput } from './aiTown/insertInput';

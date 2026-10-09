@@ -8,7 +8,7 @@ import {
   query,
   ActionCtx,
   MutationCtx,
-} from '../_generated/server';
+} from '../maintenanceFunctions';
 import { Doc, Id } from '../_generated/dataModel';
 import { internal } from '../_generated/api';
 import { assertFederationAdmin } from '../federation/auth';
@@ -194,9 +194,17 @@ export const startRebuild = action({
   },
 });
 export const memoryPage = internalQuery({
-  args: { cursor: v.union(v.string(), v.null()) },
-  handler: async (ctx, args) =>
-    ctx.db.query('memories').paginate({ cursor: args.cursor, numItems: 25 }),
+  args: { cursor: v.union(v.string(), v.null()), batchSize: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const batchSize = args.batchSize ?? 25;
+    if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 100)
+      throw new Error('INVALID_REBUILD_BATCH_SIZE');
+    return ctx.db.query('memories').paginate({
+      cursor: args.cursor,
+      numItems: batchSize,
+      maximumBytesRead: 512000,
+    });
+  },
 });
 export const vectorOwner = internalQuery({
   args: { memoryId: v.id('memories') },
@@ -244,8 +252,18 @@ export const rebuildPage = internalAction({
         spaceId: args.spaceId,
       });
       if (route.space.status === 'FAILED') return;
+      const budget = await ctx.runQuery(internal.federation.storagePolicy.rebuildBudget, {
+        requestedBatchSize: 25,
+      });
+      if (budget.paused) {
+        // Retain the cursor and old active space. Maintenance refreshes usage;
+        // retrying lets a budget increase or safe cleanup resume this build.
+        await ctx.scheduler.runAfter(60000, internal.models.embeddings.rebuildPage, args);
+        return;
+      }
       const page = await ctx.runQuery(internal.models.embeddings.memoryPage, {
         cursor: args.cursor,
+        batchSize: budget.allowedBatchSize,
       });
       for (const memory of page.page) await indexOne(ctx, memory._id, route);
       if (!page.isDone)

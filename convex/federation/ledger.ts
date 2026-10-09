@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { internalMutation, mutation, MutationCtx } from '../_generated/server';
+import { internalMutation, mutation, MutationCtx } from '../maintenanceFunctions';
 import { Doc } from '../_generated/dataModel';
 import { requireAdmin } from './security';
 import { identity, peer, ready, session, visit } from './store';

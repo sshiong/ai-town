@@ -4,8 +4,12 @@ import type { FunctionReturnType } from 'convex/server';
 import { readBackupFile, requiresStoppedSource } from './uiPolicy';
 import { api } from '../../../convex/_generated/api';
 import RecoveryPanel from './RecoveryPanel';
+import ArchivePanel from './ArchivePanel';
+import IdentityRecoveryPanel from './IdentityRecoveryPanel';
+import StoragePolicyPanel from './StoragePolicyPanel';
 import {
   AdminButton,
+  downloadBundle,
   EmptyState,
   Field,
   TaskFeedback,
@@ -40,18 +44,6 @@ const modes: { value: ImportMode; label: string; description: string }[] = [
       'Import into the selected world. Residents receive new global identities owned by this town.',
   },
 ];
-
-export function downloadBundle(value: unknown, filename: string) {
-  const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
 
 export default function DataPanel({ adminToken }: { adminToken: string }) {
   const convex = useConvex();
@@ -160,10 +152,9 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
           </AdminButton>
         </form>
       )}
-      <p className="admin-warning">
-        This ordinary data snapshot cannot restore trusted identity credentials. Encrypted identity
-        key packages are not available in this build. Keep the server's identity encryption secret
-        separately; copying the same identity into two active instances risks a clone conflict.
+      <p className="admin-muted">
+        The single-file export has a 5 MiB / 500-record limit. For larger towns, use chunked
+        archives below. Private identity recovery uses a separate encrypted package.
       </p>
       <h3>Import &amp; recovery</h3>
       {mode !== 'clone' && (
@@ -424,12 +415,9 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
           </ul>
         )}
       </details>
-      <h3>Long-term retention</h3>
-      <p className="admin-muted">
-        Canonical memory and relationships are retained. Embedding vectors and caches are derived
-        data. Delivery records are cleaned only after acknowledgement and safe completion. Storage
-        usage and archive budget controls are not exposed by this build.
-      </p>
+      <ArchivePanel adminToken={adminToken} />
+      <IdentityRecoveryPanel adminToken={adminToken} />
+      <StoragePolicyPanel adminToken={adminToken} />
     </section>
   );
 }

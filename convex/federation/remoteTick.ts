@@ -1,3 +1,4 @@
+import { replyTimeoutMs } from './replyPolicy';
 import type { Game } from '../aiTown/game';
 import { Player } from '../aiTown/player';
 import { movePlayer, stopPlayer } from '../aiTown/movement';
@@ -42,7 +43,7 @@ export function tickRemoteVisitor(game: Game, now: number, player: Player) {
     return;
   const eventId = crypto.randomUUID(),
     turnId = crypto.randomUUID();
-  const deadline = Math.min(now + 25000, visitor.leaseExpiry);
+  const deadline = Math.min(now + replyTimeoutMs(visitor.replyTimeoutMs), visitor.leaseExpiry);
   visitor.pendingTurn = { eventId, turnId, deadline };
   visitor.lastObservationAt = now;
   if (conversation && member?.status.kind === 'participating') {

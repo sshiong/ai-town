@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { HttpRouter } from 'convex/server';
-import { action, httpAction, internalAction, internalMutation, internalQuery, query, MutationCtx } from '../_generated/server';
+import { action, httpAction, internalAction, internalMutation, internalQuery, query, MutationCtx } from '../maintenanceFunctions';
 import { identity, peer, ready, session, visit } from './store';
 import { directRequest, readRequest } from './direct';
 import { digest, requireAdmin, signPacket, verifyPacket } from './security';
@@ -291,11 +291,7 @@ export const maintenance = internalMutation({ args: {}, handler: async ctx => {
       await ctx.db.patch(cursor._id, { gapSince: now() });
     }
   }
-  // Messages expire in ten minutes. Retain committed dedup/history for a full day.
-  const inbox = await ctx.db.query('federationInbox').order('asc').take(500);
-  for (const item of inbox) if (item.processedAt && item.processedAt < now() - 86_400_000) await ctx.db.delete(item._id);
-  const outbox = await ctx.db.query('federationOutbox').order('asc').take(500);
-  for (const item of outbox) if (item.ackedAt && item.ackedAt < now() - 86_400_000) await ctx.db.delete(item._id);
+
 } });
 export const tick = internalAction({ args: {}, handler: async ctx => {
   await ctx.runMutation(mutationRef('transport/maintenance'), {});
@@ -307,8 +303,8 @@ export const retry = action({ args: { adminToken: v.string() }, handler: async (
 export const diagnostics = query({ args: { adminToken: v.string() }, handler: async (ctx, args) => {
   requireAdmin(args.adminToken);
   const outbox = await ctx.db.query('federationOutbox').order('desc').take(100), inbox = await ctx.db.query('federationInbox').order('desc').take(100);
-  return { outbox: outbox.map(({ messageId, toTownId, envelope, attempts, nextRetryAt, ackedAt, lastError }) => ({ messageId, toTownId, type: envelope.type, attempts, nextRetryAt, ackedAt, lastError })),
-    inbox: inbox.map(({ messageId, fromTownId, envelope, status, receivedAt }) => ({ messageId, fromTownId, type: envelope.type, status, receivedAt })), streams: await ctx.db.query('messageStreamCursors').take(100) };
+  return { outbox: outbox.map(({ messageId, toTownId, envelope, attempts, nextRetryAt, ackedAt, lastError }) => ({ messageId, toTownId, type: envelope.type, visitId: envelope.visitId, attempts, nextRetryAt, ackedAt, lastError })),
+    inbox: inbox.map(({ messageId, fromTownId, envelope, status, receivedAt }) => ({ messageId, fromTownId, type: envelope.type, visitId: envelope.visitId, status, receivedAt })), actions: (await ctx.db.query('federationPendingActions').order('desc').take(100)).map(({actionId,visitId,state,result,receiptPending}) => ({actionId,visitId,state,accepted:result?.kind === 'ok',receiptPending})), streams: await ctx.db.query('messageStreamCursors').take(100) };
 } });
 export function registerFederationRoutes(http: HttpRouter) {
   for (const [path, reference] of [['/probe', 'transport/receiveProbe'], ['/messages', 'transport/receiveMessage']]) http.route({ path: `/federation/v1${path}`, method: 'POST', handler: httpAction(async (ctx, request) => {

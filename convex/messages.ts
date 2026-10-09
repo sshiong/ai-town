@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { mutation, query } from './maintenanceFunctions';
 import { insertInput } from './aiTown/insertInput';
 import { conversationId, playerId } from './aiTown/ids';
 import { validatePublicInput } from './federation/publicInput';

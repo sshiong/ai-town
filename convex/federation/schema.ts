@@ -7,7 +7,7 @@ export const federationTables = {
     fingerprint: v.string(), deploymentInstanceId: v.string(), deploymentEpoch: v.number(),
     endpoint: v.string(), enabled: v.boolean(), allowIncomingPairRequests: v.boolean(),
     allowUnencryptedHttp: v.boolean(), allowPublicHttp: v.boolean(), maxVisitors: v.number(),
-    maxVisitDurationMs: v.number(), mode: v.string(), createdAt: v.number(),
+    maxVisitDurationMs: v.number(), replyTimeoutMs: v.optional(v.number()), mode: v.string(), createdAt: v.number(),
   }),
   deploymentRecords: defineTable({ townId: v.string(), deploymentInstanceId: v.string(), deploymentEpoch: v.number(), mode: v.string(), createdAt: v.number() }).index('townId', ['townId']),
   pairRequests: defineTable({
@@ -31,11 +31,11 @@ export const federationTables = {
   federationOutbox: defineTable({
     messageId: v.string(), toTownId: v.string(), envelope: v.any(), attempts: v.number(),
     nextRetryAt: v.number(), ackedAt: v.optional(v.number()), lastError: v.optional(v.string()),
-  }).index('messageId', ['messageId']).index('retry', ['ackedAt', 'nextRetryAt']),
+  }).index('visit', ['envelope.visitId']).index('messageId', ['messageId']).index('retry', ['ackedAt', 'nextRetryAt']),
   federationInbox: defineTable({
     messageId: v.string(), fromTownId: v.string(), payloadDigest: v.string(), envelope: v.any(),
     status: v.string(), receivedAt: v.number(), processedAt: v.optional(v.number()), ack: v.optional(v.any()),
-  }).index('messageId', ['messageId']).index('status', ['status', 'receivedAt']),
+  }).index('visit', ['envelope.visitId']).index('messageId', ['messageId']).index('status', ['status', 'receivedAt']),
   messageStreamCursors: defineTable({
     streamKey: v.string(), peerTownId: v.string(), visitIdOrPairSessionId: v.string(), streamId: v.string(),
     senderTownId: v.string(), senderDeploymentEpoch: v.number(), direction: v.string(),

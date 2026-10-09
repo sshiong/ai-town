@@ -57,10 +57,23 @@ export function adminErrorSummary(message: string) {
     FEDERATION_DISABLED: 'Federation visits are closed or this deployment is not active.',
     MODEL_CREDENTIAL_MISSING:
       'The model credential is missing on the server. Configure the referenced environment variable.',
+    BACKUP_MAINTENANCE_LOCKED:
+      'A checkpointed archive task is holding the town maintenance lock. Finish it or cancel and complete rollback before changing town data.',
+    DISABLE_FEDERATION_BEFORE_BACKUP:
+      'Close federation visits before starting a consistent archive.',
+    RESUME_BACKUP_JOB_FIRST: 'Retry the failed checkpoint before continuing this archive task.',
+    IDENTITY_RECOVERY_REQUIRES_EMPTY_DESTINATION:
+      'Identity restoration requires a fresh deployment without town data, peers or resident bindings.',
+    RECOVERY_SOURCE_STOP_REQUIRED:
+      'Stop the old source deployment and confirm it cannot issue authorizations before restoring its identity.',
+    RECOVERY_PASSPHRASE_LENGTH:
+      'Use a passphrase of at least 12 characters and no more than 1024 UTF-8 bytes.',
+    RECOVERY_DECRYPTION_FAILED:
+      'The recovery package could not be decrypted. Check the passphrase and use an intact encrypted export.',
     BACKUP_SIZE_LIMIT:
-      'This backup exceeds the server size limit. Export a smaller resident package.',
+      'This backup exceeds the single-file size limit. Use chunked archives for a full town, or export one resident.',
     BACKUP_ATOMIC_RECORD_LIMIT:
-      'This backup exceeds the 500-record transaction limit. Export a smaller resident package.',
+      'This backup exceeds the 500-record single-file limit. Use chunked archives for the full town.',
   };
   const code = Object.keys(explanations).find((code) => message.includes(code));
   return code ? explanations[code] : message;

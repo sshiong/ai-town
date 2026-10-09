@@ -1,5 +1,10 @@
 import { v } from 'convex/values';
-import { ActionCtx, internalAction, internalMutation, internalQuery } from '../_generated/server';
+import {
+  ActionCtx,
+  internalAction,
+  internalMutation,
+  internalQuery,
+} from '../maintenanceFunctions';
 import { internal } from '../_generated/api';
 import { Id } from '../_generated/dataModel';
 import { chatConfigForGlobalAgent } from '../models/profiles';
@@ -17,6 +22,7 @@ export type RemoteAction =
   | { type: 'inviteToTalk'; playerId: string }
   | { type: 'acceptInvite' | 'rejectInvite' | 'leaveConversation' | 'leaveTown' | 'wait' };
 export function parseDecision(text: string): RemoteAction {
+  if (!text.trim()) throw new Error('EMPTY_MODEL_DECISION');
   const value: unknown = JSON.parse(text.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, ''));
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('INVALID_MODEL_DECISION');
@@ -225,7 +231,8 @@ export const run = internalAction({
               }),
             },
           ],
-          max_tokens: 350,
+          // Reasoning providers may spend part of this budget before producing the JSON action.
+          max_tokens: 1500,
         },
         config,
       );

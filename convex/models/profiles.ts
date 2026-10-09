@@ -7,7 +7,7 @@ import {
   internalQuery,
   mutation,
   query,
-} from '../_generated/server';
+} from '../maintenanceFunctions';
 import { internal } from '../_generated/api';
 import { Doc, Id } from '../_generated/dataModel';
 import { GameId, parseGameId, playerId } from '../aiTown/ids';
@@ -40,7 +40,7 @@ export function validateConnection(profile: {
   if (profile.apiKeyEnv && !/^[A-Z][A-Z0-9_]{0,127}$/.test(profile.apiKeyEnv))
     throw new Error('INVALID_CREDENTIAL_REFERENCE');
 }
-export async function settings(ctx: { db: import('../_generated/server').DatabaseReader }) {
+export async function settings(ctx: { db: import('../maintenanceFunctions').DatabaseReader }) {
   return await ctx.db
     .query('modelSettings')
     .withIndex('key', (q) => q.eq('key', 'town'))
@@ -303,9 +303,10 @@ export const probeChat = action({
       chatProfileId: args.chatProfileId,
     });
     const response = await chatCompletion(
-      { messages: [{ role: 'user', content: 'Reply OK.' }], max_tokens: 8 },
+      { messages: [{ role: 'user', content: 'Reply OK.' }], max_tokens: 256 },
       profileChatConfig(profile),
     );
+    if (!response.content.trim()) throw new Error('EMPTY_CHAT_RESPONSE');
     return { ok: true, model: profile.model, ms: response.ms };
   },
 });

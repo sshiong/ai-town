@@ -9,7 +9,7 @@ import {
   DatabaseReader,
   MutationCtx,
   QueryCtx,
-} from '../_generated/server';
+} from '../maintenanceFunctions';
 import { Id, TableNames } from '../_generated/dataModel';
 import { blockedWithPositions } from '../aiTown/movement';
 import { WorldMap } from '../aiTown/worldMap';
@@ -702,6 +702,88 @@ export const preflight = action({
 });
 
 type RestoreEvidence = { importRecord: Doc<'backupImports'>; source: BackupRow; safeAfter: number };
+async function largeRestoreEvidence(
+  ctx: { db: DatabaseReader },
+  runtime: Doc<'federationAgentRuntimes'>,
+  record: Doc<'backupImports'>,
+  local: Doc<'federationIdentity'>,
+): Promise<RestoreEvidence | null> {
+  const jobId = record.runtimeSnapshot.largeJobId as Id<'backupLargeJobs'>;
+  const job = await ctx.db.get(jobId);
+  if (
+    !job ||
+    job.kind !== 'import' ||
+    job.state !== 'COMPLETE' ||
+    job.metadata?.importId !== record._id
+  )
+    throw new Error('RESTORED_RUNTIME_SNAPSHOT_MISSING');
+  const staged = await ctx.db
+    .query('backupLargeRows')
+    .withIndex('job_new', (q) => q.eq('jobId', jobId).eq('role', 'SOURCE').eq('newId', runtime._id))
+    .unique();
+  const oldRuntime = staged?.metadata;
+  if (
+    !oldRuntime ||
+    oldRuntime.agentGlobalId !== runtime.agentGlobalId ||
+    oldRuntime.playerId !== runtime.playerId ||
+    oldRuntime.agentId !== runtime.agentId ||
+    oldRuntime.visitId !== runtime.visitId
+  )
+    return null;
+  const world = await ctx.db
+    .query('backupLargeRows')
+    .withIndex('job_role_source', (q) =>
+      q.eq('jobId', jobId).eq('role', 'SOURCE').eq('sourceId', oldRuntime.worldId),
+    )
+    .unique();
+  if (world?.newId !== runtime.worldId) throw new Error('RESTORED_RESIDENT_IDENTITY_MISMATCH');
+  const source = job.source;
+  if (!record.sourceStoppedAt) throw new Error('RESTORE_SOURCE_STOP_ATTESTATION_MISSING');
+  if (
+    source.townId !== local.townId ||
+    source.publicKey !== local.publicKey ||
+    source.fingerprint !== local.fingerprint ||
+    source.deploymentInstanceId === local.deploymentInstanceId ||
+    source.deploymentEpoch >= local.deploymentEpoch
+  )
+    throw new Error('RESTORED_DEPLOYMENT_IDENTITY_MISMATCH');
+  const ledger = await ctx.db
+    .query('backupLargeRows')
+    .withIndex('job_relation', (q) =>
+      q
+        .eq('jobId', jobId)
+        .eq('role', 'SOURCE')
+        .eq('table', 'visitLedger')
+        .eq('relationKey', `visit:${runtime.visitId}`),
+    )
+    .unique();
+  const m = ledger?.metadata;
+  if (
+    !m ||
+    m.role !== 'home' ||
+    m.agentGlobalId !== runtime.agentGlobalId ||
+    m.homeTownId !== local.townId ||
+    m.homePlayerId !== runtime.playerId ||
+    m.worldId !== oldRuntime.worldId ||
+    !Number.isFinite(m.leaseExpiry)
+  )
+    throw new Error('RESTORED_HOME_LEDGER_MISSING');
+  const evidence = await ctx.db
+    .query('backupLargeVisitEvidence')
+    .withIndex('job_visit', (q) => q.eq('jobId', jobId).eq('visitId', runtime.visitId!))
+    .unique();
+  const duration = Math.max(source.maxVisitDurationMs, local.maxVisitDurationMs);
+  if (!Number.isFinite(duration) || duration < 60000 || duration > 30 * 60000)
+    throw new Error('INVALID_RESTORED_LEASE_DURATION');
+  return {
+    importRecord: record,
+    source,
+    safeAfter:
+      Math.max(record.sourceStoppedAt + duration, m.leaseExpiry, evidence?.leaseExpiry ?? 0) +
+      LEASE_SAFETY_MS,
+  };
+}
+
 async function restoreEvidence(
   ctx: { db: DatabaseReader },
   runtime: Doc<'federationAgentRuntimes'>,
@@ -714,6 +796,11 @@ async function restoreEvidence(
   for (const record of imports) {
     if (!['restore', 'migrate'].includes(record.mode) || record.sourceTownId !== local.townId)
       continue;
+    if (record.runtimeSnapshot.largeJobId) {
+      const evidence = await largeRestoreEvidence(ctx, runtime, record, local);
+      if (evidence) return evidence;
+      continue;
+    }
     const snapshot = record.runtimeSnapshot as Record<string, unknown[]>;
     const oldRuntime = (snapshot.federationAgentRuntimes ?? [])
       .map(decodeRow)

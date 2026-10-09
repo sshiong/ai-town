@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { Id } from '../_generated/dataModel';
-import { ActionCtx, internalQuery } from '../_generated/server';
+import { ActionCtx, internalQuery } from '../maintenanceFunctions';
 import { LLMMessage, chatCompletion } from '../util/llm';
 import { chatConfigForResident } from '../models/profiles';
 import { activeRoute } from '../models/embeddings';

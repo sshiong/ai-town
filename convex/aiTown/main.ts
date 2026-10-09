@@ -6,7 +6,7 @@ import {
   internalMutation,
   mutation,
   query,
-} from '../_generated/server';
+} from '../maintenanceFunctions';
 import { insertInput } from './insertInput';
 import { Game } from './game';
 import { internal } from '../_generated/api';

@@ -79,12 +79,31 @@ remains available for rollback. Building does not delete canonical memory text o
 
 **Data & backups** offers a full-town snapshot or a selected resident snapshot as JSON. Packages
 exclude model secrets, pairing credentials, identity private keys and active travel authorizations.
-Backups contain private resident text and should be stored securely. An encrypted identity
-disaster-recovery package is not available in this build; preserve the server's identity material
-and encryption secret through a separate secure deployment backup.
+Backups contain private resident text and should be stored securely. **Encrypted identity recovery**
+exports a separate passphrase-protected, signed identity package (PBKDF2-SHA256 and AES-256-GCM).
+Use a passphrase of at least 12 characters and preserve it separately. Recovery requires a stopped
+source and an empty destination; it keeps the signing identity, rewraps its private key under the
+destination server key, creates a new deployment instance, advances the deployment epoch and leaves
+federation disabled. Identity packages do not contain town memories; restore the ordinary archive
+after identity recovery. Export and recovery operations have an administrator audit trail.
 
-The current atomic backup implementation is bounded to **5 MiB / 500 records** and fails explicitly
-when that bound is exceeded. It is not a streaming archive for arbitrarily large towns.
+Small atomic snapshots retain their **5 MiB / 500 record** limit. **Large town archives** use signed
+manifests and separate JSON chunks, a durable maintenance lock and resumable checkpoints. Each chunk
+is at most 900,000 bytes, with a 1 GiB archive and 20,000 chunk cap. Individual documents larger than
+the chunk limit are rejected. Derived vectors are omitted and rebuilt from canonical memories.
+
+Disable federation and explicitly pause the simulation before starting a large archive. Download
+the manifest and every chunk, either into a selected folder when the browser supports it or as
+individual files. Import uploads and validates every chunk, schema and cross-document reference
+before applying changes. Restore/migrate require matching identity and source shutdown; cloning
+requires an empty destination and creates a new identity. Resident merges retain the small-package
+workflow.
+
+Applying a large import runs in maintenance mode. A private, durable target snapshot supports
+rollback across transaction batches; it is never exposed through the public download API. A failure
+keeps the lock and checkpoint. Resume the task or cancel it and drive rollback to completion before
+resuming the simulation. Target document IDs can change after rollback and references are remapped.
+Do not remove the job, stored chunks or journal while recovery is unfinished.
 
 End active visits, then use **Pause target for import** to stop the target simulation. Select a
 package and an import mode, then run authoritative server preflight. Use **Resume target
@@ -125,6 +144,16 @@ instead of creating a duplicate. The backend restores the same resident identity
 records the recovery, and leaves old authorizations inert. Resume the target simulation after all
 required recovery checks are complete.
 
-Canonical memory and relationships are retained; the original cleanup task does not delete them by
-age. Storage usage dashboards, configurable archival budgets and encrypted identity-package UI are
-not implemented.
+Canonical memories and relationships are retained. **Storage policy** shows paginated serialized-size
+estimates and configurable category budgets, warnings, cache retention and vector rebuild batch
+sizes. Capacity limits pause nonessential cache and rebuild writes while preserving canonical data.
+Safe cleanup retains unacknowledged messages, active visits and referenced inputs; terminal action
+and event records are compacted into durable facts before operational records are deleted.
+
+Cold archive location is configuration metadata; backup frequency produces a due reminder. These
+settings do not upload to an external storage service or automatically stop a live town for backup.
+Only completed, verified large exports update the last verified backup time. Usage estimates are
+not Convex physical billing measurements or a single atomic snapshot.
+
+Host decision wait is configurable from 5 to 120 seconds (default 25). Set it to match the Home
+model SLA. Every reply remains bounded by the visit lease; expired replies cannot execute.

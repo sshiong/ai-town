@@ -6,7 +6,7 @@ import {
   internalMutation,
   mutation,
   query,
-} from './_generated/server';
+} from './maintenanceFunctions';
 import { v } from 'convex/values';
 import schema from './schema';
 import { DELETE_BATCH_SIZE } from './constants';
@@ -87,7 +87,9 @@ export const stop = mutation({
       if (engine.running) {
         throw new Error(`Engine ${engine._id} isn't stopped?`);
       }
-      console.debug(`World ${worldStatus.worldId} is already inactive`);
+      // An explicit pause must survive subsequent browser heartbeats.
+      await ctx.db.patch(worldStatus._id, { status: 'stoppedByDeveloper' });
+      console.debug(`World ${worldStatus.worldId} is paused by developer`);
       return;
     }
     console.log(`Stopping engine ${engine._id}...`);

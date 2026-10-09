@@ -166,6 +166,7 @@ describe('Host action authority', () => {
     );
   });
   test('structured model replies never accept arbitrary code or extra fields', () => {
+    expect(() => parseDecision('')).toThrow('EMPTY_MODEL_DECISION');
     expect(parseDecision('{"type":"say","text":"hello"}')).toEqual({ type: 'say', text: 'hello' });
     expect(() => parseDecision('{"type":"deleteWorld"}')).toThrow('INVALID_MODEL_DECISION');
     expect(() => parseDecision('{"type":"wait","shell":"rm -rf"}')).toThrow(

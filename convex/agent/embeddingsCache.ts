@@ -4,6 +4,8 @@ import { internal } from '../_generated/api';
 import { Id } from '../_generated/dataModel';
 import { fetchEmbeddingBatch } from '../util/llm';
 import { activeRoute, EmbeddingRoute, profileEmbeddingConfig } from '../models/embeddings';
+import { assertTownUnlocked } from '../federation/maintenanceLock';
+import { cacheWritesAllowed } from '../federation/storagePolicy';
 import { validateVector } from '../models/compatibility';
 
 export function cacheNamespace(route: EmbeddingRoute, inputMode: 'query' | 'document') {
@@ -131,6 +133,8 @@ export const writeEmbeddings = internalMutation({
     ),
   },
   handler: async (ctx, args): Promise<Id<'embeddingsCache'>[]> => {
+    await assertTownUnlocked(ctx);
+    if (!(await cacheWritesAllowed(ctx))) return [];
     const ids = [];
     for (const embedding of args.embeddings) {
       const prior = await ctx.db

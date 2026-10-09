@@ -76,7 +76,7 @@ export function stripSystem(row: BackupRow) {
   const { _id, _creationTime, ...fields } = row;
   return fields;
 }
-function assertNoSecrets(value: unknown): void {
+export function assertNoSecrets(value: unknown): void {
   if (Array.isArray(value)) {
     value.forEach(assertNoSecrets);
     return;

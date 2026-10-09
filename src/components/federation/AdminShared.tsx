@@ -99,3 +99,19 @@ export function TaskFeedback({ task }: { task: ReturnType<typeof useAdminTask> }
 export function formatTime(value?: number) {
   return value ? new Date(value).toLocaleString() : '—';
 }
+
+export function downloadBundle(value: unknown, filename: string) {
+  downloadJsonText(JSON.stringify(value, null, 2), filename);
+}
+
+export function downloadJsonText(json: string, filename: string) {
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

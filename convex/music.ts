@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
-import { query, internalMutation } from './_generated/server';
+import { query, internalMutation } from './maintenanceFunctions';
 import Replicate, { WebhookEventType } from 'replicate';
-import { httpAction, internalAction } from './_generated/server';
+import { httpAction, internalAction } from './maintenanceFunctions';
 import { internal, api } from './_generated/api';
 
 function client(): Replicate {

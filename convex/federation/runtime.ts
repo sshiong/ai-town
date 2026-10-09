@@ -1,5 +1,6 @@
+import { MAX_REPLY_TIMEOUT_MS, replyTimeoutMs } from './replyPolicy';
 import { v } from 'convex/values';
-import { internalMutation, mutation, query, MutationCtx } from '../_generated/server';
+import { internalMutation, mutation, query, MutationCtx } from '../maintenanceFunctions';
 import { Doc, Id } from '../_generated/dataModel';
 import { parseGameId } from '../aiTown/ids';
 import { insertInput } from '../aiTown/insertInput';
@@ -185,6 +186,7 @@ export const createHostPresence = internalMutation({
     if (!worldStatus) throw new Error('HOST_WORLD_MISSING');
     await ctx.db.patch(ledger._id, { worldId: worldStatus.worldId });
     const profile = ledger.profile;
+    const local = await identity(ctx);
     await schedulePresence(ctx, visitId, 'create', worldStatus.worldId, 'federationCreateVisitor', {
       visitor: {
         visitId,
@@ -194,6 +196,7 @@ export const createHostPresence = internalMutation({
         agentAuthorityEpoch: ledger.agentAuthorityEpoch,
         visitLeaseVersion: ledger.visitLeaseVersion,
         leaseExpiry: ledger.leaseExpiry,
+        replyTimeoutMs: replyTimeoutMs(local?.replyTimeoutMs),
         lastObservationAt: 0,
       },
       name: profile.name,
@@ -419,7 +422,8 @@ export async function dispatchRuntimeMessage(ctx: MutationCtx, message: Federati
       typeof payload.turnId !== 'string' ||
       !Number.isFinite(payload.deadline) ||
       payload.deadline <= Date.now() ||
-      payload.deadline > Date.now() + 30_000
+      payload.deadline > Date.now() + MAX_REPLY_TIMEOUT_MS ||
+      payload.deadline > ledger.leaseExpiry
     )
       throw new Error('INVALID_OBSERVATION');
     const existing = await ctx.db
@@ -468,6 +472,8 @@ export async function dispatchRuntimeMessage(ctx: MutationCtx, message: Federati
       .withIndex('action', (q) => q.eq('actionId', payload.actionId))
       .unique();
     if (existing) return;
+    const archivedFact = await ctx.db.query('federationActionFacts').withIndex('action', q => q.eq('actionId', payload.actionId)).unique();
+    if (archivedFact) return;
     const turn = await ctx.db
       .query('federationTurns')
       .withIndex('turn', (q) => q.eq('turnId', payload.turnId))

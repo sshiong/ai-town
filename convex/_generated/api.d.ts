@@ -43,11 +43,17 @@ import type * as federation_admin from "../federation/admin.js";
 import type * as federation_auth from "../federation/auth.js";
 import type * as federation_backup from "../federation/backup.js";
 import type * as federation_backupHelpers from "../federation/backupHelpers.js";
+import type * as federation_backupLarge from "../federation/backupLarge.js";
+import type * as federation_backupLargeHelpers from "../federation/backupLargeHelpers.js";
+import type * as federation_backupLargeSchema from "../federation/backupLargeSchema.js";
 import type * as federation_backupSchema from "../federation/backupSchema.js";
 import type * as federation_decision from "../federation/decision.js";
 import type * as federation_direct from "../federation/direct.js";
 import type * as federation_engineInputs from "../federation/engineInputs.js";
+import type * as federation_identityRecovery from "../federation/identityRecovery.js";
+import type * as federation_identityRecoverySchema from "../federation/identityRecoverySchema.js";
 import type * as federation_ledger from "../federation/ledger.js";
+import type * as federation_maintenanceLock from "../federation/maintenanceLock.js";
 import type * as federation_peers from "../federation/peers.js";
 import type * as federation_presence from "../federation/presence.js";
 import type * as federation_protocol from "../federation/protocol.js";
@@ -55,14 +61,18 @@ import type * as federation_publicInput from "../federation/publicInput.js";
 import type * as federation_queue from "../federation/queue.js";
 import type * as federation_refs from "../federation/refs.js";
 import type * as federation_remoteTick from "../federation/remoteTick.js";
+import type * as federation_replyPolicy from "../federation/replyPolicy.js";
 import type * as federation_runtime from "../federation/runtime.js";
 import type * as federation_runtimeSchema from "../federation/runtimeSchema.js";
 import type * as federation_schema from "../federation/schema.js";
 import type * as federation_security from "../federation/security.js";
+import type * as federation_storagePolicy from "../federation/storagePolicy.js";
+import type * as federation_storageSchema from "../federation/storageSchema.js";
 import type * as federation_store from "../federation/store.js";
 import type * as federation_transport from "../federation/transport.js";
 import type * as http from "../http.js";
 import type * as init from "../init.js";
+import type * as maintenanceFunctions from "../maintenanceFunctions.js";
 import type * as messages from "../messages.js";
 import type * as models_compatibility from "../models/compatibility.js";
 import type * as models_embeddings from "../models/embeddings.js";
@@ -128,11 +138,17 @@ import type * as world from "../world.js";
 "federation/auth": typeof federation_auth,
 "federation/backup": typeof federation_backup,
 "federation/backupHelpers": typeof federation_backupHelpers,
+"federation/backupLarge": typeof federation_backupLarge,
+"federation/backupLargeHelpers": typeof federation_backupLargeHelpers,
+"federation/backupLargeSchema": typeof federation_backupLargeSchema,
 "federation/backupSchema": typeof federation_backupSchema,
 "federation/decision": typeof federation_decision,
 "federation/direct": typeof federation_direct,
 "federation/engineInputs": typeof federation_engineInputs,
+"federation/identityRecovery": typeof federation_identityRecovery,
+"federation/identityRecoverySchema": typeof federation_identityRecoverySchema,
 "federation/ledger": typeof federation_ledger,
+"federation/maintenanceLock": typeof federation_maintenanceLock,
 "federation/peers": typeof federation_peers,
 "federation/presence": typeof federation_presence,
 "federation/protocol": typeof federation_protocol,
@@ -140,14 +156,18 @@ import type * as world from "../world.js";
 "federation/queue": typeof federation_queue,
 "federation/refs": typeof federation_refs,
 "federation/remoteTick": typeof federation_remoteTick,
+"federation/replyPolicy": typeof federation_replyPolicy,
 "federation/runtime": typeof federation_runtime,
 "federation/runtimeSchema": typeof federation_runtimeSchema,
 "federation/schema": typeof federation_schema,
 "federation/security": typeof federation_security,
+"federation/storagePolicy": typeof federation_storagePolicy,
+"federation/storageSchema": typeof federation_storageSchema,
 "federation/store": typeof federation_store,
 "federation/transport": typeof federation_transport,
 "http": typeof http,
 "init": typeof init,
+"maintenanceFunctions": typeof maintenanceFunctions,
 "messages": typeof messages,
 "models/compatibility": typeof models_compatibility,
 "models/embeddings": typeof models_embeddings,

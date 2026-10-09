@@ -661,3 +661,32 @@ test.each(['custom', 'ollama'] as const)(
     }
   },
 );
+
+test('Chat availability probe rejects a successful HTTP response without usable model output', async () => {
+  const t = convexTest(schema, modules);
+  const adminToken = process.env.FEDERATION_ADMIN_TOKEN!;
+  const chatProfileId = await t.mutation(mutation('models/profiles:saveChatProfile'), {
+    adminToken,
+    name: 'Reasoning provider',
+    provider: 'custom',
+    url: 'https://chat.example',
+    model: 'reasoning',
+  });
+  const request = jest
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ choices: [{ message: { content: '' } }] }), { status: 200 }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), { status: 200 }),
+    );
+  const probe = makeFunctionReference<'action'>('models/profiles:probeChat');
+  await expect(t.action(probe, { adminToken, chatProfileId })).rejects.toThrow(
+    'EMPTY_CHAT_RESPONSE',
+  );
+  await expect(t.action(probe, { adminToken, chatProfileId })).resolves.toMatchObject({
+    ok: true,
+    model: 'reasoning',
+  });
+  expect(JSON.parse(request.mock.calls[0][1]!.body as string).max_tokens).toBe(256);
+});

@@ -1,4 +1,4 @@
-import { action, httpAction, internalMutation, mutation } from '../_generated/server';
+import { action, httpAction, internalMutation, mutation } from '../maintenanceFunctions';
 import { v } from 'convex/values';
 import { constantTimeEqual, deriveCredential, digest, ephemeralKeys, mac, openSecret, requireAdmin, sealSecret, sign, validatePairingSecret, verifyMac, verifySignature } from './security';
 import { PROTOCOL, normalizeEndpoint } from './protocol';

@@ -38,6 +38,7 @@ export const runtimeTables = {
     createdAt: v.number(),
     error: v.optional(v.string()),
   })
+    .index('input', ['inputId'])
     .index('visit_kind', ['visitId', 'kind'])
     .index('state', ['state']),
   federationTurns: defineTable({
@@ -70,6 +71,7 @@ export const runtimeTables = {
     receiptPayload: v.optional(v.any()),
     receiptRetryAt: v.optional(v.number()),
   })
+    .index('input', ['inputId'])
     .index('action', ['actionId'])
     .index('state', ['state'])
     .index('receiptPending', ['receiptPending', 'receiptRetryAt', 'createdAt']),

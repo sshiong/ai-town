@@ -3,7 +3,7 @@ import { PLAYER_CONVERSATION_COOLDOWN } from '../constants';
 import { distance } from '../util/geometry';
 import { v } from 'convex/values';
 import { agentId, conversationId, playerId } from './ids';
-import { MutationCtx, internalMutation, internalQuery } from '../_generated/server';
+import { MutationCtx, internalMutation, internalQuery } from '../maintenanceFunctions';
 import { internal } from '../_generated/api';
 import { insertInput } from './insertInput';
 export { Agent, serializedAgent } from './agentModel';

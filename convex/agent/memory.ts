@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { ActionCtx, DatabaseReader, internalMutation, internalQuery } from '../_generated/server';
+import { ActionCtx, DatabaseReader, internalMutation, internalQuery } from '../maintenanceFunctions';
 import { Doc, Id } from '../_generated/dataModel';
 import { internal } from '../_generated/api';
 import { LLMMessage, chatCompletion, ChatConfig } from '../util/llm';

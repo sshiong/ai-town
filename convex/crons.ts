@@ -1,7 +1,7 @@
 import { cronJobs } from 'convex/server';
 import { DELETE_BATCH_SIZE, IDLE_WORLD_TIMEOUT, VACUUM_MAX_AGE } from './constants';
 import { internal } from './_generated/api';
-import { internalMutation } from './_generated/server';
+import { internalMutation } from './maintenanceFunctions';
 import { TableNames } from './_generated/dataModel';
 import { v } from 'convex/values';
 
@@ -27,22 +27,18 @@ crons.interval(
   internal.federation.runtime.reconcileEngineJobs,
 );
 
+crons.hourly(
+  'storage usage and safe cleanup',
+  { minuteUTC: 35 },
+  internal.federation.storagePolicy.maintenance,
+);
+
 crons.daily('vacuum old entries', { hourUTC: 4, minuteUTC: 20 }, internal.crons.vacuumOldEntries);
 
 export default crons;
 
-const TablesToVacuum: TableNames[] = [
-  // Un-comment this to also clean out old conversations.
-  // 'conversationMembers', 'conversations', 'messages',
-
-  // Inputs aren't useful unless you're trying to replay history.
-  // If you want to support that, you should add a snapshot table, so you can
-  // replay from a certain time period. Or stop vacuuming inputs and replay from
-  // the beginning of time
-  'inputs',
-
-  // Long-term memories and their active vectors are never age-vacuumed.
-];
+// Retention requiring reference checks is handled by storagePolicy cleanup.
+const TablesToVacuum: TableNames[] = [];
 
 export const vacuumOldEntries = internalMutation({
   args: {},
@@ -75,6 +71,8 @@ export const vacuumTable = internalMutation({
     soFar: v.number(),
   },
   handler: async (ctx, { tableName, before, cursor, soFar }) => {
+    if (!TablesToVacuum.includes(tableName as TableNames))
+      throw new Error('TABLE_NOT_APPROVED_FOR_AGE_VACUUM');
     const results = await ctx.db
       .query(tableName as TableNames)
       .withIndex('by_creation_time', (q) => q.lt('_creationTime', before))

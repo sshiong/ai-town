@@ -8,6 +8,9 @@ import { federationTables } from './federation/schema';
 import { runtimeTables } from './federation/runtimeSchema';
 import { modelTables } from './models/schema';
 import { backupTables } from './federation/backupSchema';
+import { backupLargeTables } from './federation/backupLargeSchema';
+import { identityRecoveryTables } from './federation/identityRecoverySchema';
+import { storagePolicyTables } from './federation/storageSchema';
 
 export default defineSchema({
   music: defineTable({
@@ -32,4 +35,7 @@ export default defineSchema({
   ...runtimeTables,
   ...modelTables,
   ...backupTables,
+  ...backupLargeTables,
+  ...identityRecoveryTables,
+  ...storagePolicyTables,
 });
