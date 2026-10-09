@@ -9,12 +9,24 @@ import { actionRef, mutationRef, queryRef } from './refs';
 import { enqueueMessage } from './queue';
 import { assertVisitAuthority, beginReturn, dispatchLedgerMessage } from './ledger';
 import { dispatchRuntimeMessage } from './runtime';
+import { Doc } from '../_generated/dataModel';
 
 const CLEANUP_TYPES = new Set(['VISIT_RETURN', 'VISIT_CLEANED', 'SESSION_RESYNC', 'STREAM_NACK']);
 const VISIT_TYPES = new Set(['VISIT_RESERVE', 'VISIT_RESERVED', 'VISIT_CONFIRM', 'VISIT_ACTIVE', 'VISIT_REJECT', 'VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_RENEW']);
 const RUNTIME_TYPES = new Set(['OBSERVATION', 'DECISION', 'ACTION_RESULT', 'CONVERSATION_ENDED']);
+const EPHEMERAL_RUNTIME_TYPES = new Set(['OBSERVATION', 'DECISION', 'ACTION_RESULT']);
 const CONTROL_TYPES = new Set(['STREAM_NACK', 'SESSION_RESYNC']);
 const now = () => Date.now();
+function runtimeRetirementReason(message: FederationMessage, ledger: Doc<'visitLedger'> | null) {
+  // History and lease cleanup have independent reliable recovery paths. Only
+  // immediate runtime messages lose their meaning with their execution authority.
+  if (!EPHEMERAL_RUNTIME_TYPES.has(message.type) || !ledger) return undefined;
+  if (['COMPLETED', 'REJECTED'].includes(ledger.state)) return 'OUTBOX_VISIT_TERMINATED';
+  if (ledger.leaseExpiry <= now()) return 'OUTBOX_VISIT_LEASE_EXPIRED';
+  if (message.agentAuthorityEpoch !== ledger.agentAuthorityEpoch ||
+      message.visitLeaseVersion !== ledger.visitLeaseVersion) return 'OUTBOX_RUNTIME_AUTHORITY_ENDED';
+  return undefined;
+}
 // Historical pages retain their message/nonce/sequence and immutable contents
 // across transport TTL renewal. They cannot authorize any new engine action.
 export async function messageDigest(message: FederationMessage) {
@@ -138,7 +150,7 @@ async function dispatchControl(ctx: MutationCtx, message: FederationMessage) {
     if (!Number.isSafeInteger(payload.expectedSequence) || payload.expectedSequence < 1 || !Number.isSafeInteger(payload.receivedSequence) || payload.receivedSequence <= payload.expectedSequence || payload.receivedSequence - payload.expectedSequence > 16) throw new Error('INVALID_NACK');
     const outbound = await ctx.db.query('federationOutbox').collect();
     const matches = outbound.filter(o => o.toTownId === message.fromTownId && o.envelope.visitId === message.visitId && o.envelope.streamId === payload.streamId && o.envelope.senderDeploymentEpoch === message.expectedRecipientDeploymentEpoch && o.envelope.sequence >= payload.expectedSequence && o.envelope.sequence < payload.receivedSequence);
-    if (matches.length !== payload.receivedSequence - payload.expectedSequence || matches.some(o => o.envelope.expiresAt <= now())) {
+    if (matches.length !== payload.receivedSequence - payload.expectedSequence || matches.some(o => o.failedAt || o.envelope.expiresAt <= now())) {
       await beginReturn(ctx, ledger, 'OUTBOX_HISTORY_UNAVAILABLE');
       await enqueueMessage(ctx, { peerTownId: message.fromTownId, type: 'SESSION_RESYNC', visitId: message.visitId, payload: { mode: 'snapshot', ...(await snapshot(ctx, ledger.visitId, payload.streamId)), reason: 'OUTBOX_HISTORY_UNAVAILABLE' } });
     } else for (const item of matches) {
@@ -239,13 +251,19 @@ export const receiveMessage = internalAction({ args: { packet: v.any() }, handle
 } });
 export const deliveryContext = internalQuery({ args: { messageId: v.string() }, handler: async (ctx, { messageId }) => {
   const item = await ctx.db.query('federationOutbox').withIndex('messageId', q => q.eq('messageId', messageId)).unique();
-  return { item, identity: await identity(ctx), peer: item ? await peer(ctx, item.toTownId) : null };
+  return { item, identity: await identity(ctx), peer: item ? await peer(ctx, item.toTownId) : null,
+    retirementReason: item && typeof item.envelope.visitId === 'string' ? runtimeRetirementReason(item.envelope, await visit(ctx, item.envelope.visitId)) : undefined };
 } });
 export const markDelivery = internalMutation({ args: { messageId: v.string(), status: v.string(), error: v.optional(v.string()) }, handler: async (ctx, args) => {
   const item = await ctx.db.query('federationOutbox').withIndex('messageId', q => q.eq('messageId', args.messageId)).unique();
-  if (!item || item.ackedAt) return;
+  if (!item || item.ackedAt || item.failedAt) return;
   const attempts = item.attempts + 1;
   const committed = ['COMMITTED', 'DISCARDED'].includes(args.status);
+  const retirement = !committed && typeof item.envelope.visitId === 'string' && runtimeRetirementReason(item.envelope, await visit(ctx, item.envelope.visitId));
+  if (retirement) {
+    await ctx.db.patch(item._id, { attempts, failedAt: now(), lastError: args.error && args.error !== retirement ? `${retirement}:${args.error}` : retirement });
+    return;
+  }
   await ctx.db.patch(item._id, { attempts, nextRetryAt: now() + Math.min(60_000, 500 * 2 ** Math.min(attempts, 7)), lastError: args.error ?? (committed ? undefined : args.status), ...(committed ? { ackedAt: now() } : {}) });
   if (committed && item.envelope.streamId) {
     const key = streamKey(item.envelope, item.toTownId);
@@ -260,7 +278,7 @@ export const markDelivery = internalMutation({ args: { messageId: v.string(), st
   if (['EXPIRED', 'STALE_SEQUENCE'].includes(args.status)) {
     const ledger = await visit(ctx, item.envelope.visitId);
     if (ledger) await beginReturn(ctx, ledger, args.status === 'EXPIRED' ? 'OUTBOX_MESSAGE_EXPIRED' : 'INVALID_STALE_SEQUENCE');
-    await ctx.db.patch(item._id, { ackedAt: now() });
+    await ctx.db.patch(item._id, { failedAt: now() });
   }
   const connection = await session(ctx, item.toTownId);
   if (args.error && connection) await ctx.db.patch(connection._id, { channelState: 'TRANSPORT_DEGRADED', lastError: args.error });
@@ -268,7 +286,11 @@ export const markDelivery = internalMutation({ args: { messageId: v.string(), st
 export const deliver = internalAction({ args: { messageId: v.string() }, handler: async (ctx, { messageId }) => {
   const data = await ctx.runQuery(queryRef('transport/deliveryContext'), { messageId });
   const item = data.item, local = data.identity, remote = data.peer;
-  if (!item || item.ackedAt) return;
+  if (!item || item.ackedAt || item.failedAt) return;
+  if (data.retirementReason) {
+    await ctx.runMutation(mutationRef('transport/markDelivery'), { messageId, status: 'OBSOLETE', error: data.retirementReason });
+    return;
+  }
   if (!local || !remote) { await ctx.runMutation(mutationRef('transport/markDelivery'), { messageId, status: 'FAILED', error: 'PEER_NOT_FOUND' }); return; }
   if (item.envelope.expiresAt <= now()) { await ctx.runMutation(mutationRef('transport/markDelivery'), { messageId, status: 'EXPIRED' }); return; }
   try {
@@ -284,7 +306,7 @@ export const deliver = internalAction({ args: { messageId: v.string() }, handler
   }
 } });
 export const pendingDeliveries = internalQuery({ args: {}, handler: async ctx => {
-  const items = await ctx.db.query('federationOutbox').withIndex('retry', q => q.eq('ackedAt', undefined).lte('nextRetryAt', now())).take(20);
+  const items = await ctx.db.query('federationOutbox').withIndex('retry', q => q.eq('ackedAt', undefined).eq('failedAt', undefined).lte('nextRetryAt', now())).take(20);
   return items.sort((a, b) => Number(!CLEANUP_TYPES.has(a.envelope.type)) - Number(!CLEANUP_TYPES.has(b.envelope.type))).map(i => i.messageId);
 } });
 export const maintenance = internalMutation({ args: {}, handler: async ctx => {
@@ -317,7 +339,7 @@ export const retry = action({ args: { adminToken: v.string() }, handler: async (
 export const diagnostics = query({ args: { adminToken: v.string() }, handler: async (ctx, args) => {
   requireAdmin(args.adminToken);
   const outbox = await ctx.db.query('federationOutbox').order('desc').take(100), inbox = await ctx.db.query('federationInbox').order('desc').take(100);
-  return { outbox: outbox.map(({ messageId, toTownId, envelope, attempts, nextRetryAt, ackedAt, lastError }) => ({ messageId, toTownId, type: envelope.type, visitId: envelope.visitId, attempts, nextRetryAt, ackedAt, lastError })),
+  return { outbox: outbox.map(({ messageId, toTownId, envelope, attempts, nextRetryAt, ackedAt, failedAt, lastError }) => ({ messageId, toTownId, type: envelope.type, visitId: envelope.visitId, attempts, nextRetryAt, ackedAt, failedAt, lastError })),
     inbox: inbox.map(({ messageId, fromTownId, envelope, status, receivedAt }) => ({ messageId, fromTownId, type: envelope.type, visitId: envelope.visitId, status, receivedAt })), actions: (await ctx.db.query('federationPendingActions').order('desc').take(100)).map(({actionId,visitId,state,result,receiptPending}) => ({actionId,visitId,state,accepted:result?.kind === 'ok',receiptPending})), streams: await ctx.db.query('messageStreamCursors').take(100) };
 } });
 export function registerFederationRoutes(http: HttpRouter) {

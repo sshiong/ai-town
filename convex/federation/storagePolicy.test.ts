@@ -180,6 +180,15 @@ test('cleanup retains canonical memories, active and unacknowledged messages, an
       attempts: 1,
       nextRetryAt: Date.now(),
     });
+    const failed = await ctx.db.insert('federationOutbox', {
+      messageId: 'failed',
+      toTownId: 'host',
+      envelope,
+      attempts: 1,
+      nextRetryAt: Date.now(),
+      failedAt: Date.now(),
+      lastError: 'OUTBOX_VISIT_TERMINATED',
+    });
     const expired = await ctx.db.insert('federationOutbox', {
       messageId: 'expired',
       toTownId: 'host',
@@ -230,6 +239,7 @@ test('cleanup retains canonical memories, active and unacknowledged messages, an
       pendingReceipt,
       acked,
       unacked,
+      failed,
       expired,
       active,
       inbox,
@@ -254,7 +264,7 @@ test('cleanup retains canonical memories, active and unacknowledged messages, an
       ids.buffered,
     ])
       expect(await ctx.db.get(id)).not.toBeNull();
-    for (const id of [ids.completed, ids.actionInput, ids.committedAction, ids.acked, ids.inbox])
+    for (const id of [ids.completed, ids.actionInput, ids.committedAction, ids.acked, ids.failed, ids.inbox])
       expect(await ctx.db.get(id)).toBeNull();
     expect((await ctx.db.query('federationActionFacts').unique())?.actionId).toBe(
       'archived-action',

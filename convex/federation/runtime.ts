@@ -664,7 +664,7 @@ async function tryQueueReceipt(ctx: MutationCtx, job: Doc<'federationPendingActi
   const remote = await peer(ctx, ledger.homeTownId);
   const outbox = await ctx.db
     .query('federationOutbox')
-    .withIndex('retry', (q) => q.eq('ackedAt', undefined))
+    .withIndex('retry', (q) => q.eq('ackedAt', undefined).eq('failedAt', undefined))
     .take(900);
   if (
     remote?.trustState !== 'TRUSTED' ||

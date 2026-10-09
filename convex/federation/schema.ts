@@ -57,8 +57,8 @@ export const federationTables = {
   }).index('peerTownId', ['peerTownId']),
   federationOutbox: defineTable({
     messageId: v.string(), toTownId: v.string(), envelope: v.any(), attempts: v.number(),
-    nextRetryAt: v.number(), ackedAt: v.optional(v.number()), lastError: v.optional(v.string()),
-  }).index('visit', ['envelope.visitId']).index('messageId', ['messageId']).index('retry', ['ackedAt', 'nextRetryAt']),
+    nextRetryAt: v.number(), ackedAt: v.optional(v.number()), failedAt: v.optional(v.number()), lastError: v.optional(v.string()),
+  }).index('visit', ['envelope.visitId']).index('messageId', ['messageId']).index('retry', ['ackedAt', 'failedAt', 'nextRetryAt']),
   federationInbox: defineTable({
     messageId: v.string(), fromTownId: v.string(), payloadDigest: v.string(), envelope: v.any(),
     status: v.string(), receivedAt: v.number(), processedAt: v.optional(v.number()), ack: v.optional(v.any()),

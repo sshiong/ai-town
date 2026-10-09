@@ -411,12 +411,13 @@ async function pruneRecord(
     const transcript = await ctx.db.query('federationTranscriptJobs')
       .withIndex('pendingMessage', q => q.eq('pendingMessageId', record.messageId)).first();
     if (transcript) return { deleted: false };
-    // markDelivery also sets ackedAt when it stops retrying expired/stale
-    // messages. Those outcomes are not a committed peer acknowledgement.
+    // Failed deliveries retain their error until the same bounded message retention
+    // and safe visit termination checks as actual acknowledgements are satisfied.
+    // Legacy error-bearing ackedAt records are not proof of acknowledgement.
+    const finishedAt = record.failedAt ?? (!record.lastError ? record.ackedAt : undefined);
     eligible =
-      !!record.ackedAt &&
-      !record.lastError &&
-      record.ackedAt < messageCutoff &&
+      !!finishedAt &&
+      finishedAt < messageCutoff &&
       record.envelope.expiresAt < Date.now() &&
       (await safeTerminal(ctx, record.envelope.visitId, messageCutoff));
   } else if (table === 'messageStreamCursors') {

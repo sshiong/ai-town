@@ -2,7 +2,7 @@ import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import schema from '../schema';
-import { actionRef, mutationRef } from './refs';
+import { actionRef, mutationRef, queryRef } from './refs';
 import { createIdentityKeys, digest, randomSecret, sealSecret, signPacket } from './security';
 import { FederationMessage, PROTOCOL, streamKey } from './protocol';
 import { homeFrozen, hostCreated, hostRemoved, homeResumed } from './ledger';
@@ -425,4 +425,127 @@ test('a local endpoint change also fences an in-flight probe response', async ()
   }) as typeof fetch;
   expect(await a.t.action(actionRef('transport/probeInternal'), { peerTownId: b.townId })).toEqual({ channelState: 'TRANSPORT_TESTING' });
   expect(await a.t.run(ctx => ctx.db.query('transportSessions').collect())).toEqual([]);
+});
+
+test.each(['OBSERVATION', 'DECISION', 'ACTION_RESULT'])(
+  'terminal visit %s stops without a fake ACK, provider call, or channel degradation', async (type) => {
+    const { a, b } = await setup();
+    await seedVisit(a, b, 'home', 'COMPLETED'); await markReady(a, b);
+    const id = await a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type, visitId: 'visit-1', payload: {} }));
+    const fetchMock = jest.fn<typeof fetch>(); globalThis.fetch = fetchMock;
+    await a.t.action(actionRef('transport/deliver'), { messageId: id });
+    await a.t.action(actionRef('transport/deliver'), { messageId: id });
+    const item = (await a.t.run(ctx => ctx.db.query('federationOutbox').unique()))!;
+    expect(item.failedAt).toBeDefined(); expect(item.ackedAt).toBeUndefined();
+    expect(item.lastError).toBe('OUTBOX_VISIT_TERMINATED'); expect(item.attempts).toBe(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await a.t.query(queryRef('transport/pendingDeliveries'), {})).toEqual([]);
+    expect((await a.t.run(ctx => ctx.db.query('transportSessions').unique()))?.channelState).toBe('TRANSPORT_READY');
+    expect((await a.t.run(ctx => ctx.db.query('messageStreamCursors').unique()))?.lastAckedSequence).toBe(0);
+  },
+);
+
+test.each(['lease', 'authority', 'leaseVersion'])(
+  'runtime message with obsolete %s is audited and never sent', async (fence) => {
+    const { a, b } = await setup(); await seedVisit(a, b, 'home'); await markReady(a, b);
+    const id = await a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'DECISION', visitId: 'visit-1', payload: {} }));
+    await a.t.run(async ctx => {
+      const ledger = (await ctx.db.query('visitLedger').unique())!;
+      await ctx.db.patch(ledger._id, fence === 'lease' ? { leaseExpiry: Date.now() - 1 }
+        : fence === 'authority' ? { agentAuthorityEpoch: 3 } : { visitLeaseVersion: 2 });
+    });
+    const fetchMock = jest.fn<typeof fetch>(); globalThis.fetch = fetchMock;
+    await a.t.action(actionRef('transport/deliver'), { messageId: id });
+    const item = (await a.t.run(ctx => ctx.db.query('federationOutbox').unique()))!;
+    expect(item.failedAt).toBeDefined(); expect(item.ackedAt).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await a.t.run(ctx => ctx.db.query('transportSessions').unique()))?.channelState).toBe('TRANSPORT_READY');
+  },
+);
+
+test.each(['http', 'network'])(
+  'active valid runtime %s failures retain retry and degrade the channel', async (failure) => {
+    const { a, b } = await setup(); await seedVisit(a, b, 'home'); await markReady(a, b);
+    const id = await a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'ACTION_RESULT', visitId: 'visit-1', payload: {} }));
+    const fetchMock = jest.fn<typeof fetch>().mockImplementation(() => failure === 'http'
+      ? Promise.resolve(new Response('{"error":"VISIT_NOT_ACTIVE"}', { status: 400 }))
+      : Promise.reject(new Error('NETWORK_UNREACHABLE')));
+    globalThis.fetch = fetchMock;
+    await a.t.action(actionRef('transport/deliver'), { messageId: id });
+    const item = (await a.t.run(ctx => ctx.db.query('federationOutbox').unique()))!;
+    expect(item.failedAt).toBeUndefined(); expect(item.ackedAt).toBeUndefined();
+    expect(item.lastError).toBe(failure === 'http' ? 'FEDERATION_HTTP_400' : 'NETWORK_UNREACHABLE');
+    expect((await a.t.run(ctx => ctx.db.query('transportSessions').unique()))?.channelState).toBe('TRANSPORT_DEGRADED');
+    await jest.advanceTimersByTimeAsync(1001);
+    expect(await a.t.query(queryRef('transport/pendingDeliveries'), {})).toContain(id);
+  },
+);
+
+test.each(['VISIT_RETURN', 'VISIT_CLEANED', 'CONVERSATION_ENDED'])(
+  'terminal visits retain reliable retries of %s', async (type) => {
+    const { a, b } = await setup(); await seedVisit(a, b, 'home', 'COMPLETED'); await markReady(a, b);
+    const id = await a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type, visitId: 'visit-1', payload: {} }));
+    const fetchMock = jest.fn<typeof fetch>().mockRejectedValue(new Error('NETWORK_UNREACHABLE'));
+    globalThis.fetch = fetchMock;
+    await a.t.action(actionRef('transport/deliver'), { messageId: id });
+    const item = (await a.t.run(ctx => ctx.db.query('federationOutbox').unique()))!;
+    expect(fetchMock).toHaveBeenCalledTimes(1); expect(item.failedAt).toBeUndefined();
+    expect(item.ackedAt).toBeUndefined(); expect(item.lastError).toBe('NETWORK_UNREACHABLE');
+  },
+);
+
+test('a visit ending during a failed in-flight request is rechecked before degrading its channel', async () => {
+  const { a, b } = await setup(); await seedVisit(a, b, 'home'); await markReady(a, b);
+  const id = await a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'ACTION_RESULT', visitId: 'visit-1', payload: {} }));
+  globalThis.fetch = jest.fn<typeof fetch>().mockImplementation(async () => {
+    await a.t.run(async ctx => { const ledger = (await ctx.db.query('visitLedger').unique())!; await ctx.db.patch(ledger._id, { state: 'COMPLETED' }); });
+    return new Response('{}', { status: 400 });
+  });
+  await a.t.action(actionRef('transport/deliver'), { messageId: id });
+  const item = (await a.t.run(ctx => ctx.db.query('federationOutbox').unique()))!;
+  expect(item.failedAt).toBeDefined(); expect(item.ackedAt).toBeUndefined();
+  expect(item.lastError).toBe('OUTBOX_VISIT_TERMINATED:FEDERATION_HTTP_400');
+  expect((await a.t.run(ctx => ctx.db.query('transportSessions').unique()))?.channelState).toBe('TRANSPORT_READY');
+});
+
+test.each(['EXPIRED', 'STALE_SEQUENCE'])(
+  '%s stops retry with failedAt and preserves active visit return recovery without faking ACK', async (status) => {
+    const { a, b } = await setup(); await seedVisit(a, b, 'home');
+    const id = await a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'DECISION', visitId: 'visit-1', payload: {} }));
+    await a.t.mutation(mutationRef('transport/markDelivery'), { messageId: id, status });
+    const item = (await a.t.run(ctx => ctx.db.query('federationOutbox').withIndex('messageId', q => q.eq('messageId', id)).unique()))!;
+    expect(item.failedAt).toBeDefined(); expect(item.ackedAt).toBeUndefined(); expect(item.lastError).toBe(status);
+    expect(await a.t.query(queryRef('transport/pendingDeliveries'), {})).not.toContain(id);
+    expect((await a.t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('RETURN_PENDING');
+    expect((await a.t.run(ctx => ctx.db.query('federationOutbox').collect())).some(o => o.envelope.type === 'VISIT_RETURN')).toBe(true);
+  },
+);
+
+test('a NACK for failed durable runtime history preserves failure audit and requests resync', async () => {
+  const { a, b } = await setup(); await seedVisit(a, b, 'home');
+  const id = await a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'DECISION', visitId: 'visit-1', payload: {} }));
+  await a.t.run(async ctx => {
+    const item = (await ctx.db.query('federationOutbox').unique())!;
+    await ctx.db.patch(item._id, { failedAt: Date.now(), lastError: 'EXPIRED' });
+  });
+  await accept(a, message(b, a, 'STREAM_NACK', {
+    visitId: 'visit-1', agentGlobalId: 'town-a/agent:test', agentAuthorityEpoch: 2, visitLeaseVersion: 1,
+    payload: { streamId: 'home-actions', expectedSequence: 1, receivedSequence: 2 },
+  }));
+  const rows = await a.t.run(ctx => ctx.db.query('federationOutbox').collect());
+  expect(rows.find(o => o.messageId === id)?.failedAt).toBeDefined();
+  expect(rows.some(o => o.envelope.type === 'SESSION_RESYNC')).toBe(true);
+  expect((await a.t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('RETURN_PENDING');
+});
+
+test('failed audit rows no longer consume pending Outbox capacity', async () => {
+  const { a, b } = await setup(); await seedVisit(a, b, 'home');
+  await a.t.run(async ctx => {
+    for (let index = 0; index < 900; index++) await ctx.db.insert('federationOutbox', {
+      messageId: `failed-${index}`, toTownId: b.townId, envelope: { type: 'DECISION' },
+      attempts: 1, nextRetryAt: Date.now(), failedAt: Date.now(), lastError: 'OUTBOX_VISIT_TERMINATED',
+    });
+  });
+  await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'DECISION', visitId: 'visit-1', payload: {} }))).resolves.toEqual(expect.any(String));
+  expect(await a.t.query(queryRef('transport/pendingDeliveries'), {})).toHaveLength(1);
 });

@@ -314,11 +314,16 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
                   <div>
                     <strong>{message.type}</strong>{' '}
                     <span className="admin-badge">
-                      {message.ackedAt ? 'ACKNOWLEDGED' : 'WAITING'}
+                      {message.failedAt ? 'STOPPED' : message.ackedAt ? 'ACKNOWLEDGED' : 'WAITING'}
                     </span>
                     <code>{message.messageId}</code>
                     <p className="admin-muted">
-                      Attempts {message.attempts} · retry {formatTime(message.nextRetryAt)}
+                      Attempts {message.attempts} ·{' '}
+                      {message.failedAt
+                        ? `stopped ${formatTime(message.failedAt)}`
+                        : message.ackedAt
+                          ? `acknowledged ${formatTime(message.ackedAt)}`
+                          : `retry ${formatTime(message.nextRetryAt)}`}
                     </p>
                     {message.lastError && <p className="admin-error">{message.lastError}</p>}
                   </div>
