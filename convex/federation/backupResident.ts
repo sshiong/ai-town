@@ -595,7 +595,7 @@ export async function applyResidentRestore(ctx: MutationCtx, args: Args) {
       restoredPlayer = { ...restoredPlayer, position };
     }
   }
-  const { inProgressOperation, toRemember, travelVisitId, suspendedPlayer, ...restoredAgent } =
+  const { inProgressOperation, toRemember, queuedConversations, travelVisitId, suspendedPlayer, ...restoredAgent } =
     stripSystem(agent);
   await ctx.db.patch(world._id, {
     players: [...world.players.filter((p) => p.id !== player.id), restoredPlayer] as never,

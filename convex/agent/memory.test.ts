@@ -505,3 +505,19 @@ test('conversation memory retries do not duplicate canonical summaries, vectors 
   expect(await t.run(ctx => ctx.db.query('memories').withIndex('resident_conversation', q => q.eq('worldId', otherWorldId).eq('playerId', 'p:0').eq('data.type', 'conversation').eq('data.conversationId', 'c:1')).collect())).toHaveLength(1);
   } finally { jest.clearAllTimers(); jest.useRealTimers(); }
 });
+
+test('completed conversations resolve travelling Home participants from their same-world suspended presence', async () => {
+  const t = convexTest(schema, modules);
+  const worldId = await t.run(async ctx => {
+    const presence = (id: string) => ({ id, lastInput: 1, position: {x:1,y:1}, facing:{dx:1,dy:0}, speed:0 });
+    const worldId = await ctx.db.insert('worlds',{nextId:5,players:[],conversations:[],agents:[{id:'a:1',playerId:'p:0',travelVisitId:'visit-a',suspendedPlayer:presence('p:0')},{id:'a:3',playerId:'p:2',travelVisitId:'visit-b',suspendedPlayer:presence('p:2')}]});
+    for (const [playerId,name] of [['p:0','Lucky'],['p:2','Bob']]) await ctx.db.insert('playerDescriptions',{worldId,playerId,name,character:'f1',description:'Original resident'});
+    await ctx.db.insert('archivedConversations',{worldId,id:'c:4',creator:'p:0',created:1,ended:2,numMessages:2,participants:['p:0','p:2']});
+    await ctx.db.insert('participatedTogether',{worldId,conversationId:'c:4',player1:'p:0',player2:'p:2',ended:2});
+    return worldId;
+  });
+  const data = await t.query(makeFunctionReference<'query'>('agent/memory:loadConversation'),{worldId,playerId:'p:0',conversationId:'c:4'});
+  expect(data.player).toMatchObject({id:'p:0',name:'Lucky'});
+  expect(data.otherPlayer).toMatchObject({id:'p:2',name:'Bob'});
+  expect(await t.run(ctx=>ctx.db.get(worldId))).toMatchObject({players:[]});
+});

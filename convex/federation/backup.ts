@@ -590,7 +590,7 @@ export async function applyBackupData(
         if (runtime?.agentGlobalId || binding?.agentGlobalId)
           mapping[runtime?.agentGlobalId ?? binding!.agentGlobalId] =
             `${townId}/agent:${destination._id}:${newAgentId}`;
-        const { travelVisitId, suspendedPlayer, inProgressOperation, toRemember, ...freshAgent } =
+        const { travelVisitId, suspendedPlayer, inProgressOperation, toRemember, queuedConversations, ...freshAgent } =
           agent;
         const { pathfinding, activity, ...freshPlayer } = original;
         const position = mergePosition(map, occupied, freshPlayer.position as Point);
@@ -650,7 +650,7 @@ export async function applyBackupData(
           historicalLocations: [],
         };
         fields.agents = fields.agents.map((a: BackupRow) => {
-          const { inProgressOperation, toRemember, ...rest } = a;
+          const { inProgressOperation, toRemember, queuedConversations, ...rest } = a;
           if (args.mode === 'clone') {
             if (a.suspendedPlayer && !fields.players.some((p: BackupRow) => p.id === a.playerId))
               fields.players.push(a.suspendedPlayer);

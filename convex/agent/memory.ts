@@ -203,7 +203,8 @@ export const loadConversation = internalQuery({
     if (!world) {
       throw new Error(`World ${args.worldId} not found`);
     }
-    const player = world.players.find((p) => p.id === args.playerId);
+    const player = world.players.find((p) => p.id === args.playerId) ??
+      world.agents.find(a => a.playerId === args.playerId)?.suspendedPlayer;
     if (!player) {
       throw new Error(`Player ${args.playerId} not found`);
     }
@@ -237,7 +238,8 @@ export const loadConversation = internalQuery({
     }
     const otherPlayerId = otherParticipator.player2;
     let otherPlayer: SerializedPlayer | Doc<'archivedPlayers'> | null =
-      world.players.find((p) => p.id === otherPlayerId) ?? null;
+      world.players.find((p) => p.id === otherPlayerId) ??
+      world.agents.find(a => a.playerId === otherPlayerId)?.suspendedPlayer ?? null;
     if (!otherPlayer) {
       otherPlayer = await ctx.db
         .query('archivedPlayers')
