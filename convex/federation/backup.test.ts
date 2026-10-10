@@ -19,6 +19,7 @@ import type { ActionCtx } from '../_generated/server';
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/backup.ts': () => import('./backup'),
+  '../federation/backupExportAudit.ts': () => import('./backupExportAudit'),
   '../models/embeddings.ts': () => import('../models/embeddings'),
   '../engine/abstractGame.ts': () => import('../engine/abstractGame'),
   '../aiTown/game.ts': () => import('../aiTown/game'),
@@ -1143,4 +1144,29 @@ test('resident file restore preserves the real player negative-zero direction th
     residentRestore: { expectedTargetDigest: report.residentRestorePlan!.targetDigest, confirmOverwrite: true, operator: 'Home administrator', reason: 'Verify original direction' } });
   const restored = (await t.query(ctx => ctx.db.get(worldId)))!;
   expect(Object.is(restored.players[0].facing.dy, -0)).toBe(true);
+});
+
+test('successful exports audit declared scope and digest without copying private memory or admin token', async () => {
+  const { t, worldId } = await town();
+  const bundle = await t.action(action('federation/backup:exportResident'), {
+    adminToken, worldId, playerId: 'p:0', operator: '  Local administrator  ', reason: '  Recovery rehearsal  ',
+  }) as BackupBundle;
+  const audit = await t.run(ctx => ctx.db.query('backupExportAudits').unique());
+  expect(audit).toMatchObject({ scope: 'resident', operator: 'Local administrator', reason: 'Recovery rehearsal', attribution: 'declared', worldId, playerId: 'p:0', manifestDigest: await digest(bundle.manifest) });
+  expect(audit?.sectionCounts.memories).toBe(bundle.manifest.sections.memories.count);
+  expect(audit?.bytes).toBe(Object.values(bundle.manifest.sections).reduce((n, section) => n + section.bytes, 0));
+  expect(JSON.stringify(audit)).not.toContain(adminToken);
+  expect(audit).not.toHaveProperty('sections');
+  await expect(t.query(makeFunctionReference<'query'>('federation/backupExportAudit:history'), { adminToken: 'wrong', paginationOpts: { cursor: null, numItems: 30 } })).rejects.toThrow();
+  const page = await t.query(makeFunctionReference<'query'>('federation/backupExportAudit:history'), { adminToken, paginationOpts: { cursor: null, numItems: 30 } });
+  expect(page.page).toHaveLength(1);
+});
+
+test('export audit distinguishes legacy attribution and records no successful export for failed generation', async () => {
+  const { t, worldId } = await town();
+  await expect(t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0', operator: 'missing reason' })).rejects.toThrow('BACKUP_EXPORT_ATTRIBUTION_REQUIRED');
+  await expect(t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:999', operator: 'admin', reason: 'missing owner' })).rejects.toThrow();
+  expect(await t.run(ctx => ctx.db.query('backupExportAudits').collect())).toHaveLength(0);
+  await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  expect(await t.run(ctx => ctx.db.query('backupExportAudits').unique())).toMatchObject({ attribution: 'legacy-admin-token', operator: 'Unspecified administrator' });
 });

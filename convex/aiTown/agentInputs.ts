@@ -14,6 +14,7 @@ export const agentInputs = {
     args: {
       operationId: v.string(),
       agentId,
+      conversationId: v.optional(conversationId),
     },
     handler: (game, now, args) => {
       const agentId = parseGameId('agents', args.agentId);
@@ -27,8 +28,12 @@ export const agentInputs = {
       ) {
         console.debug(`Agent ${agentId} isn't remembering ${args.operationId}`);
       } else {
+        const remembered = args.conversationId ?? agent.inProgressOperation.conversationId;
         delete agent.inProgressOperation;
-        delete agent.toRemember;
+        if (remembered && agent.toRemember === remembered) {
+          agent.toRemember = agent.queuedConversations?.shift();
+          if (!agent.queuedConversations?.length) delete agent.queuedConversations;
+        }
       }
       return null;
     },

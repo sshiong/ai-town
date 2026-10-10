@@ -39,6 +39,7 @@ export const agentRememberConversation = internalAction({
       args: {
         agentId: args.agentId,
         operationId: args.operationId,
+        conversationId: args.conversationId,
       },
     });
   },

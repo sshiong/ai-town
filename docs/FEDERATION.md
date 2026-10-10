@@ -201,3 +201,18 @@ zero pauses new work. The persistent token bucket counts reservations, observati
 action results after duplicate detection, before committing their inbox or nonce. A rejected
 request receives HTTP 429 and can retry the same signed message. Lease renewal, return and durable
 conversation delivery remain available. Saving an unchanged limit does not refill the bucket.
+
+### Snapshot export audit and conversation memory recovery
+
+Snapshot downloads request a declared operator and reason. Successful server generation records
+the scope, source, section counts, byte estimate and exact manifest digest in target-local export
+audit history. This does not prove that a browser saved the file. Existing API clients can still
+export; their audit explicitly records unspecified legacy attribution. Operator labels are
+self-declared under the shared admin token. Audit records contain no private memory text or token.
+
+The original resident brain now processes completed conversation memories before starting a new
+idle activity. Pending conversation IDs survive operation timeouts and are removed only by the
+matching successful callback. Additional nonempty conversations queue without overwriting older
+ones; empty conversations do not replace pending memories. Retry insertion is idempotent per
+world, resident and conversation, including relationship encounter counts. Historical memories
+already lost before this fix are not recreated automatically.

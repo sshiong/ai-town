@@ -486,3 +486,22 @@ test('reflection retains the same resident identity while its map presence is su
     'I met Bea.',
   ]);
 });
+
+test('conversation memory retries do not duplicate canonical summaries, vectors or encounter counts', async () => {
+  jest.useFakeTimers();
+  try {
+  const { t, worldId, otherWorldId, spaceId } = await memorySearchFixture();
+  const args = { agentId: 'a:1', worldId, embeddingSpaceId: spaceId, playerId: 'p:0', description: 'A real archived conversation', importance: 5, lastAccess: 100,
+    data: { type: 'conversation' as const, conversationId: 'c:1', playerIds: ['p:2'], participants: [{ agentGlobalId: 'town:other/agent:2', homeTownId: 'town:other', name: 'Bob' }] }, embedding: [1, 0] };
+  const insert = makeFunctionReference<'mutation'>('agent/memory:insertMemory');
+  await t.mutation(insert, args);
+  await t.mutation(insert, args);
+  const memories = await t.run(ctx => ctx.db.query('memories').withIndex('resident', q => q.eq('worldId', worldId).eq('playerId', 'p:0')).collect());
+  expect(memories.filter(m => m.data.type === 'conversation')).toHaveLength(1);
+  const relationship = memories.find(m => m.data.type === 'relationship');
+  expect(relationship?.data).toMatchObject({ encounterCount: 1, evidenceMemoryIds: [memories.find(m => m.data.type === 'conversation')!._id] });
+  expect(await t.run(ctx => ctx.db.query('modelMemoryVectors').collect())).toHaveLength(1);
+  await t.mutation(insert, { ...args, worldId: otherWorldId });
+  expect(await t.run(ctx => ctx.db.query('memories').withIndex('resident_conversation', q => q.eq('worldId', otherWorldId).eq('playerId', 'p:0').eq('data.type', 'conversation').eq('data.conversationId', 'c:1')).collect())).toHaveLength(1);
+  } finally { jest.clearAllTimers(); jest.useRealTimers(); }
+});

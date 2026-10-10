@@ -27,12 +27,14 @@ export class Agent {
   travelVisitId?: string;
   suspendedPlayer?: SerializedPlayer;
   toRemember?: GameId<'conversations'>;
+  queuedConversations?: GameId<'conversations'>[];
   lastConversation?: number;
   lastInviteAttempt?: number;
   inProgressOperation?: {
     name: string;
     operationId: string;
     started: number;
+    conversationId?: GameId<'conversations'>;
   };
 
   constructor(serialized: SerializedAgent) {
@@ -46,9 +48,10 @@ export class Agent {
       serialized.toRemember !== undefined
         ? parseGameId('conversations', serialized.toRemember)
         : undefined;
+    this.queuedConversations = serialized.queuedConversations?.map((id) => parseGameId('conversations', id));
     this.lastConversation = lastConversation;
     this.lastInviteAttempt = lastInviteAttempt;
-    this.inProgressOperation = inProgressOperation;
+    this.inProgressOperation = inProgressOperation && { ...inProgressOperation, conversationId: inProgressOperation.conversationId ? parseGameId('conversations', inProgressOperation.conversationId) : undefined };
   }
 
   tick(game: Game, now: number) {
@@ -84,7 +87,6 @@ export class Agent {
         agentId: this.id,
         conversationId: this.toRemember,
       });
-      delete this.toRemember;
       return;
     }
     const recentlyAttemptedInvite =
@@ -262,6 +264,7 @@ export class Agent {
       name,
       operationId,
       started: now,
+      ...(name === 'agentRememberConversation' ? { conversationId: this.toRemember } : {}),
     };
   }
 
@@ -272,6 +275,7 @@ export class Agent {
       travelVisitId: this.travelVisitId,
       suspendedPlayer: this.suspendedPlayer,
       toRemember: this.toRemember,
+      queuedConversations: this.queuedConversations,
       lastConversation: this.lastConversation,
       lastInviteAttempt: this.lastInviteAttempt,
       inProgressOperation: this.inProgressOperation,
@@ -285,6 +289,7 @@ export const serializedAgent = {
   travelVisitId: v.optional(v.string()),
   suspendedPlayer: v.optional(v.object(serializedPlayer)),
   toRemember: v.optional(conversationId),
+  queuedConversations: v.optional(v.array(conversationId)),
   lastConversation: v.optional(v.number()),
   lastInviteAttempt: v.optional(v.number()),
   inProgressOperation: v.optional(
@@ -292,6 +297,7 @@ export const serializedAgent = {
       name: v.string(),
       operationId: v.string(),
       started: v.number(),
+      conversationId: v.optional(conversationId),
     }),
   ),
 };

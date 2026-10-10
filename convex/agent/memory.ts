@@ -116,6 +116,8 @@ export async function rememberConversation(
   playerId: GameId<'players'>,
   conversationId: GameId<'conversations'>,
 ) {
+  const existing = await ctx.runQuery(selfInternal.existingConversationMemory, { worldId, playerId, conversationId });
+  if (existing) return existing.description;
   const data = await ctx.runQuery(selfInternal.loadConversation, {
     worldId,
     playerId,
@@ -183,6 +185,12 @@ export async function rememberConversation(
   await reflectOnMemories(ctx, worldId, playerId);
   return description;
 }
+
+export const existingConversationMemory = internalQuery({
+  args: { worldId: v.id('worlds'), playerId, conversationId },
+  handler: async (ctx, args) => ctx.db.query('memories').withIndex('resident_conversation', q =>
+    q.eq('worldId', args.worldId).eq('playerId', args.playerId).eq('data.type', 'conversation').eq('data.conversationId', args.conversationId)).first(),
+});
 
 export const loadConversation = internalQuery({
   args: {
@@ -549,6 +557,12 @@ export const insertMemory = internalMutation({
   },
   handler: async (ctx, { agentId: _, embedding, ...memory }): Promise<void> => {
     if (!memory.worldId) throw new Error('MEMORY_WORLD_REQUIRED');
+    if (memory.data.type === 'conversation') {
+      const conversationId = memory.data.conversationId;
+      const existing = await ctx.db.query('memories').withIndex('resident_conversation', q =>
+        q.eq('worldId', memory.worldId!).eq('playerId', memory.playerId).eq('data.type', 'conversation').eq('data.conversationId', conversationId)).first();
+      if (existing) return;
+    }
     const spaceId = memory.embeddingSpaceId ?? (await ensureEmbeddingSpace(ctx));
     const space = await ctx.db.get(spaceId);
     const profile = space && (await ctx.db.get(space.profileId));

@@ -65,6 +65,7 @@ export const memoryTables = {
     .index('playerId', ['playerId'])
     .index('resident', ['worldId', 'playerId'])
     .index('resident_type', ['worldId', 'playerId', 'data.type'])
+    .index('resident_conversation', ['worldId', 'playerId', 'data.type', 'data.conversationId'])
     .index('globalAgent', ['agentGlobalId'])
     .index('residentRelationship', ['worldId', 'playerId', 'data.type', 'data.agentGlobalId'])
     .index('travelEvent', ['agentGlobalId', 'data.type', 'data.eventId']),

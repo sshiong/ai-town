@@ -9,13 +9,15 @@ import {
   DatabaseReader,
   MutationCtx,
   QueryCtx,
+  ActionCtx,
 } from '../maintenanceFunctions';
 import { Doc, Id, TableNames } from '../_generated/dataModel';
 import { blockedWithPositions } from '../aiTown/movement';
 import { WorldMap } from '../aiTown/worldMap';
 import { Point } from '../util/types';
 import { playerId } from '../aiTown/ids';
-import { requireAdmin, createIdentityKeys, sign } from './security';
+import { requireAdmin, createIdentityKeys, sign, digest } from './security';
+import { attribution, exportAttribution } from './backupExportAudit';
 import { LEASE_SAFETY_MS, normalizeEndpoint } from './protocol';
 import { identity } from './store';
 import {
@@ -801,15 +803,43 @@ export const history = query({
   },
 });
 
+async function recordExport(
+  ctx: ActionCtx,
+  args: { adminToken: string; operator?: string; reason?: string },
+  bundle: BackupBundle,
+  owner: { worldId: Id<'worlds'>; playerId: string } | Record<string, never> = {},
+) {
+  await ctx.runMutation(makeFunctionReference<'mutation'>('federation/backupExportAudit:record'), {
+    ...args,
+    ...owner,
+    scope: bundle.manifest.scope,
+    sourceTownId: bundle.manifest.sourceTownId,
+    exportedAt: bundle.manifest.exportedAt,
+    manifestDigest: await digest(bundle.manifest),
+    sectionCounts: Object.fromEntries(Object.entries(bundle.manifest.sections).map(([name, section]) => [name, section.count])),
+    bytes: Object.values(bundle.manifest.sections).reduce((total, section) => total + section.bytes, 0),
+  });
+}
+
 export const exportTown = action({
-  args: { adminToken: v.string() },
-  handler: async (ctx, args): Promise<BackupBundle> =>
-    ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getTown'), args),
+  args: { adminToken: v.string(), ...exportAttribution },
+  handler: async (ctx, args): Promise<BackupBundle> => {
+    requireAdmin(args.adminToken);
+    attribution(args);
+    const bundle: BackupBundle = await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getTown'), { adminToken: args.adminToken });
+    await recordExport(ctx, args, bundle);
+    return bundle;
+  },
 });
 export const exportResident = action({
-  args: { adminToken: v.string(), worldId: v.id('worlds'), playerId },
-  handler: async (ctx, args): Promise<BackupBundle> =>
-    ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getResident'), args),
+  args: { adminToken: v.string(), worldId: v.id('worlds'), playerId, ...exportAttribution },
+  handler: async (ctx, args): Promise<BackupBundle> => {
+    requireAdmin(args.adminToken);
+    attribution(args);
+    const bundle: BackupBundle = await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getResident'), { adminToken: args.adminToken, worldId: args.worldId, playerId: args.playerId });
+    await recordExport(ctx, args, bundle, { worldId: args.worldId, playerId: args.playerId });
+    return bundle;
+  },
 });
 export const preflight = action({
   args: importArgs,

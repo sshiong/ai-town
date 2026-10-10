@@ -2,6 +2,20 @@ import { defineTable } from 'convex/server';
 import { v } from 'convex/values';
 
 export const backupTables = {
+  backupExportAudits: defineTable({
+    scope: v.union(v.literal('town'), v.literal('resident')),
+    sourceTownId: v.string(),
+    exportedAt: v.number(),
+    recordedAt: v.number(),
+    operator: v.string(),
+    reason: v.string(),
+    attribution: v.union(v.literal('declared'), v.literal('legacy-admin-token')),
+    manifestDigest: v.string(),
+    sectionCounts: v.record(v.string(), v.number()),
+    bytes: v.number(),
+    worldId: v.optional(v.id('worlds')),
+    playerId: v.optional(v.string()),
+  }).index('recorded', ['recordedAt']),
   backupImports: defineTable({
     sourceTownId: v.string(),
     mode: v.string(),

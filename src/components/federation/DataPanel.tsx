@@ -72,13 +72,17 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
   const [result, setResult] =
     useState<FunctionReturnType<typeof api.federation.backup.importBackup>>();
   const [encryptDownloads, setEncryptDownloads] = useState(false);
+  const [exportOperator, setExportOperator] = useState('');
+  const [exportReason, setExportReason] = useState('');
   const [exportPassphrase, setExportPassphrase] = useState('');
   const [exportConfirmation, setExportConfirmation] = useState('');
   const [importPassphrase, setImportPassphrase] = useState('');
   const [importFile, setImportFile] = useState<File>();
   const canDownload =
-    !encryptDownloads ||
-    (validBackupPassphrase(exportPassphrase) && exportPassphrase === exportConfirmation);
+    !!exportOperator.trim() &&
+    !!exportReason.trim() &&
+    (!encryptDownloads ||
+      (validBackupPassphrase(exportPassphrase) && exportPassphrase === exportConfirmation));
   function takeDownloadPassphrase() {
     if (!encryptDownloads) return undefined;
     if (!canDownload) throw new Error('Enter and confirm a strong backup passphrase.');
@@ -142,6 +146,27 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
       </p>
       <TaskFeedback task={task} />
       <h3>Export</h3>
+      <div className="admin-form">
+        <Field label="Export operator">
+          <input
+            value={exportOperator}
+            onChange={(e) => setExportOperator(e.target.value)}
+            maxLength={200}
+          />
+        </Field>
+        <Field label="Export reason">
+          <input
+            value={exportReason}
+            onChange={(e) => setExportReason(e.target.value)}
+            maxLength={1000}
+          />
+        </Field>
+      </div>
+      <p className="admin-muted">
+        Successful snapshot generation records your declared operator, reason, scope and archive
+        digest. The shared admin token authenticates access; the operator label is not a verified
+        account identity.
+      </p>
       <label className="admin-check">
         <input
           type="checkbox"
@@ -196,7 +221,11 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               async () => {
                 const secret = takeDownloadPassphrase();
                 await saveSnapshot(
-                  await convex.action(api.federation.backup.exportTown, { adminToken }),
+                  await convex.action(api.federation.backup.exportTown, {
+                    adminToken,
+                    operator: exportOperator.trim(),
+                    reason: exportReason.trim(),
+                  }),
                   `ai-town-${Date.now()}.json`,
                   secret,
                 );
@@ -227,6 +256,8 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                 await saveSnapshot(
                   await convex.action(api.federation.backup.exportResident, {
                     adminToken,
+                    operator: exportOperator.trim(),
+                    reason: exportReason.trim(),
                     worldId: resident.worldId,
                     playerId: resident.playerId,
                   }),
@@ -552,7 +583,11 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                     if ((mode === 'restore' || mode === 'migrate') && !report.residentRestorePlan) {
                       const secret = takeDownloadPassphrase();
                       await saveSnapshot(
-                        await convex.action(api.federation.backup.exportTown, { adminToken }),
+                        await convex.action(api.federation.backup.exportTown, {
+                          adminToken,
+                          operator: exportOperator.trim(),
+                          reason: exportReason.trim(),
+                        }),
                         `ai-town-before-import-${Date.now()}.json`,
                         secret,
                       );

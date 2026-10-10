@@ -46,6 +46,7 @@ import type * as federation_auth from "../federation/auth.js";
 import type * as federation_autonomy from "../federation/autonomy.js";
 import type * as federation_autonomySchema from "../federation/autonomySchema.js";
 import type * as federation_backup from "../federation/backup.js";
+import type * as federation_backupExportAudit from "../federation/backupExportAudit.js";
 import type * as federation_backupHelpers from "../federation/backupHelpers.js";
 import type * as federation_backupLarge from "../federation/backupLarge.js";
 import type * as federation_backupLargeHelpers from "../federation/backupLargeHelpers.js";
@@ -155,6 +156,7 @@ import type * as world from "../world.js";
 "federation/autonomy": typeof federation_autonomy,
 "federation/autonomySchema": typeof federation_autonomySchema,
 "federation/backup": typeof federation_backup,
+"federation/backupExportAudit": typeof federation_backupExportAudit,
 "federation/backupHelpers": typeof federation_backupHelpers,
 "federation/backupLarge": typeof federation_backupLarge,
 "federation/backupLargeHelpers": typeof federation_backupLargeHelpers,

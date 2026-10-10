@@ -208,7 +208,11 @@ export class Conversation {
       const agent = [...game.world.agents.values()].find((a) => a.playerId === playerId);
       if (agent) {
         agent.lastConversation = now;
-        agent.toRemember = this.id;
+        if (this.numMessages > 0) {
+          if (!agent.toRemember) agent.toRemember = this.id;
+          else if (agent.toRemember !== this.id && !agent.queuedConversations?.includes(this.id))
+            (agent.queuedConversations ??= []).push(this.id);
+        }
       }
     }
     game.world.conversations.delete(this.id);
