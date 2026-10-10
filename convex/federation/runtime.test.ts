@@ -339,3 +339,32 @@ test('blocked receipts back off so a bounded batch can reach another trusted pee
   expect(outbox).toHaveLength(1); expect(outbox[0].toTownId).toBe('reachable'); expect(outbox[0].envelope.payload.actionId).toBe('batch-action-50');
   const blocked = await t.query(ctx => ctx.db.query('federationPendingActions').withIndex('action', q => q.eq('actionId', 'batch-action-0')).unique()); expect(blocked?.receiptPending).toBe(true); expect(blocked?.receiptRetryAt).toBeGreaterThan(Date.now());
 });
+
+test('an expired superseded return closes only the old ledger without resuming a newer authority', async () => {
+  const { t, worldId } = await setup('home', 'RETURN_PENDING');
+  await t.run(async ctx => {
+    const ledger = (await ctx.db.query('visitLedger').unique())!;
+    await ctx.db.patch(ledger._id, { leaseExpiry: Date.now() - 60_001 });
+    const runtime = (await ctx.db.query('federationAgentRuntimes').unique())!;
+    await ctx.db.patch(runtime._id, { state: 'TRAVELING', visitId: 'visit-new', agentAuthorityEpoch: 4 });
+  });
+  const before = await t.run(ctx => ctx.db.get(worldId));
+  await t.mutation(mutationRef('runtime/resumeHome'), { visitId: 'visit-1' });
+  expect((await t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('COMPLETED');
+  expect(await t.run(ctx => ctx.db.query('federationAgentRuntimes').unique())).toMatchObject({ state: 'TRAVELING', visitId: 'visit-new', agentAuthorityEpoch: 4 });
+  expect(await t.run(ctx => ctx.db.get(worldId))).toEqual(before);
+  expect(await t.run(ctx => ctx.db.query('inputs').collect())).toEqual([]);
+});
+
+test('superseded return cannot close a ledger while its old lease safety margin remains', async () => {
+  const { t } = await setup('home', 'RETURN_PENDING');
+  await t.run(async ctx => {
+    const ledger = (await ctx.db.query('visitLedger').unique())!;
+    await ctx.db.patch(ledger._id, { cleanupConfirmed: true, leaseExpiry: Date.now() - 59_000 });
+    const runtime = (await ctx.db.query('federationAgentRuntimes').unique())!;
+    await ctx.db.patch(runtime._id, { state: 'HOME_ACTIVE', visitId: undefined, agentAuthorityEpoch: 4 });
+  });
+  await t.mutation(mutationRef('runtime/resumeHome'), { visitId: 'visit-1' });
+  expect((await t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('RETURN_PENDING');
+  expect(await t.run(ctx => ctx.db.query('inputs').collect())).toEqual([]);
+});

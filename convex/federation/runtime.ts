@@ -248,8 +248,14 @@ export const resumeHome = internalMutation({
       .withIndex('globalId', (q) => q.eq('agentGlobalId', ledger.agentGlobalId))
       .unique();
     if (!runtime) throw new Error('RUNTIME_NOT_FOUND');
-    if (runtime.visitId !== visitId || runtime.agentAuthorityEpoch !== ledger.agentAuthorityEpoch)
+    if (runtime.visitId !== visitId || runtime.agentAuthorityEpoch !== ledger.agentAuthorityEpoch) {
+      // A delayed return for an older authority must not resume the current
+      // body. Once its lease is certainly dead, close only the old ledger.
+      if (runtime.agentAuthorityEpoch > ledger.agentAuthorityEpoch &&
+          ledger.leaseExpiry + 60_000 <= Date.now())
+        await homeResumed(ctx, visitId);
       return;
+    }
     await ctx.db.patch(runtime._id, {
       state: 'RETURN_PENDING',
       updatedAt: Date.now(),

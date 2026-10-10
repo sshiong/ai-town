@@ -28,7 +28,7 @@ export const agentInputs = {
       ) {
         console.debug(`Agent ${agentId} isn't remembering ${args.operationId}`);
       } else {
-        const remembered = args.conversationId ?? agent.inProgressOperation.conversationId;
+        const remembered = args.conversationId ?? agent.inProgressOperation.conversationId ?? agent.toRemember;
         delete agent.inProgressOperation;
         if (remembered && agent.toRemember === remembered) {
           agent.toRemember = agent.queuedConversations?.shift();
