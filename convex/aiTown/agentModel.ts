@@ -74,6 +74,19 @@ export class Agent {
     )
       return;
 
+    // Check to see if we have a conversation we need to remember.
+    if (this.toRemember) {
+      // Fire off the action to remember the conversation.
+      console.log(`Agent ${this.id} remembering conversation ${this.toRemember}`);
+      this.startOperation(game, now, 'agentRememberConversation', {
+        worldId: game.worldId,
+        playerId: this.playerId,
+        agentId: this.id,
+        conversationId: this.toRemember,
+      });
+      delete this.toRemember;
+      return;
+    }
     const recentlyAttemptedInvite =
       this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN;
     const doingActivity = player.activity && player.activity.until > now;
@@ -97,19 +110,6 @@ export class Agent {
         agent: this.serialize(),
         map: game.worldMap.serialize(),
       });
-      return;
-    }
-    // Check to see if we have a conversation we need to remember.
-    if (this.toRemember) {
-      // Fire off the action to remember the conversation.
-      console.log(`Agent ${this.id} remembering conversation ${this.toRemember}`);
-      this.startOperation(game, now, 'agentRememberConversation', {
-        worldId: game.worldId,
-        playerId: this.playerId,
-        agentId: this.id,
-        conversationId: this.toRemember,
-      });
-      delete this.toRemember;
       return;
     }
     if (conversation && member) {

@@ -188,9 +188,10 @@ p[contenteditable='true']:empty::before {
 .federation-overlay { position: fixed; inset: 0; z-index: 30; background: rgba(23, 20, 33, .88); display: grid; place-items: center; padding: 24px; }
 .federation-modal { width: min(1100px, 100%); max-height: calc(100dvh - 48px); overflow: auto; background: #23263a; color: #f5e6cc; border: 8px solid #171421; outline: none; box-shadow: 0 8px 0 #12111c; }
 .admin-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; padding: 24px 28px; background: #3a2d35; border-bottom: 4px solid #171421; }
+.admin-header > div { min-width: 0; overflow-wrap: anywhere; }
 .admin-header h1 { font-size: clamp(28px, 4vw, 44px); line-height: 1; color: #fec742; }
 .admin-eyebrow { color: #d6b59a; font-size: 12px; margin-bottom: 8px; }
-.admin-close { font-size: 30px; line-height: 1; padding: 4px 10px; color: #f5e6cc; }
+.admin-close { font-size: 30px; line-height: 1; min-width: 44px; min-height: 44px; flex-shrink: 0; padding: 4px 10px; color: #f5e6cc; }
 .admin-tabs { display: flex; gap: 4px; flex-wrap: wrap; padding: 12px 20px; background: #171421; }
 .admin-tabs button { padding: 10px 14px; color: #d6b59a; border-bottom: 3px solid transparent; min-height: 44px; }
 .admin-tabs button[aria-pressed='true'] { color: #fec742; background: #33334b; border-bottom-color: #dd7c42; }
@@ -198,6 +199,9 @@ p[contenteditable='true']:empty::before {
 .admin-panel h2 { font-size: 24px; color: #ffe2a2; margin-bottom: 12px; }
 .admin-panel h3 { font-size: 18px; color: #ffe2a2; margin: 28px 0 12px; }
 .admin-panel p { line-height: 1.55; overflow-wrap: anywhere; }
+.admin-panel > code { display: block; overflow-wrap: anywhere; font-size: 12px; }
+.admin-panel fieldset { min-width: 0; }
+.admin-panel fieldset > label { display: block; min-height: 44px; overflow-wrap: anywhere; }
 .admin-muted, .admin-field small { color: #c8b6a8; font-size: 12px; }
 .admin-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 18px 0; }
 .admin-field { display: flex; flex-direction: column; gap: 7px; font-size: 14px; min-width: 0; }
