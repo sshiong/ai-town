@@ -55,6 +55,9 @@ import type * as federation_backupResident from "../federation/backupResident.js
 import type * as federation_backupSchema from "../federation/backupSchema.js";
 import type * as federation_backupSelective from "../federation/backupSelective.js";
 import type * as federation_backupSelectiveHelpers from "../federation/backupSelectiveHelpers.js";
+import type * as federation_credentialRotationSchema from "../federation/credentialRotationSchema.js";
+import type * as federation_credentials from "../federation/credentials.js";
+import type * as federation_peerCredentialRotation from "../federation/peerCredentialRotation.js";
 import type * as federation_decision from "../federation/decision.js";
 import type * as federation_direct from "../federation/direct.js";
 import type * as federation_endpoints from "../federation/endpoints.js";
@@ -165,6 +168,9 @@ import type * as world from "../world.js";
 "federation/backupSchema": typeof federation_backupSchema,
 "federation/backupSelective": typeof federation_backupSelective,
 "federation/backupSelectiveHelpers": typeof federation_backupSelectiveHelpers,
+"federation/credentialRotationSchema": typeof federation_credentialRotationSchema,
+"federation/credentials": typeof federation_credentials,
+"federation/peerCredentialRotation": typeof federation_peerCredentialRotation,
 "federation/decision": typeof federation_decision,
 "federation/direct": typeof federation_direct,
 "federation/endpoints": typeof federation_endpoints,

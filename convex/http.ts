@@ -4,6 +4,7 @@ import { registerFederationRoutes } from './federation/transport';
 import { registerPairingRoutes } from './federation/peers';
 import { registerMigrationRoutes } from './federation/migration';
 import { registerEndpointRoutes } from './federation/endpoints';
+import { registerCredentialRotationRoutes } from './federation/peerCredentialRotation';
 
 const http = httpRouter();
 http.route({
@@ -15,4 +16,5 @@ registerFederationRoutes(http);
 registerPairingRoutes(http);
 registerMigrationRoutes(http);
 registerEndpointRoutes(http);
+registerCredentialRotationRoutes(http);
 export default http;

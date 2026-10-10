@@ -6,6 +6,7 @@ import { actionRef, mutationRef, queryRef } from './refs';
 import { directRequest, readRequest } from './direct';
 import { identity, peer, session } from './store';
 import { assertNoIdentityConflict, observeSignedIdentity } from './identityConflict';
+import { retireCredentialRotations } from './peerCredentialRotation';
 
 const pairById = async (ctx: any, requestId: string) => ctx.db.query('pairRequests').withIndex('requestId', (q: any) => q.eq('pairRequestId', requestId)).unique();
 const terminalPairStates = ['TRUSTED', 'REJECTED', 'AUTH_FAILED', 'CANCELLED', 'EXPIRED'];
@@ -178,7 +179,10 @@ export const finalizePair = internalMutation({ args: { pairRequestId: v.string()
   const remote = args.remote; const previous = await peer(ctx, remote.townId);
   if (remote.townId === local.townId || previous && (previous.publicKey !== remote.publicKey || previous.deploymentInstanceId !== remote.deploymentInstanceId || previous.deploymentEpoch !== remote.deploymentEpoch)) throw new Error('IDENTITY_OR_DEPLOYMENT_CONFLICT');
   const record = { townId: remote.townId, townName: remote.townName, publicKey: remote.publicKey, fingerprint: remote.fingerprint, deploymentInstanceId: remote.deploymentInstanceId, deploymentEpoch: remote.deploymentEpoch, endpoint: normalizeEndpoint(remote.endpoint), credentialId: `peer:${args.pairRequestId}`, credentialEncrypted: args.credentialEncrypted, trustState: 'TRUSTED', inboundVisitsAllowed: true, outboundVisitsAllowed: true, pairedAt: Date.now() };
-  if (previous) await ctx.db.patch(previous._id, record); else await ctx.db.insert('federationPeers', record);
+  if (previous) {
+    await retireCredentialRotations(ctx, remote.townId);
+    await ctx.db.patch(previous._id, record);
+  } else await ctx.db.insert('federationPeers', record);
   const transport = await session(ctx, remote.townId);
   const transportRecord = { peerTownId: remote.townId, channelState: 'TRANSPORT_TESTING', transportType: 'DIRECT_HTTPS', localDeploymentEpoch: local.deploymentEpoch, verifiedPeerDeploymentEpoch: remote.deploymentEpoch, outboundVerifiedAt: undefined, inboundVerifiedAt: undefined };
   if (transport) await ctx.db.patch(transport._id, transportRecord); else await ctx.db.insert('transportSessions', transportRecord);
@@ -190,6 +194,7 @@ export const setPolicy = mutation({ args: { adminToken: v.string(), peerTownId: 
   if (args.trustState === 'TRUSTED' || args.inboundVisitsAllowed || args.outboundVisitsAllowed)
     await assertNoIdentityConflict(ctx, args.peerTownId);
   if (remote.trustState === 'REVOKED' && args.trustState === 'TRUSTED') throw new Error('REPAIR_REQUIRED');
+  if (args.trustState === 'REVOKED') await retireCredentialRotations(ctx, remote.townId);
   await ctx.db.patch(remote._id, { inboundVisitsAllowed: args.inboundVisitsAllowed, outboundVisitsAllowed: args.outboundVisitsAllowed, trustState: args.trustState });
   const transport = await session(ctx, remote.townId); if (transport) await ctx.db.patch(transport._id, { channelState: 'TRANSPORT_TESTING', inboundVerifiedAt: undefined, outboundVerifiedAt: undefined });
 } });

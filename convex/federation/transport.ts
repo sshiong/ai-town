@@ -12,6 +12,8 @@ import { dispatchRuntimeMessage } from './runtime';
 import { Doc } from '../_generated/dataModel';
 import { observeSignedIdentity } from './identityConflict';
 import { consumeRemoteEventBudget, recordResourceMetric } from './resourceMonitoring';
+import { credentialForPeer, renewedCredentialIdForPeer } from './credentials';
+import { maintainCredentialRotations } from './peerCredentialRotation';
 
 const CLEANUP_TYPES = new Set(['VISIT_RETURN', 'VISIT_CLEANED', 'SESSION_RESYNC', 'STREAM_NACK']);
 const VISIT_TYPES = new Set(['VISIT_RESERVE', 'VISIT_RESERVED', 'VISIT_CONFIRM', 'VISIT_ACTIVE', 'VISIT_REJECT', 'VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_RENEW']);
@@ -39,15 +41,15 @@ export async function messageDigest(message: FederationMessage) {
 
 async function verifiedContext(ctx: any, packet: SignedPacket<FederationMessage>) {
   validateEnvelope(packet?.body);
-  const data = await ctx.runQuery(queryRef('store/context'), { peerTownId: packet.body.fromTownId });
-  if (!data.identity || !data.peer || !await verifyPacket(packet, data.peer.publicKey, data.peer.credentialEncrypted)) throw new Error('MESSAGE_AUTH_FAILED');
+  const data = await ctx.runQuery(queryRef('store/context'), { peerTownId: packet.body.fromTownId, credentialId: packet.body.credentialId });
+  if (!data.identity || !data.peer || !data.authCredentialEncrypted || !await verifyPacket(packet, data.peer.publicKey, data.authCredentialEncrypted)) throw new Error('MESSAGE_AUTH_FAILED');
   if (packet.body.senderDeploymentInstanceId !== data.peer.deploymentInstanceId || packet.body.senderDeploymentEpoch !== data.peer.deploymentEpoch)
     await observeSignedIdentity(ctx, packet, 'MESSAGE');
   return data;
 }
 async function authenticateIdentity(ctx: MutationCtx, message: FederationMessage) {
   const local = await identity(ctx), remote = await peer(ctx, message.fromTownId);
-  if (!local || !remote || message.toTownId !== local.townId || message.credentialId !== remote.credentialId) throw new Error('MESSAGE_AUTH_FAILED');
+  if (!local || !remote || message.toTownId !== local.townId || !await credentialForPeer(ctx, remote, message.credentialId)) throw new Error('MESSAGE_AUTH_FAILED');
   if (remote.trustState !== 'TRUSTED' && !CLEANUP_TYPES.has(message.type)) throw new Error('PEER_NOT_TRUSTED');
   if (local.mode !== 'ACTIVE' && !CLEANUP_TYPES.has(message.type)) throw new Error('DEPLOYMENT_NOT_ACTIVE');
   if (message.senderDeploymentEpoch !== remote.deploymentEpoch || message.senderDeploymentInstanceId !== remote.deploymentInstanceId) throw new Error('SENDER_DEPLOYMENT_MISMATCH');
@@ -94,7 +96,7 @@ export const acceptProbe = internalMutation({ args: { message: v.any() }, handle
 export const receiveProbe = internalAction({ args: { packet: v.any() }, handler: async (ctx, { packet }) => {
   const data = await verifiedContext(ctx, packet);
   const body = await ctx.runMutation(mutationRef('transport/acceptProbe'), { message: packet.body });
-  return signPacket(body, data.identity.privateKeyEncrypted, data.peer.credentialEncrypted);
+  return signPacket(body, data.identity.privateKeyEncrypted, data.authCredentialEncrypted);
 } });
 export const probeInternal = internalAction({ args: { peerTownId: v.string() }, handler: async (ctx, { peerTownId }) => {
   const data = await ctx.runQuery(queryRef('store/context'), { peerTownId }), local = data.identity, remote = data.peer;
@@ -200,7 +202,9 @@ export const acceptMessage = internalMutation({ args: { message: v.any(), payloa
   if (!VISIT_TYPES.has(message.type) && !RUNTIME_TYPES.has(message.type) && !CONTROL_TYPES.has(message.type)) throw new Error('UNKNOWN_MESSAGE_TYPE');
   const existing = await ctx.db.query('federationInbox').withIndex('messageId', q => q.eq('messageId', message.messageId)).unique();
   if (existing) {
-    if (existing.fromTownId !== message.fromTownId || existing.payloadDigest !== args.payloadDigest) throw new Error('MESSAGE_ID_CONFLICT');
+    if (existing.fromTownId !== message.fromTownId || existing.payloadDigest !== args.payloadDigest &&
+        await messageDigest({ ...existing.envelope, credentialId: message.credentialId }) !== args.payloadDigest)
+      throw new Error('MESSAGE_ID_CONFLICT');
     return existing.ack ?? ackFor(message, existing.status);
   }
   if (message.type !== 'VISIT_RESERVE') await assertVisitAuthority(ctx, message);
@@ -241,7 +245,14 @@ export const drainStream = internalMutation({ args: { streamKey: v.string() }, h
   let next = cursor.nextExpectedSequence;
   for (const item of buffered.filter(i => streamKey(i.envelope, i.fromTownId) === args.streamKey).sort((a, b) => a.envelope.sequence - b.envelope.sequence)) {
     if (item.envelope.sequence !== next) break;
-    try { validateEnvelope(item.envelope); await authenticateIdentity(ctx, item.envelope); if (item.envelope.type !== 'VISIT_RESERVE') await assertVisitAuthority(ctx, item.envelope); }
+    try {
+      validateEnvelope(item.envelope);
+      const remote = await peer(ctx, item.fromTownId);
+      const credentialId = remote && !await credentialForPeer(ctx, remote, item.envelope.credentialId)
+        ? await renewedCredentialIdForPeer(ctx, remote, item.envelope.credentialId) : item.envelope.credentialId;
+      await authenticateIdentity(ctx, { ...item.envelope, credentialId: credentialId ?? item.envelope.credentialId });
+      if (item.envelope.type !== 'VISIT_RESERVE') await assertVisitAuthority(ctx, item.envelope);
+    }
     catch { await requireResync(ctx, item.envelope, cursor, 'BUFFERED_MESSAGE_NO_LONGER_VALID'); return; }
     await dispatch(ctx, item.envelope);
     await ctx.db.patch(item._id, { status: 'COMMITTED', processedAt: now(), ack: ackFor(item.envelope, 'COMMITTED') }); next++;
@@ -254,12 +265,20 @@ export const receiveMessage = internalAction({ args: { packet: v.any() }, handle
   const result = await ctx.runMutation(mutationRef('transport/acceptMessage'), { message: packet.body, payloadDigest: await messageDigest(packet.body) });
   const body = { protocol: PROTOCOL, type: 'MESSAGE_ACK', fromTownId: data.identity.townId, toTownId: data.peer.townId,
     senderDeploymentInstanceId: data.identity.deploymentInstanceId, senderDeploymentEpoch: data.identity.deploymentEpoch,
-    expectedRecipientDeploymentEpoch: data.peer.deploymentEpoch, credentialId: data.peer.credentialId, sentAt: now(), expiresAt: now() + 30_000, ...result };
-  return signPacket(body, data.identity.privateKeyEncrypted, data.peer.credentialEncrypted);
+    expectedRecipientDeploymentEpoch: data.peer.deploymentEpoch, credentialId: packet.body.credentialId, sentAt: now(), expiresAt: now() + 30_000, ...result };
+  return signPacket(body, data.identity.privateKeyEncrypted, data.authCredentialEncrypted);
 } });
 export const deliveryContext = internalQuery({ args: { messageId: v.string() }, handler: async (ctx, { messageId }) => {
   const item = await ctx.db.query('federationOutbox').withIndex('messageId', q => q.eq('messageId', messageId)).unique();
-  return { item, identity: await identity(ctx), peer: item ? await peer(ctx, item.toTownId) : null,
+  const remote = item ? await peer(ctx, item.toTownId) : null;
+  let authCredentialId = item?.envelope.credentialId;
+  let authCredentialEncrypted = item && remote ? await credentialForPeer(ctx, remote, authCredentialId) : undefined;
+  if (item && remote && !authCredentialEncrypted) {
+    authCredentialId = await renewedCredentialIdForPeer(ctx, remote, item.envelope.credentialId);
+    authCredentialEncrypted = authCredentialId ? await credentialForPeer(ctx, remote, authCredentialId) : undefined;
+  }
+  return { item, identity: await identity(ctx), peer: remote,
+    authCredentialId, authCredentialEncrypted,
     retirementReason: item && typeof item.envelope.visitId === 'string' ? runtimeRetirementReason(item.envelope, await visit(ctx, item.envelope.visitId)) : undefined };
 } });
 export const markDelivery = internalMutation({ args: { messageId: v.string(), status: v.string(), error: v.optional(v.string()) }, handler: async (ctx, args) => {
@@ -304,12 +323,13 @@ export const deliver = internalAction({ args: { messageId: v.string() }, handler
   try {
     if (remote.trustState !== 'TRUSTED' && !CLEANUP_TYPES.has(item.envelope.type)) throw new Error('PEER_NOT_TRUSTED');
     if (local.mode !== 'ACTIVE' && !CLEANUP_TYPES.has(item.envelope.type)) throw new Error('DEPLOYMENT_NOT_ACTIVE');
-    if (item.envelope.senderDeploymentEpoch !== local.deploymentEpoch || item.envelope.senderDeploymentInstanceId !== local.deploymentInstanceId || item.envelope.expectedRecipientDeploymentEpoch !== remote.deploymentEpoch || item.envelope.credentialId !== remote.credentialId) throw new Error('OUTBOX_DEPLOYMENT_FENCED');
-    const packet = await signPacket(item.envelope, local.privateKeyEncrypted, remote.credentialEncrypted);
+    if (item.envelope.senderDeploymentEpoch !== local.deploymentEpoch || item.envelope.senderDeploymentInstanceId !== local.deploymentInstanceId || item.envelope.expectedRecipientDeploymentEpoch !== remote.deploymentEpoch) throw new Error('OUTBOX_DEPLOYMENT_FENCED');
+    if (!data.authCredentialEncrypted) throw new Error('OUTBOX_CREDENTIAL_EXPIRED');
+    const packet = await signPacket({ ...item.envelope, credentialId: data.authCredentialId }, local.privateKeyEncrypted, data.authCredentialEncrypted);
     const ack = await directRequest(remote.endpoint, '/messages', packet), body = ack?.body;
     if (body && (body.senderDeploymentInstanceId !== remote.deploymentInstanceId || body.senderDeploymentEpoch !== remote.deploymentEpoch))
       await observeSignedIdentity(ctx, ack, 'ACK');
-    if (!body || !await verifyPacket(ack, remote.publicKey, remote.credentialEncrypted) || body.protocol !== PROTOCOL || body.type !== 'MESSAGE_ACK' || body.fromTownId !== remote.townId || body.toTownId !== local.townId || body.senderDeploymentInstanceId !== remote.deploymentInstanceId || body.senderDeploymentEpoch !== remote.deploymentEpoch || body.expectedRecipientDeploymentEpoch !== local.deploymentEpoch || body.credentialId !== remote.credentialId || body.messageId !== messageId || body.nonce !== item.envelope.nonce || body.expiresAt <= now() || body.expiresAt > now() + 60_000 || !['COMMITTED', 'BUFFERED', 'RESYNC_REQUIRED', 'DISCARDED', 'STALE_SEQUENCE'].includes(body.status)) throw new Error('INVALID_MESSAGE_ACK');
+    if (!body || !await verifyPacket(ack, remote.publicKey, data.authCredentialEncrypted) || body.protocol !== PROTOCOL || body.type !== 'MESSAGE_ACK' || body.fromTownId !== remote.townId || body.toTownId !== local.townId || body.senderDeploymentInstanceId !== remote.deploymentInstanceId || body.senderDeploymentEpoch !== remote.deploymentEpoch || body.expectedRecipientDeploymentEpoch !== local.deploymentEpoch || body.credentialId !== data.authCredentialId || body.messageId !== messageId || body.nonce !== item.envelope.nonce || body.expiresAt <= now() || body.expiresAt > now() + 60_000 || !['COMMITTED', 'BUFFERED', 'RESYNC_REQUIRED', 'DISCARDED', 'STALE_SEQUENCE'].includes(body.status)) throw new Error('INVALID_MESSAGE_ACK');
     await ctx.runMutation(mutationRef('transport/markDelivery'), { messageId, status: body.status });
   } catch (error) {
     await ctx.runMutation(mutationRef('transport/markDelivery'), { messageId, status: 'FAILED', error: error instanceof Error ? error.message : 'DIRECT_DELIVERY_FAILED' });
@@ -320,6 +340,7 @@ export const pendingDeliveries = internalQuery({ args: {}, handler: async ctx =>
   return items.sort((a, b) => Number(!CLEANUP_TYPES.has(a.envelope.type)) - Number(!CLEANUP_TYPES.has(b.envelope.type))).map(i => i.messageId);
 } });
 export const maintenance = internalMutation({ args: {}, handler: async ctx => {
+  await maintainCredentialRotations(ctx);
   const nonces = await ctx.db.query('federationReplayNonces').withIndex('expiry', q => q.lte('expiresAt', now())).take(500);
   for (const nonce of nonces) await ctx.db.delete(nonce._id);
   const sessions = await ctx.db.query('transportSessions').collect();

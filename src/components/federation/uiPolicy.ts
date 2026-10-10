@@ -39,6 +39,10 @@ export function canResumeRestoredResident(
 
 export function adminErrorSummary(message: string) {
   const explanations: Record<string, string> = {
+    INVALID_CREDENTIAL_OVERLAP: 'Choose a credential overlap between 10 and 30 whole minutes.',
+    CREDENTIAL_ROTATION_IN_PROGRESS: 'A credential rotation is already pending or its overlap period is still active. Wait before rotating again.',
+    CREDENTIAL_ROTATION_EXPIRED: 'The rotation window expired before both sides confirmed. Check the neighbor and pair again if connectivity has been lost.',
+    CREDENTIAL_ROTATION_FENCED: 'The neighbor identity or deployment changed during rotation. Verify its current identity before retrying.',
     RESIDENT_CAPACITY_EXCEEDED:
       'The resident limit has been reached. Increase capacity before adding another resident.',
     HUMAN_CAPACITY_EXCEEDED: 'The town has reached its limit for human players.',
