@@ -8,14 +8,14 @@ import { identity } from './store';
 import { digest, requireAdmin, sign, verifySignature } from './security';
 import { queryRef, mutationRef } from './refs';
 
-const ownerArgs = {
+export const ownerArgs = {
   adminToken: v.string(),
   worldId: v.id('worlds'),
   playerId,
   agentGlobalId: v.optional(v.string()),
   memoryId: v.id('memories'),
 };
-type OwnerArgs = {
+export type OwnerArgs = {
   adminToken: string;
   worldId: Id<'worlds'>;
   playerId: string;
@@ -31,13 +31,13 @@ type RawMessage = {
   authorGlobalId?: string;
   occurredAt: number;
 };
-type Payload = {
+export type Payload = {
   format: 'ai-town-cold-history';
   version: 1;
   sourceKey: string;
   messages: RawMessage[];
 };
-type Manifest = {
+export type Manifest = {
   format: 'ai-town-cold-history';
   version: 1;
   schemaVersion: 1;
@@ -50,7 +50,7 @@ type Manifest = {
   bytes: number;
   digest: string;
 };
-async function source(ctx: QueryCtx, args: OwnerArgs) {
+export async function source(ctx: QueryCtx, args: OwnerArgs) {
   await requireOwner(ctx, args);
   const memory = await ctx.db.get(args.memoryId);
   if (!memory || !owns(memory, args)) throw new Error('COLD_HISTORY_OWNER_MISMATCH');
@@ -113,10 +113,16 @@ async function source(ctx: QueryCtx, args: OwnerArgs) {
   }
   throw new Error('COLD_HISTORY_NO_SOURCE');
 }
-async function archiveFor(ctx: QueryCtx, sourceKey: string) {
+export async function archiveFor(ctx: QueryCtx, sourceKey: string) {
+  const mapped = await ctx.db
+    .query('coldHistoryArchives')
+    .withIndex('lookup', (q) => q.eq('lookupKey', sourceKey))
+    .unique();
+  if (mapped) return mapped;
   return ctx.db
     .query('coldHistoryArchives')
     .withIndex('source', (q) => q.eq('sourceKey', sourceKey))
+    .filter((q) => q.eq(q.field('lookupKey'), undefined))
     .unique();
 }
 export const discover = query({
@@ -127,7 +133,13 @@ export const discover = query({
       s = await source(ctx, args);
     } catch (error) {
       const reason = error instanceof Error ? error.message : '';
-      if (['COLD_HISTORY_NO_SOURCE', 'COLD_HISTORY_NOT_COMPLETED'].includes(reason))
+      if (
+        [
+          'COLD_HISTORY_NO_SOURCE',
+          'COLD_HISTORY_NOT_COMPLETED',
+          'COLD_HISTORY_TRANSCRIPT_OWNER_MISMATCH',
+        ].includes(reason)
+      )
         return { state: 'UNAVAILABLE' as const, reason };
       throw error;
     }
@@ -145,10 +157,11 @@ export const discover = query({
       : null;
   },
 });
-async function captureSource(ctx: QueryCtx, args: OwnerArgs) {
+export async function captureSource(ctx: QueryCtx, args: OwnerArgs, readHot = false) {
   const s = await source(ctx, args),
     existing = await archiveFor(ctx, s.sourceKey);
-  if (existing?.state === 'VERIFIED') return { existing, source: s, messages: [] as RawMessage[] };
+  if (existing?.state === 'VERIFIED' && !readHot)
+    return { existing, source: s, messages: [] as RawMessage[] };
   let messages: RawMessage[];
   if (s.kind === 'conversation') {
     const rows = await ctx.db
@@ -234,6 +247,7 @@ export const reserve = internalMutation({
     }
     const id = await ctx.db.insert('coldHistoryArchives', {
       sourceKey: s.sourceKey,
+      lookupKey: s.sourceKey,
       sourceId: s.sourceId,
       kind: s.kind,
       ownerGlobalId: s.ownerGlobalId,
@@ -281,7 +295,7 @@ export const publish = internalMutation({
     return args.storageId;
   },
 });
-async function load(ctx: ActionCtx, archive: Doc<'coldHistoryArchives'>): Promise<Payload> {
+export async function load(ctx: ActionCtx, archive: Doc<'coldHistoryArchives'>): Promise<Payload> {
   if (!archive.storageId) throw new Error('COLD_HISTORY_NOT_VERIFIED');
   const blob = await ctx.storage.get(archive.storageId);
   if (!blob) throw new Error('COLD_HISTORY_STORAGE_MISSING');
@@ -424,7 +438,12 @@ export const read = action({
     return {
       location: 'PRIVATE_FILE_STORAGE' as const,
       state: 'VERIFIED' as const,
-      page: payload.messages.slice(offset, offset + numItems),
+      page: payload.messages.slice(offset, offset + numItems).map((message) => {
+        const alias = archive.authorAliases?.find(
+          (a) => a.sourceAuthor === (message.authorGlobalId ?? message.authorPlayerId),
+        );
+        return alias ? { ...message, targetAuthor: alias.targetAuthor } : message;
+      }),
       isDone: offset + numItems >= payload.messages.length,
       nextOffset: Math.min(offset + numItems, payload.messages.length),
       sourceTownId: archive.manifest.sourceTownId,

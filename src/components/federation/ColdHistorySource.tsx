@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { ColdHistoryFileTransfer } from './ColdHistoryFileTransfer';
 import { useAction, useQuery } from 'convex/react';
 import { makeFunctionReference, type ApiFromModules, type FunctionReturnType } from 'convex/server';
 import type * as cold from '../../../convex/federation/coldHistory';
@@ -74,6 +75,13 @@ export function ColdHistorySource({
         </>
       )}
       <TaskFeedback task={task} />
+      {status !== undefined && status?.state !== 'UNAVAILABLE' && (
+        <ColdHistoryFileTransfer
+          owner={owner}
+          memoryId={memoryId}
+          hasArchive={status?.state === 'VERIFIED'}
+        />
+      )}
       {page && (
         <>
           <p className="admin-muted">
@@ -88,6 +96,9 @@ export function ColdHistorySource({
                   <p className="admin-muted">
                     {m.authorGlobalId ?? m.authorPlayerId} · {formatTime(m.occurredAt)}
                   </p>
+                  {'targetAuthor' in m && (
+                    <p className="admin-muted">Restored author: {m.targetAuthor}</p>
+                  )}
                 </div>
               </li>
             ))}
