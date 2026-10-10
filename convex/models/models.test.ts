@@ -108,6 +108,31 @@ test('main applies only to new residents; explicit resident bindings and global 
   ).rejects.toThrow('RESIDENT_GLOBAL_ID_CONFLICT');
 });
 
+test('first validated profile becomes main; failed main blocks new residents without changing existing bindings', async () => {
+  const t = convexTest(schema, modules);
+  const adminToken = process.env.FEDERATION_ADMIN_TOKEN!;
+  const worldId = await t.run(ctx => ctx.db.insert('worlds', { nextId: 3, players: [], agents: [], conversations: [] }));
+  const save = (name: string) => t.mutation(mutation('models/profiles:saveChatProfile'), {
+    adminToken, name, provider: 'custom', url: 'https://models.example', model: name,
+  });
+  const first = await save('first');
+  expect((await t.run(ctx => ctx.db.query('modelSettings').unique()))?.mainChatProfileId).toBeUndefined();
+  await t.mutation(mutation('models/profiles:recordChatProbe'), { chatProfileId: first, ok: false });
+  expect((await t.run(ctx => ctx.db.query('modelSettings').unique()))?.mainChatProfileId).toBeUndefined();
+  await t.mutation(mutation('models/profiles:recordChatProbe'), { chatProfileId: first, ok: true });
+  expect((await t.run(ctx => ctx.db.query('modelSettings').unique()))?.mainChatProfileId).toBe(first);
+  const binding = await t.run(ctx => bindResident(ctx, worldId, 'p:0' as never));
+  const second = await save('second');
+  await t.mutation(mutation('models/profiles:recordChatProbe'), { chatProfileId: second, ok: true });
+  expect((await t.run(ctx => ctx.db.query('modelSettings').unique()))?.mainChatProfileId).toBe(first);
+  await t.mutation(mutation('models/profiles:recordChatProbe'), { chatProfileId: first, ok: false });
+  await expect(t.run(ctx => bindResident(ctx, worldId, 'p:1' as never))).rejects.toThrow('MAIN_CHAT_PROFILE_NOT_VALIDATED');
+  expect(await t.run(ctx => bindResident(ctx, worldId, 'p:0' as never))).toBe(binding);
+  expect((await t.run(ctx => ctx.db.get(binding)))?.chatProfileId).toBe(first);
+  await t.mutation(mutation('models/profiles:recordChatProbe'), { chatProfileId: first, ok: true });
+  await t.run(ctx => bindResident(ctx, worldId, 'p:1' as never));
+});
+
 test('embedding switch requires complete coverage and validation, with old vectors available for rollback', async () => {
   const t = convexTest(schema, modules);
   const adminToken = process.env.FEDERATION_ADMIN_TOKEN!;

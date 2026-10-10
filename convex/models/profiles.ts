@@ -46,6 +46,12 @@ export async function settings(ctx: { db: import('../maintenanceFunctions').Data
     .withIndex('key', (q) => q.eq('key', 'town'))
     .unique();
 }
+async function chatProfileHealth(ctx: { db: import('../maintenanceFunctions').DatabaseReader }, id: Id<'chatProfiles'>) {
+  return await ctx.db.query('modelAudits').filter(q => q.and(
+    q.eq(q.field('subject'), id),
+    q.or(q.eq(q.field('operation'), 'PROBE_CHAT_SUCCESS'), q.eq(q.field('operation'), 'PROBE_CHAT_FAILED')),
+  )).order('desc').first();
+}
 export async function audit(
   ctx: MutationCtx,
   operation: string,
@@ -91,19 +97,7 @@ export const setMain = mutation({
   handler: async (ctx, args) => {
     assertFederationAdmin(args.adminToken);
     if (!(await ctx.db.get(args.chatProfileId))) throw new Error('CHAT_PROFILE_NOT_FOUND');
-    const health = await ctx.db
-      .query('modelAudits')
-      .filter((q) =>
-        q.and(
-          q.eq(q.field('subject'), args.chatProfileId),
-          q.or(
-            q.eq(q.field('operation'), 'PROBE_CHAT_SUCCESS'),
-            q.eq(q.field('operation'), 'PROBE_CHAT_FAILED'),
-          ),
-        ),
-      )
-      .order('desc')
-      .first();
+    const health = await chatProfileHealth(ctx, args.chatProfileId);
     if (health?.operation !== 'PROBE_CHAT_SUCCESS') throw new Error('CHAT_PROFILE_NOT_VALIDATED');
     const config = await settings(ctx);
     if (config) await ctx.db.patch(config._id, { mainChatProfileId: args.chatProfileId });
@@ -149,8 +143,13 @@ export async function bindResident(
   }
   const config = await settings(ctx);
   let chatProfileId = config?.mainChatProfileId;
-  if (chatProfileId && !(await ctx.db.get(chatProfileId)))
-    throw new Error('MAIN_CHAT_PROFILE_MISSING');
+  if (chatProfileId) {
+    const main = await ctx.db.get(chatProfileId);
+    if (!main) throw new Error('MAIN_CHAT_PROFILE_MISSING');
+    const health = await chatProfileHealth(ctx, chatProfileId);
+    if (health?.operation === 'PROBE_CHAT_FAILED' || (!main.legacy && health?.operation !== 'PROBE_CHAT_SUCCESS'))
+      throw new Error('MAIN_CHAT_PROFILE_NOT_VALIDATED');
+  }
   if (!chatProfileId) {
     const profiles = await ctx.db.query('chatProfiles').collect();
     if (profiles.some((p) => !p.legacy)) throw new Error('MAIN_CHAT_PROFILE_MISSING');
@@ -326,6 +325,14 @@ export const recordChatProbe = internalMutation({
       args.chatProfileId,
       args.ok ? 'Availability probe returned nonempty output' : 'Availability probe failed',
     );
+    if (args.ok) {
+      const config = await settings(ctx);
+      if (!config?.mainChatProfileId) {
+        if (config) await ctx.db.patch(config._id, { mainChatProfileId: args.chatProfileId });
+        else await ctx.db.insert('modelSettings', { key: 'town', mainChatProfileId: args.chatProfileId });
+        await audit(ctx, 'SET_MAIN', 'main', args.chatProfileId, 'First validated Chat Profile');
+      }
+    }
   },
 });
 export const probeChat = action({

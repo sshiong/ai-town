@@ -59,7 +59,9 @@ export default function ModelsPanel({ adminToken }: { adminToken: string }) {
       <h2>Models &amp; resident bindings</h2>
       <p className="admin-muted">
         Chat and Embedding use independent providers. Test a Chat connection successfully before
-        selecting main. Changing main only affects new residents; existing bindings remain fixed.
+        selecting main. The first successfully tested profile becomes main automatically. Changing
+        main only affects new residents; existing bindings remain fixed. A failed main profile
+        pauses new resident creation until it passes a test or you select another validated main.
       </p>
       <TaskFeedback task={task} />
       {!data && <p role="status">Loading model profiles…</p>}
