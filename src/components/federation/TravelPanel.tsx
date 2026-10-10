@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import AutonomyPanel from './AutonomyPanel';
 import SocialHistoryPanel from './SocialHistoryPanel';
+import VisitorQueuePanel from './VisitorQueuePanel';
 import { useConvex, useQuery } from 'convex/react';
-import { isOpenVisit, isReadyDestination } from './uiPolicy';
+import { makeFunctionReference, type FunctionArgs, type FunctionReturnType } from 'convex/server';
+import { adminErrorSummary, deadlineRemaining, isOpenVisit, isReadyDestination } from './uiPolicy';
 import { api } from '../../../convex/_generated/api';
 import {
   AdminButton,
@@ -12,6 +14,10 @@ import {
   formatTime,
   useAdminTask,
 } from './AdminShared';
+
+const startVisitRef = makeFunctionReference<'mutation',
+  FunctionArgs<typeof api.federation.ledger.startVisit> & { allowQueue?: boolean },
+  FunctionReturnType<typeof api.federation.ledger.startVisit>>('federation/ledger:startVisit');
 
 export default function TravelPanel({ adminToken }: { adminToken: string }) {
   const convex = useConvex();
@@ -29,7 +35,7 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
   const diagnostics = useQuery(api.federation.transport.diagnostics, { adminToken });
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 10000);
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
   const destinations = status?.peers.filter((peer) => isReadyDestination(peer, now)) ?? [];
@@ -115,13 +121,14 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
               void task.run(
                 'Requesting visit',
                 () =>
-                  convex.mutation(api.federation.ledger.startVisit, {
+                  convex.mutation(startVisitRef, {
                     adminToken,
                     peerTownId: destination.townId,
                     worldId: world.worldId,
                     homePlayerId: resident.playerId,
+                    allowQueue: fields.get('allowQueue') === 'on',
                   }),
-                'Visit requested. Admission and presence changes are confirmed asynchronously in the ledger below.',
+                'Visit requested. Check the ledger for admission or waiting confirmation. Waiting never guarantees departure.',
               );
             }}
           >
@@ -151,6 +158,14 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
                 )}
               </select>
             </Field>
+            <label className="admin-check admin-form-actions">
+              <input name="allowQueue" type="checkbox" defaultChecked={false} disabled={!!task.pending} />
+              Allow waiting if the destination cannot admit this resident yet
+            </label>
+            <p className="admin-muted admin-form-actions">
+              Waiting requires the host to enable its queue. Queue time consumes the existing travel
+              authorization; the resident stays on the home map until admission is confirmed.
+            </p>
             <div className="admin-form-actions">
               <AdminButton
                 type="submit"
@@ -214,6 +229,7 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
               </li>
             ))}
           </ul>
+          <VisitorQueuePanel adminToken={adminToken} />
           <h3>Visit ledger</h3>
           {!status.visits.length && (
             <EmptyState>New visits and their confirmed outcomes will appear here.</EmptyState>
@@ -228,12 +244,28 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
                 <div>
                   <strong>{visit.role === 'home' ? 'Outgoing' : 'Incoming'}</strong>{' '}
                   <span className="admin-badge">{visit.state}</span>
+                  {visit.state === 'QUEUED' && (
+                    <p>
+                      {visit.role === 'home' ? 'Waiting at the destination; still at home.' : 'Waiting before admission; no map visitor.'}
+                    </p>
+                  )}
                   <code>{visit.visitId}</code>
                   <code>{visit.agentGlobalId}</code>
                   <p className="admin-muted">
                     Lease: {formatTime(visit.leaseExpiry)} · authority {visit.agentAuthorityEpoch} ·
                     lease version {visit.visitLeaseVersion}
                   </p>
+                  {visit.state === 'QUEUED' && (
+                    <>
+                      <p>Queue deadline: {formatTime(visit.queueExpiresAt)} · {deadlineRemaining(visit.queueExpiresAt, now)}</p>
+                      <p className="admin-muted">
+                        Travel authorization: {deadlineRemaining(visit.leaseExpiry, now)}.
+                        Waiting uses this time; departure does not restart it.
+                      </p>
+                      {visit.queuePaused && <p className="admin-warning">The host paused this request. Its deadlines still apply.</p>}
+                      {visit.queueReason && <p className="admin-muted">{adminErrorSummary(visit.queueReason)}</p>}
+                    </>
+                  )}
                   {visit.lastError && <p className="admin-error">{visit.lastError}</p>}
                 </div>
                 <div className="admin-toolbar">
@@ -270,17 +302,19 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
                     }
                     onClick={() =>
                       void task.run(
-                        'Requesting safe return',
+                        visit.state === 'QUEUED' ? 'Cancelling waiting request' : 'Requesting safe return',
                         () =>
                           convex.mutation(api.federation.ledger.returnVisit, {
                             adminToken,
                             visitId: visit.visitId,
                           }),
-                        'Return requested. The ledger will confirm cleanup and safe resumption at home.',
+                        visit.state === 'QUEUED'
+                          ? 'Cancellation requested. The ledger will confirm that waiting ended and the resident can travel again.'
+                          : 'Return requested. The ledger will confirm cleanup and safe resumption at home.',
                       )
                     }
                   >
-                    End / return safely
+                    {visit.state === 'QUEUED' ? 'Cancel waiting request' : 'End / return safely'}
                   </AdminButton>
                 </div>
               </li>

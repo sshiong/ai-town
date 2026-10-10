@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { internalMutation, mutation, MutationCtx } from '../maintenanceFunctions';
+import { internalMutation, mutation, query, MutationCtx } from '../maintenanceFunctions';
 import { Doc } from '../_generated/dataModel';
 import { requireAdmin } from './security';
 import { assertNoIdentityConflict } from './identityConflict';
@@ -8,11 +8,13 @@ import { enqueueMessage } from './queue';
 import { mutationRef } from './refs';
 import { FederationMessage, LEASE_SAFETY_MS } from './protocol';
 import { syncResidentRuntimes } from './runtime';
-import { configuredResourceLimits, pendingDecisionCount } from './resources';
-import { sourceVisitorQuota } from './resourceMonitoring';
+import {
+  configuredVisitorQueue, drainVisitorQueue, queuedHostVisits, reserveHostVisit,
+  sourceAdmissionReason, terminateQueuedVisit, visitorAdmissionSnapshot, VISIT_RESERVATION_MS, VISITOR_QUEUE_BATCH_SIZE,
+} from './visitorQueue';
 
 const TERMINAL = new Set(['COMPLETED', 'REJECTED']);
-const RESERVATION_MS = 30_000;
+const RESERVATION_MS = VISIT_RESERVATION_MS;
 const runtimeJob = async (ctx: MutationCtx, name: string, visitId: string) => {
   await ctx.scheduler.runAfter(0, mutationRef(`runtime/${name}`), { visitId });
 };
@@ -44,7 +46,10 @@ export async function assertVisitAuthority(ctx: MutationCtx, message: Federation
   return ledger;
 }
 
-export async function startResidentVisit(ctx: MutationCtx, args: { peerTownId: string; worldId: Doc<'worlds'>['_id']; homePlayerId: string }): Promise<{ visitId: string; state: string }> {
+export async function startResidentVisit(ctx: MutationCtx, args: {
+  peerTownId: string; worldId: Doc<'worlds'>['_id']; homePlayerId: string; allowQueue?: boolean;
+  requestOrigin?: 'manual' | 'autonomous'; autonomousPolicyRevision?: number;
+}): Promise<{ visitId: string; state: string }> {
     await assertNoIdentityConflict(ctx, args.peerTownId);
     const local = await identity(ctx), remote = await peer(ctx, args.peerTownId), connection = await session(ctx, args.peerTownId);
     if (!local?.enabled || local.mode !== 'ACTIVE') throw new Error('FEDERATION_DISABLED');
@@ -62,15 +67,19 @@ export async function startResidentVisit(ctx: MutationCtx, args: { peerTownId: s
     const profile = { name: description.name, character: description.character, description: description.description, homeTownName: local.townName };
     await ctx.db.insert('visitLedger', { visitId, agentGlobalId: resident.agentGlobalId, homeTownId: local.townId, hostTownId: remote.townId,
       homeDeploymentEpoch: local.deploymentEpoch, hostDeploymentEpoch: remote.deploymentEpoch, agentAuthorityEpoch, visitLeaseVersion: 1,
-      leaseExpiry, fencingToken, state: 'REQUESTED', role: 'home', worldId: args.worldId, homePlayerId: resident.playerId, profile, createdAt: now, updatedAt: now });
+      leaseExpiry, fencingToken, state: 'REQUESTED', role: 'home', worldId: args.worldId, homePlayerId: resident.playerId, profile,
+      allowQueue: args.allowQueue ?? false, requestOrigin: args.requestOrigin ?? 'manual',
+      ...(args.autonomousPolicyRevision !== undefined ? { autonomousPolicyRevision: args.autonomousPolicyRevision } : {}),
+      createdAt: now, updatedAt: now });
     // Claim exclusive travel authority before the asynchronous reservation request.
     await ctx.db.patch(resident._id, { state: 'TRAVEL_PREPARING', visitId, agentAuthorityEpoch, updatedAt: now });
-    await enqueueMessage(ctx, { peerTownId: remote.townId, type: 'VISIT_RESERVE', visitId, payload: { profile, leaseExpiry, fencingToken } });
+    await enqueueMessage(ctx, { peerTownId: remote.townId, type: 'VISIT_RESERVE', visitId,
+      payload: { profile, leaseExpiry, fencingToken, ...(args.allowQueue ? { allowQueue: true, queueProtocolVersion: 1 } : {}) } });
     return { visitId, state: 'REQUESTED' };
 }
 
 export const startVisit = mutation({
-  args: { adminToken: v.string(), peerTownId: v.string(), worldId: v.id('worlds'), homePlayerId: v.string() },
+  args: { adminToken: v.string(), peerTownId: v.string(), worldId: v.id('worlds'), homePlayerId: v.string(), allowQueue: v.optional(v.boolean()) },
   handler: async (ctx, args) => {
     requireAdmin(args.adminToken);
     return await startResidentVisit(ctx, args);
@@ -91,7 +100,9 @@ async function sendLifecycle(ctx: MutationCtx, ledger: Doc<'visitLedger'>, type:
 export async function beginReturn(ctx: MutationCtx, ledger: Doc<'visitLedger'>, reason: string) {
   if (TERMINAL.has(ledger.state)) return;
   if (ledger.role === 'host') {
-    if (ledger.state === 'RESERVED') {
+    if (ledger.state === 'QUEUED') {
+      await terminateQueuedVisit(ctx, ledger, reason);
+    } else if (ledger.state === 'RESERVED') {
       await ctx.db.patch(ledger._id, { state: 'COMPLETED', cleanupConfirmed: true, updatedAt: Date.now(), lastError: reason });
       await releaseSlot(ctx, ledger.visitId);
       await sendLifecycle(ctx, ledger, 'VISIT_CLEANED');
@@ -112,6 +123,41 @@ export const returnVisit = mutation({ args: { adminToken: v.string(), visitId: v
   await beginReturn(ctx, ledger, 'ADMIN_RETURN');
   return { visitId: ledger.visitId, state: TERMINAL.has(ledger.state) ? ledger.state : 'RETURN_PENDING' };
 } });
+
+export const waitingVisits = query({
+  args: { adminToken: v.string() },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    return (await queuedHostVisits(ctx.db)).map(row => ({
+      visitId: row.visitId, homeTownId: row.homeTownId, profile: { name: row.profile?.name },
+      state: row.state, queuedAt: row.queuedAt, queueExpiresAt: row.queueExpiresAt,
+      queueReason: row.queueReason, queuePaused: row.queuePaused ?? false,
+    }));
+  },
+});
+
+export const manageQueuedVisit = mutation({
+  args: {
+    adminToken: v.string(), visitId: v.string(),
+    operation: v.union(v.literal('PAUSE'), v.literal('RESUME'), v.literal('REJECT'), v.literal('PROMOTE')),
+  },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    const ledger = await visit(ctx, args.visitId);
+    if (!ledger || ledger.role !== 'host' || ledger.state !== 'QUEUED') throw new Error('VISITOR_NOT_QUEUED');
+    if (args.operation === 'REJECT') await terminateQueuedVisit(ctx, ledger, 'ADMIN_QUEUE_REJECTED');
+    else if (args.operation === 'PAUSE') await ctx.db.patch(ledger._id, { queuePaused: true, updatedAt: Date.now() });
+    else if (args.operation === 'RESUME') await ctx.db.patch(ledger._id, { queuePaused: false, updatedAt: Date.now() });
+    await ctx.db.insert('federationResourceAudit', {
+      operation: `VISITOR_QUEUE_${args.operation}`, previous: { visitId: ledger.visitId, state: ledger.state, paused: ledger.queuePaused ?? false },
+      next: { operation: args.operation }, createdAt: Date.now(),
+    });
+    // PROMOTE never targets a particular visitor out of order. RESUME also uses
+    // the persisted fair order rather than awarding a slot to the resumed item.
+    if (args.operation === 'PROMOTE' || args.operation === 'RESUME') await drainVisitorQueue(ctx);
+    return { visitId: ledger.visitId, state: (await visit(ctx, ledger.visitId))!.state };
+  },
+});
 
 export const renewVisit = mutation({ args: { adminToken: v.string(), visitId: v.string() }, handler: async (ctx, args) => {
   requireAdmin(args.adminToken);
@@ -137,55 +183,84 @@ async function receiveReserve(ctx: MutationCtx, message: FederationMessage) {
   const payload = message.payload, now = Date.now();
   if (message.sequence !== 1 || !message.agentGlobalId!.startsWith(`${message.fromTownId}/agent:`) || typeof payload.fencingToken !== 'string' || payload.fencingToken.length < 16 || payload.fencingToken.length > 200 ||
       !Number.isFinite(payload.leaseExpiry) || payload.leaseExpiry <= now || payload.leaseExpiry > now + local.maxVisitDurationMs + 30_000 || message.visitLeaseVersion !== 1 ||
+      payload.allowQueue !== undefined && typeof payload.allowQueue !== 'boolean' ||
+      payload.queueProtocolVersion !== undefined && payload.queueProtocolVersion !== 1 ||
       typeof payload.profile?.name !== 'string' || payload.profile.name.length > 100 || typeof payload.profile.character !== 'string' || payload.profile.character.length > 100 ||
       typeof payload.profile.description !== 'string' || payload.profile.description.length > 4000 || typeof payload.profile.homeTownName !== 'string' || payload.profile.homeTownName.length > 80) throw new Error('INVALID_RESERVATION');
-  const activeAgent = await ctx.db.query('visitLedger').withIndex('agentGlobalId', q => q.eq('agentGlobalId', message.agentGlobalId!)).collect();
-  const slots = await ctx.db.query('visitReservations').withIndex('active', q => q.eq('reservedSlot', true)).collect();
-  const slotLedgers = await Promise.all(slots.map(slot => visit(ctx, slot.visitId)));
-  const occupiedSlots = slots.filter((slot, index) => slot.expiresAt > now || slotLedgers[index]?.role === 'host' && ['CREATING', 'ACTIVE', 'REMOVING'].includes(slotLedgers[index]!.state)).length;
-  const reservedSlots = slots.filter((slot, index) => slot.expiresAt > now && slotLedgers[index]?.state === 'RESERVED').length;
-  const sourceQuota = await sourceVisitorQuota(ctx.db);
-  const sourceSlots = slots.filter((slot, index) =>
-    slotLedgers[index]?.homeTownId === message.fromTownId &&
-    (slot.expiresAt > now || slotLedgers[index]?.role === 'host' && ['CREATING', 'ACTIVE', 'REMOVING'].includes(slotLedgers[index]!.state))).length;
-  const limits = await configuredResourceLimits(ctx.db);
-  const pending = await pendingDecisionCount(ctx.db, now);
-  const queuedChat = await ctx.db.query('federationLlmRequests')
-    .withIndex('state_expiry', q => q.eq('state', 'PENDING').gt('expiresAt', now)).take(1001);
-  const runningChat = await ctx.db.query('federationLlmRequests')
-    .withIndex('state_expiry', q => q.eq('state', 'RUNNING').gt('expiresAt', now)).take(33);
-  const chatQueueFull = queuedChat.length >= limits.maxPendingLocalLLM &&
-    (queuedChat.length > 0 || runningChat.length >= limits.maxConcurrentLocalLLM);
+  // Existing candidates get first use of every newly available slot. Both this
+  // drain and the new request's admission share the same database transaction.
+  const drained = await drainVisitorQueue(ctx);
+  const remainingTransitions = VISITOR_QUEUE_BATCH_SIZE - drained.promoted.length - drained.terminated.length;
+  const activeAgent = await ctx.db.query('visitLedger').withIndex('agentGlobalId', q => q.eq('agentGlobalId', message.agentGlobalId!)).take(1001);
+  const snapshot = await visitorAdmissionSnapshot(ctx);
+  const queuePolicy = await configuredVisitorQueue(ctx.db);
+  const waiting = await queuedHostVisits(ctx.db);
   const connection = await session(ctx, remote.townId);
   let refusal: string | undefined;
-  if (!local.enabled || local.mode !== 'ACTIVE' || !remote.inboundVisitsAllowed || !ready(connection) || connection!.localDeploymentEpoch !== local.deploymentEpoch || connection!.verifiedPeerDeploymentEpoch !== remote.deploymentEpoch) refusal = 'VISITS_NOT_ALLOWED';
-  else if (activeAgent.some(l => !TERMINAL.has(l.state))) refusal = 'AGENT_ALREADY_PRESENT';
+  if (!local.enabled || local.mode !== 'ACTIVE' || remote.trustState !== 'TRUSTED' || !remote.inboundVisitsAllowed || !ready(connection) || connection!.localDeploymentEpoch !== local.deploymentEpoch || connection!.verifiedPeerDeploymentEpoch !== remote.deploymentEpoch) refusal = 'VISITS_NOT_ALLOWED';
+  else if (activeAgent.length > 1000 || activeAgent.some(l => !TERMINAL.has(l.state))) refusal = 'AGENT_ALREADY_PRESENT';
   else if (activeAgent.some(l => l.agentAuthorityEpoch >= message.agentAuthorityEpoch!)) refusal = 'STALE_AGENT_AUTHORITY';
-  else if (occupiedSlots >= local.maxVisitors) refusal = 'HOST_CAPACITY_EXCEEDED';
-  else if (reservedSlots >= limits.maxVisitReservations) refusal = 'HOST_RESERVATION_CAPACITY_EXCEEDED';
-  else if (sourceQuota !== null && sourceSlots >= sourceQuota) refusal = 'HOST_SOURCE_QUOTA_EXCEEDED';
-  else if (pending >= limits.maxPendingDecisions || chatQueueFull || !limits.maxConcurrentLocalLLM) refusal = 'HOST_RESOURCE_DEGRADED';
-  const state = refusal ? 'REJECTED' : 'RESERVED';
+  else refusal = sourceAdmissionReason(snapshot, message.fromTownId);
+  const retryable = !refusal || ['HOST_CAPACITY_EXCEEDED', 'HOST_RESERVATION_CAPACITY_EXCEEDED',
+    'HOST_SOURCE_QUOTA_EXCEEDED', 'HOST_RESOURCE_DEGRADED'].includes(refusal);
+  const allowQueue = payload.allowQueue === true && payload.queueProtocolVersion === 1;
+  let queued = false;
+  // New eligible visitors also join the existing fair ordering while candidates
+  // remain. Opting out of waiting never permits jumping an older candidate.
+  if (retryable && queuePolicy.enabled && (refusal || waiting.length)) {
+    if (!allowQueue) refusal ??= 'HOST_VISITOR_QUEUE_PENDING';
+    else if (waiting.length >= queuePolicy.maxQueuedVisits || waiting.length >= 1000) refusal = 'VISITOR_QUEUE_FULL';
+    else if (queuePolicy.maxQueuedVisitsPerSourceTown !== null &&
+      waiting.filter(row => row.homeTownId === message.fromTownId).length >= queuePolicy.maxQueuedVisitsPerSourceTown) refusal = 'VISITOR_SOURCE_QUEUE_FULL';
+    else queued = true;
+  }
+  const state = queued ? 'QUEUED' : refusal ? 'REJECTED' : 'RESERVED';
   const id = await ctx.db.insert('visitLedger', { visitId: message.visitId!, agentGlobalId: message.agentGlobalId!, homeTownId: message.fromTownId, hostTownId: local.townId,
     homeDeploymentEpoch: message.senderDeploymentEpoch, hostDeploymentEpoch: message.expectedRecipientDeploymentEpoch,
     agentAuthorityEpoch: message.agentAuthorityEpoch!, visitLeaseVersion: 1, leaseExpiry: payload.leaseExpiry, fencingToken: payload.fencingToken,
-    role: 'host', state, profile: payload.profile, createdAt: now, updatedAt: now, cleanupConfirmed: !!refusal, ...(refusal ? { lastError: refusal } : {}) });
+    role: 'host', state, allowQueue, profile: payload.profile, createdAt: now, updatedAt: now, cleanupConfirmed: state === 'REJECTED',
+    ...(queued ? { queuedAt: now, queueExpiresAt: Math.min(now + queuePolicy.visitQueueTtlMs, payload.leaseExpiry),
+      queueReason: refusal ?? 'HOST_VISITOR_QUEUE_PENDING', queuePaused: false } : refusal ? { lastError: refusal } : {}) });
   const ledger = (await ctx.db.get(id))!;
-  if (refusal) await sendLifecycle(ctx, ledger, 'VISIT_REJECT', { reason: refusal });
-  else {
-    await ctx.db.insert('visitReservations', { visitId: ledger.visitId, hostTownId: local.townId, reservedSlot: true, expiresAt: Math.min(now + RESERVATION_MS, ledger.leaseExpiry) });
-    await sendLifecycle(ctx, ledger, 'VISIT_RESERVED', { reservedUntil: Math.min(now + RESERVATION_MS, ledger.leaseExpiry), leaseExpiry: ledger.leaseExpiry });
-  }
+  if (queued) {
+    await sendLifecycle(ctx, ledger, 'VISIT_QUEUED', {
+      queueProtocolVersion: 1, queuedAt: ledger.queuedAt, queueExpiresAt: ledger.queueExpiresAt, queueReason: ledger.queueReason,
+    });
+    await drainVisitorQueue(ctx, remainingTransitions);
+  } else if (refusal) await sendLifecycle(ctx, ledger, 'VISIT_REJECT', { reason: refusal });
+  else await reserveHostVisit(ctx, ledger);
 }
 
 export async function dispatchLedgerMessage(ctx: MutationCtx, message: FederationMessage) {
   if (message.type === 'VISIT_RESERVE') { await receiveReserve(ctx, message); return; }
   const ledger = await assertVisitAuthority(ctx, message);
   switch (message.type) {
+    case 'VISIT_QUEUED': {
+      if (ledger.role !== 'home') throw new Error('INVALID_VISIT_DIRECTION');
+      if (!['REQUESTED', 'QUEUED'].includes(ledger.state)) return;
+      const payload = message.payload;
+      if (!ledger.allowQueue || payload.queueProtocolVersion !== 1 ||
+        !Number.isSafeInteger(payload.queuedAt) || !Number.isSafeInteger(payload.queueExpiresAt) ||
+        payload.queuedAt > Date.now() + 30_000 || payload.queueExpiresAt <= payload.queuedAt ||
+        payload.queueExpiresAt > ledger.leaseExpiry || typeof payload.queueReason !== 'string' || payload.queueReason.length > 1000)
+        throw new Error('INVALID_QUEUE_CONFIRMATION');
+      if (payload.queueExpiresAt <= Date.now()) { await beginReturn(ctx, ledger, 'VISITOR_QUEUE_EXPIRED'); return; }
+      // A duplicate notification cannot renew the waiting authorization or reorder it.
+      if (ledger.state === 'QUEUED' && (ledger.queuedAt !== payload.queuedAt || ledger.queueExpiresAt !== payload.queueExpiresAt))
+        throw new Error('QUEUE_CONFIRMATION_CONFLICT');
+      await ctx.db.patch(ledger._id, { state: 'QUEUED', queuedAt: payload.queuedAt,
+        queueExpiresAt: payload.queueExpiresAt, queueReason: payload.queueReason, updatedAt: Date.now() });
+      return;
+    }
     case 'VISIT_RESERVED':
       if (ledger.role !== 'home') throw new Error('INVALID_VISIT_DIRECTION');
-      if (ledger.state !== 'REQUESTED') return;
-      if (message.payload.reservedUntil <= Date.now() || message.payload.leaseExpiry !== ledger.leaseExpiry) { await beginReturn(ctx, ledger, 'RESERVATION_EXPIRED'); return; }
+      if (!['REQUESTED', 'QUEUED'].includes(ledger.state)) return;
+      if (!Number.isFinite(message.payload.reservedUntil) || message.payload.reservedUntil <= Date.now() ||
+        message.payload.reservedUntil > ledger.leaseExpiry || message.payload.leaseExpiry !== ledger.leaseExpiry) { await beginReturn(ctx, ledger, 'RESERVATION_EXPIRED'); return; }
+      {
+        const reason = await homeDepartureReason(ctx, ledger);
+        if (reason) { await beginReturn(ctx, ledger, reason); return; }
+      }
       await ctx.db.patch(ledger._id, { state: 'FREEZING', updatedAt: Date.now() });
       await runtimeJob(ctx, 'freezeHome', ledger.visitId); return;
     case 'VISIT_CONFIRM': {
@@ -206,7 +281,7 @@ export async function dispatchLedgerMessage(ctx: MutationCtx, message: Federatio
     case 'VISIT_REJECT':
       if (ledger.role !== 'home') throw new Error('INVALID_VISIT_DIRECTION');
       if (TERMINAL.has(ledger.state)) return;
-      if (ledger.state !== 'REQUESTED') throw new Error('INVALID_REJECTION_STATE');
+      if (!['REQUESTED', 'QUEUED', 'RETURN_PENDING'].includes(ledger.state)) throw new Error('INVALID_REJECTION_STATE');
       await ctx.db.patch(ledger._id, { cleanupConfirmed: true, state: 'RETURN_PENDING', updatedAt: Date.now(), lastError: String(message.payload.reason ?? 'HOST_REJECTED') });
       await runtimeJob(ctx, 'resumeHome', ledger.visitId); return;
     case 'VISIT_RETURN':
@@ -214,7 +289,8 @@ export async function dispatchLedgerMessage(ctx: MutationCtx, message: Federatio
     case 'VISIT_CLEANED':
       if (ledger.role !== 'home') throw new Error('INVALID_VISIT_DIRECTION');
       if (!TERMINAL.has(ledger.state)) {
-        await ctx.db.patch(ledger._id, { cleanupConfirmed: true, state: 'RETURN_PENDING', updatedAt: Date.now() });
+        await ctx.db.patch(ledger._id, { cleanupConfirmed: true, state: 'RETURN_PENDING', updatedAt: Date.now(),
+          ...(typeof message.payload.reason === 'string' ? { lastError: message.payload.reason.slice(0, 1000) } : {}) });
         await runtimeJob(ctx, 'resumeHome', ledger.visitId);
       } return;
     case 'VISIT_RENEW': {
@@ -229,10 +305,29 @@ export async function dispatchLedgerMessage(ctx: MutationCtx, message: Federatio
     default: throw new Error('UNKNOWN_VISIT_MESSAGE');
   }
 }
+
+async function homeDepartureReason(ctx: MutationCtx, ledger: Doc<'visitLedger'>) {
+  const now = Date.now(), local = await identity(ctx), remote = await peer(ctx, ledger.hostTownId), connection = await session(ctx, ledger.hostTownId);
+  if ((ledger.queueExpiresAt ?? Infinity) <= now) return 'VISITOR_QUEUE_EXPIRED';
+  if (!local?.enabled || local.mode !== 'ACTIVE' || local.deploymentEpoch !== ledger.homeDeploymentEpoch ||
+    remote?.trustState !== 'TRUSTED' || !remote.outboundVisitsAllowed || remote.deploymentEpoch !== ledger.hostDeploymentEpoch ||
+    !ready(connection, now) || connection!.localDeploymentEpoch !== local.deploymentEpoch || connection!.verifiedPeerDeploymentEpoch !== remote.deploymentEpoch)
+    return 'TRAVEL_AUTHORIZATION_CHANGED';
+  const conflict = await ctx.db.query('federationIdentityConflicts').withIndex('state', q => q.eq('state', 'OPEN')).first();
+  if (conflict) return 'TOWN_CLONE_CONFLICT';
+  if (ledger.requestOrigin === 'autonomous') {
+    const policy = await ctx.db.query('autonomousTravelPolicies').withIndex('resident', q => q.eq('agentGlobalId', ledger.agentGlobalId)).unique();
+    if (!policy?.enabled || policy.revision !== ledger.autonomousPolicyRevision || !policy.allowedPeerTownIds.includes(ledger.hostTownId))
+      return 'TRAVEL_AUTHORIZATION_CHANGED';
+  }
+  return undefined;
+}
 export async function homeFrozen(ctx: MutationCtx, visitId: string) {
   const ledger = await visit(ctx, visitId); if (!ledger || ledger.role !== 'home') throw new Error('INVALID_HOME_VISIT');
   if (ledger.state !== 'FREEZING') return;
   if (ledger.leaseExpiry <= Date.now()) { await beginReturn(ctx, ledger, 'LEASE_EXPIRED'); return; }
+  const reason = await homeDepartureReason(ctx, ledger);
+  if (reason) { await beginReturn(ctx, ledger, reason); return; }
   await ctx.db.patch(ledger._id, { state: 'CONFIRMING', updatedAt: Date.now() });
   await sendLifecycle(ctx, ledger, 'VISIT_CONFIRM');
 }
@@ -256,6 +351,7 @@ export async function hostRemoved(ctx: MutationCtx, visitId: string) {
   await releaseSlot(ctx, visitId);
   const remote = await peer(ctx, ledger.homeTownId);
   if (remote) await sendLifecycle(ctx, ledger, 'VISIT_CLEANED');
+  await drainVisitorQueue(ctx);
 }
 export async function homeResumed(ctx: MutationCtx, visitId: string) {
   const ledger = await visit(ctx, visitId); if (!ledger || ledger.role !== 'home') throw new Error('INVALID_HOME_VISIT');
@@ -267,15 +363,18 @@ export const reconcile = internalMutation({ args: {}, handler: async ctx => {
   const now = Date.now(), ledgers = await ctx.db.query('visitLedger').collect();
   for (const ledger of ledgers.filter(l => !TERMINAL.has(l.state))) {
     if (ledger.role === 'host') {
+      if (ledger.state === 'QUEUED') continue; // The bounded queue worker owns expiry and authority checks.
       const slot = await reservation(ctx, ledger.visitId);
       if (ledger.leaseExpiry <= now || ledger.state === 'RESERVED' && (!slot || slot.expiresAt <= now)) await beginReturn(ctx, ledger, 'LEASE_EXPIRED');
       else if (ledger.state === 'CREATING') await runtimeJob(ctx, 'createHostPresence', ledger.visitId);
       else if (ledger.state === 'REMOVING') await runtimeJob(ctx, 'removeHostPresence', ledger.visitId);
     } else if (ledger.state === 'RETURN_PENDING') {
       if (ledger.cleanupConfirmed || ledger.leaseExpiry + LEASE_SAFETY_MS <= now) await runtimeJob(ctx, 'resumeHome', ledger.visitId);
-    } else if (ledger.leaseExpiry <= now) await beginReturn(ctx, ledger, 'LEASE_EXPIRED');
+    } else if (ledger.state === 'QUEUED' && (ledger.queueExpiresAt ?? 0) <= now) await beginReturn(ctx, ledger, 'VISITOR_QUEUE_EXPIRED');
+    else if (ledger.leaseExpiry <= now) await beginReturn(ctx, ledger, 'LEASE_EXPIRED');
     else if (ledger.state === 'FREEZING') await runtimeJob(ctx, 'freezeHome', ledger.visitId);
     else if (ledger.state === 'CONFIRMING' && now - ledger.updatedAt > RESERVATION_MS) await beginReturn(ctx, ledger, 'CONFIRM_TIMEOUT');
     // REQUESTED is bounded by its lease; Outbox retries survive process restarts.
   }
+  await drainVisitorQueue(ctx);
 } });

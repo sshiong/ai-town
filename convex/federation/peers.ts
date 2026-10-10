@@ -6,6 +6,7 @@ import { actionRef, mutationRef, queryRef } from './refs';
 import { directRequest, readRequest } from './direct';
 import { identity, peer, session } from './store';
 import { assertNoIdentityConflict, observeSignedIdentity } from './identityConflict';
+import { beginReturn } from './ledger';
 import { retireCredentialRotations } from './peerCredentialRotation';
 
 const pairById = async (ctx: any, requestId: string) => ctx.db.query('pairRequests').withIndex('requestId', (q: any) => q.eq('pairRequestId', requestId)).unique();
@@ -198,6 +199,7 @@ export const setPolicy = mutation({ args: { adminToken: v.string(), peerTownId: 
   if (args.trustState === 'REVOKED') await retireCredentialRotations(ctx, remote.townId);
   await ctx.db.patch(remote._id, { inboundVisitsAllowed: args.inboundVisitsAllowed, outboundVisitsAllowed: args.outboundVisitsAllowed, trustState: args.trustState });
   const transport = await session(ctx, remote.townId); if (transport) await ctx.db.patch(transport._id, { channelState: 'TRANSPORT_TESTING', inboundVerifiedAt: undefined, outboundVerifiedAt: undefined });
+  await reconcilePendingPeerVisitsImpl(ctx, remote.townId);
 } });
 export const updateEndpoint = action({
   args: { adminToken: v.string(), peerTownId: v.string(), endpoint: v.string(), operator: v.optional(v.string()), reason: v.optional(v.string()) },
@@ -270,3 +272,32 @@ export function registerPairingRoutes(http: import('convex/server').HttpRouter) 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 }
+
+
+async function reconcilePendingPeerVisitsImpl(ctx: import('../maintenanceFunctions').MutationCtx, peerTownId: string) {
+  const remote = await peer(ctx, peerTownId);
+  if (!remote) return;
+  // Each lifecycle notification scans the bounded Outbox. All roles and states
+  // share one transaction budget, including the mixed Home/Host revoke case.
+  let remaining = 16;
+  if (remote.trustState === 'REVOKED') {
+    const host = await ctx.db.query('visitLedger').withIndex('role_source_state_queued',
+      q => q.eq('role', 'host').eq('homeTownId', peerTownId).eq('state', 'QUEUED')).take(remaining);
+    for (const row of host) await beginReturn(ctx, row, 'PEER_TRUST_REVOKED');
+    remaining -= host.length;
+  }
+  if (remote.trustState === 'REVOKED' || !remote.outboundVisitsAllowed) {
+    for (const state of ['REQUESTED', 'QUEUED']) {
+      if (!remaining) break;
+      const home = await ctx.db.query('visitLedger').withIndex('role_host_state',
+        q => q.eq('role', 'home').eq('hostTownId', peerTownId).eq('state', state)).take(remaining);
+      for (const row of home) await beginReturn(ctx, row, 'OUTBOUND_VISITS_NOT_ALLOWED');
+      remaining -= home.length;
+    }
+  }
+  if (!remaining) await ctx.scheduler.runAfter(0, mutationRef('peers/reconcilePendingPeerVisits'), { peerTownId });
+}
+export const reconcilePendingPeerVisits = internalMutation({
+  args: { peerTownId: v.string() },
+  handler: async (ctx, args) => reconcilePendingPeerVisitsImpl(ctx, args.peerTownId),
+});

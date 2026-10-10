@@ -1,6 +1,8 @@
 import {
   adminErrorSummary,
   canResumeRestoredResident,
+  canManageQueuedVisit,
+  deadlineRemaining,
   isOpenVisit,
   isReadyDestination,
   readBackupFile,
@@ -58,10 +60,37 @@ describe('federation UI operation gates', () => {
     expect(isReadyDestination({ ...ready, readinessExpiresAt: 0 }, 1000)).toBe(false);
   });
   test('includes reservations and cleanup in occupied capacity, but releases completed/rejected visits', () => {
-    for (const state of ['REQUESTED', 'RESERVED', 'ACTIVE', 'RETURN_PENDING', 'REMOVING'])
+    for (const state of ['REQUESTED', 'QUEUED', 'RESERVED', 'ACTIVE', 'RETURN_PENDING', 'REMOVING'])
       expect(isOpenVisit(state)).toBe(true);
     expect(isOpenVisit('COMPLETED')).toBe(false);
     expect(isOpenVisit('REJECTED')).toBe(false);
+  });
+  test('queued controls follow deadlines and pauses without preventing expired rejection', () => {
+    const visit = { state: 'QUEUED', queueExpiresAt: 2000, queuePaused: false };
+    expect(canManageQueuedVisit(visit, 'PROMOTE', 1999)).toBe(true);
+    expect(canManageQueuedVisit(visit, 'PAUSE', 1999)).toBe(true);
+    expect(canManageQueuedVisit(visit, 'RESUME', 1999)).toBe(false);
+    expect(canManageQueuedVisit({ ...visit, queuePaused: true }, 'PROMOTE', 1999)).toBe(false);
+    expect(canManageQueuedVisit({ ...visit, queuePaused: true }, 'RESUME', 1999)).toBe(true);
+    expect(canManageQueuedVisit(visit, 'PROMOTE', 2000)).toBe(false);
+    expect(canManageQueuedVisit(visit, 'REJECT', 2000)).toBe(true);
+    expect(canManageQueuedVisit({ state: 'QUEUED' }, 'PROMOTE', 1000)).toBe(false);
+    for (const state of ['RESERVED', 'ACTIVE', 'REJECTED', 'COMPLETED'])
+      for (const operation of ['PAUSE', 'RESUME', 'REJECT', 'PROMOTE'] as const)
+        expect(canManageQueuedVisit({ ...visit, state }, operation, 1000)).toBe(false);
+  });
+  test('waiting countdown reports exact expiry, remaining seconds and unavailable deadlines', () => {
+    expect(deadlineRemaining(61000, 0)).toBe('1m 1s remaining');
+    expect(deadlineRemaining(1001, 1000)).toBe('1s remaining');
+    expect(deadlineRemaining(1000, 1000)).toBe('Expired');
+    expect(deadlineRemaining(1000, 2000)).toBe('Expired');
+    expect(deadlineRemaining(undefined, 0)).toBe('Not reported');
+    expect(deadlineRemaining(NaN, 0)).toBe('Not reported');
+  });
+  test('explains queue refusal without presenting admission as guaranteed', () => {
+    expect(adminErrorSummary('HOST_CAPACITY_EXCEEDED')).toContain('no visitor place');
+    expect(adminErrorSummary('VISITOR_QUEUE_EXPIRED')).toContain('without departure');
+    expect(adminErrorSummary('VISITOR_SOURCE_QUEUE_FULL')).toContain('source town');
   });
   test('rejects an oversized package before reading it', async () => {
     const text = jest.fn(() => Promise.resolve('{}'));

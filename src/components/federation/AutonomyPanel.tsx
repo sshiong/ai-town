@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
+import { makeFunctionReference, type FunctionArgs, type FunctionReturnType } from 'convex/server';
 import { api } from '../../../convex/_generated/api';
 import {
   AdminButton,
@@ -9,6 +10,10 @@ import {
   formatTime,
   useAdminTask,
 } from './AdminShared';
+
+const configureRef = makeFunctionReference<'mutation',
+  FunctionArgs<typeof api.federation.autonomy.configure> & { allowQueue?: boolean },
+  FunctionReturnType<typeof api.federation.autonomy.configure>>('federation/autonomy:configure');
 
 export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
   const convex = useConvex();
@@ -62,10 +67,11 @@ export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
               void task.run(
                 'Saving autonomous travel authorization',
                 () =>
-                  convex.mutation(api.federation.autonomy.configure, {
+                  convex.mutation(configureRef, {
                     adminToken,
                     agentGlobalId: resident.agentGlobalId,
                     enabled: values.get('enabled') === 'on',
+                    allowQueue: values.get('allowQueue') === 'on',
                     allowedPeerTownIds: values.getAll('destination').map(String),
                     decisionIntervalMs: Number(values.get('interval')) * 60_000,
                     dailyRequestLimit: Number(values.get('limit')),
@@ -79,6 +85,10 @@ export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
             <label className="admin-check">
               <input type="checkbox" name="enabled" defaultChecked={policy?.enabled ?? false} />
               Allow this resident to consider autonomous travel
+            </label>
+            <label className="admin-check">
+              <input type="checkbox" name="allowQueue" defaultChecked={policy?.allowQueue ?? false} disabled={!!task.pending} />
+              Allow this resident to wait for admission during autonomous travel
             </label>
             <fieldset>
               <legend>Authorized destinations</legend>
@@ -121,8 +131,10 @@ export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
             </Field>
             <p className="admin-muted">
               The request quota includes manual requests and refused requests. Offline or revoked
-              destinations are never selected. Turning this off prevents new autonomous requests;
-              visits already underway retain their normal return path.
+              destinations are never selected. Waiting consumes the existing travel authorization
+              and does not trigger another model decision. Saving an authorization change cancels
+              autonomous requests that have not departed, including waiting requests. Manual
+              requests and visits already underway retain their normal return path.
             </p>
             <Field label="Operator">
               <input name="operator" maxLength={120} required />

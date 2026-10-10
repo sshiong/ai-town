@@ -7,6 +7,7 @@ import { normalizeEndpoint } from './protocol';
 import { actionRef, mutationRef } from './refs';
 import { resourceLimits, validateResourceLimits, configuredResourceLimits, pendingDecisionCount } from './resources';
 import { remoteEventRate, resourceMeasurements, sourceVisitorQuota } from './resourceMonitoring';
+import { visitorQueueSummary } from './visitorQueue';
 import { commitLocalEndpoint } from './endpoints';
 export const configureResources = mutation({
   args: { adminToken: v.string(), limits: resourceLimits },
@@ -164,6 +165,7 @@ export const status = query({
     return {
       resources: {
         limits, admissionState,
+        visitorQueue: await visitorQueueSummary(ctx.db),
         residents: worlds.reduce((count, world) => count + world.agents.length, 0),
         humans: worlds.reduce((count, world) => count + world.players.filter(p => p.human).length, 0),
         reservations, pendingDecisions, pendingLocalLLM: pendingChat.length, runningLocalLLM: runningChat.length,
@@ -272,6 +274,7 @@ export const status = query({
           agentAuthorityEpoch,
           visitLeaseVersion,
           lastError,
+          queuedAt, queueExpiresAt, queueReason, queuePaused, allowQueue, requestOrigin, autonomousPolicyRevision,
         }) => ({
           visitId,
           agentGlobalId,
@@ -283,6 +286,7 @@ export const status = query({
           agentAuthorityEpoch,
           visitLeaseVersion,
           lastError,
+          queuedAt, queueExpiresAt, queueReason, queuePaused, allowQueue, requestOrigin, autonomousPolicyRevision,
         }),
       ),
     };

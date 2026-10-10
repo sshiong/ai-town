@@ -19,14 +19,8 @@ import {
   sourceQueueLimit,
 } from './chatScheduling';
 
-export const resourceLimits = v.object({
-  maxResidentAgents: v.number(),
-  maxHumanPlayers: v.number(),
-  maxVisitReservations: v.number(),
-  maxConcurrentLocalLLM: v.number(),
-  maxPendingDecisions: v.number(),
-  maxPendingLocalLLM: v.number(),
-});
+import { resourceLimits } from './resourceValidators';
+export { resourceLimits } from './resourceValidators';
 export type ResourceLimits = Infer<typeof resourceLimits>;
 export const DEFAULT_RESOURCE_LIMITS: ResourceLimits = {
   maxResidentAgents: 100,

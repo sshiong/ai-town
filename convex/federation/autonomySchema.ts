@@ -8,6 +8,7 @@ export const autonomyTables = {
     worldId: v.id('worlds'),
     playerId,
     enabled: v.boolean(),
+    allowQueue: v.optional(v.boolean()),
     allowedPeerTownIds: v.array(v.string()),
     decisionIntervalMs: v.number(),
     dailyRequestLimit: v.number(),

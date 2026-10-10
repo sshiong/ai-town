@@ -19,6 +19,27 @@ export function isOpenVisit(state: string) {
   return !['COMPLETED', 'REJECTED'].includes(state);
 }
 
+export type QueuedVisitOperation = 'PAUSE' | 'RESUME' | 'REJECT' | 'PROMOTE';
+
+export function canManageQueuedVisit(
+  visit: { state: string; queuePaused?: boolean; queueExpiresAt?: number },
+  operation: QueuedVisitOperation,
+  now: number,
+) {
+  if (visit.state !== 'QUEUED') return false;
+  if (operation === 'REJECT') return true;
+  if (!Number.isFinite(visit.queueExpiresAt) || visit.queueExpiresAt! <= now) return false;
+  return operation === 'RESUME' ? visit.queuePaused === true : !visit.queuePaused;
+}
+
+export function deadlineRemaining(expiresAt: number | undefined, now: number) {
+  if (expiresAt === undefined || !Number.isFinite(expiresAt)) return 'Not reported';
+  const seconds = Math.max(0, Math.ceil((expiresAt - now) / 1000));
+  if (seconds === 0) return 'Expired';
+  if (seconds < 60) return `${seconds}s remaining`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s remaining`;
+}
+
 export function requiresStoppedSource(mode: string) {
   return mode === 'restore' || mode === 'migrate';
 }
@@ -53,6 +74,21 @@ export function adminErrorSummary(message: string) {
     LOCAL_LLM_QUEUE_TIMEOUT: 'This model request could not start within the queue wait limit.',
     CHAT_REQUEST_DEADLINE: 'The model request exceeded its overall deadline.',
     DECISION_QUEUE_FULL: 'The pending visitor decision limit has been reached.',
+    VISITOR_QUEUE_DISABLED: 'This host is not accepting new waiting requests. Existing visits keep their normal return path.',
+    VISITOR_QUEUE_FULL: 'The visitor waiting queue is full. Try a new visit after this request finishes.',
+    VISITOR_SOURCE_QUEUE_FULL: 'This source town has reached its waiting limit.',
+    VISITOR_NOT_QUEUED: 'This request is no longer waiting. Review its latest ledger state.',
+    VISITOR_QUEUE_EXPIRED: 'The waiting deadline has passed. The request will finish without departure.',
+    INVALID_VISITOR_QUEUE_POLICY: 'Use 1–1000 waiting requests, a 1–3600 second deadline, and a blank or 0–1000 source waiting cap.',
+    HOST_VISITOR_QUEUE_PENDING: 'Earlier waiting requests are considered first. Admission follows the host queue order.',
+    ADMIN_QUEUE_REJECTED: 'The host administrator rejected this waiting request.',
+    HOST_QUEUE_DISABLED: 'The host disabled waiting. This request is ending without departure.',
+    VISITOR_QUEUE_DEPLOYMENT_FENCED: 'A town deployment changed while this request waited. Start a new visit after verifying the connection.',
+    VISITOR_QUEUE_PEER_REVOKED: 'The source connection was revoked. The waiting request is ending.',
+    HOST_CAPACITY_EXCEEDED: 'The host has no visitor place available yet.',
+    HOST_RESERVATION_CAPACITY_EXCEEDED: 'The host has no reservation available yet.',
+    HOST_SOURCE_QUOTA_EXCEEDED: 'This source town has reached the host visitor quota.',
+    HOST_RESOURCE_DEGRADED: 'The host has paused new admission while its resources recover.',
     ADMIN_UNAUTHORIZED: "Administrator access was rejected. Check this deployment's admin token.",
     DRAIN_TARGET_WORK_BEFORE_RESIDENT_RESTORE:
       'Wait for model requests and resident operations to finish, and drain the target input queue before restoring this resident.',

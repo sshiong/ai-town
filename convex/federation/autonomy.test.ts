@@ -22,6 +22,7 @@ const playerId = 'p:0' as GameId<'players'>;
 const agentId = 'a:1' as GameId<'agents'>;
 const policy = {
   enabled: true,
+  allowQueue: false,
   allowedPeerTownIds: ['host'],
   decisionIntervalMs: 60_000,
   dailyRequestLimit: 2,
@@ -386,4 +387,48 @@ test('a zero decision budget preserves local activity without creating an autono
   );
   expect(await t.mutation(internal.federation.autonomy.claim, operation)).toBeNull();
   expect(await t.run((ctx) => ctx.db.query('autonomousTravelDecisions').collect())).toEqual([]);
+});
+
+
+test.each(['REQUESTED', 'QUEUED'])(
+  'changing autonomous authorization cancels an already issued %s without releasing authority early', async state => {
+    const { t, configure, operation } = await setup();
+    await configure({ allowQueue: true });
+    const job = await t.mutation(internal.federation.autonomy.claim, operation);
+    await t.mutation(internal.federation.autonomy.finish, {
+      jobId: job!.jobId, choice: '{"type":"visit","townId":"host","reason":"Meet a neighbor."}',
+    });
+    const issued = (await t.run(ctx => ctx.db.query('visitLedger').unique()))!;
+    expect(issued).toMatchObject({ requestOrigin: 'autonomous', autonomousPolicyRevision: 1, allowQueue: true });
+    const packet = (await t.run(ctx => ctx.db.query('federationOutbox').unique()))!;
+    expect(packet.envelope.payload).toMatchObject({ allowQueue: true, queueProtocolVersion: 1 });
+    if (state === 'QUEUED') await t.run(ctx => ctx.db.patch(issued._id, {
+      state, queuedAt: Date.now(), queueExpiresAt: Date.now() + 30000, queueReason: 'HOST_CAPACITY_EXCEEDED',
+    }));
+    await configure({ enabled: false });
+    const cancelled = (await t.run(ctx => ctx.db.get(issued._id)))!;
+    expect(cancelled).toMatchObject({ state: 'RETURN_PENDING', lastError: 'AUTONOMOUS_AUTHORIZATION_CHANGED' });
+    expect(cancelled.leaseExpiry).toBe(issued.leaseExpiry);
+    expect((await t.run(ctx => ctx.db.query('federationAgentRuntimes').unique()))!.state).toBe('TRAVEL_PREPARING');
+    const messages = await t.run(ctx => ctx.db.query('federationOutbox').collect());
+    expect(messages.map(m => m.envelope.type)).toEqual(['VISIT_RESERVE', 'VISIT_RETURN']);
+    await configure({ enabled: false });
+    expect(await t.run(ctx => ctx.db.query('federationOutbox').collect())).toHaveLength(2);
+  },
+);
+test('autonomous policy changes retain manually authorized waiting visits', async () => {
+  const { t, configure, operation } = await setup();
+  await configure({ allowQueue: true });
+  const job = await t.mutation(internal.federation.autonomy.claim, operation);
+  await t.mutation(internal.federation.autonomy.finish, {
+    jobId: job!.jobId, choice: '{"type":"visit","townId":"host","reason":"Meet a neighbor."}',
+  });
+  const issued = (await t.run(ctx => ctx.db.query('visitLedger').unique()))!;
+  await t.run(ctx => ctx.db.patch(issued._id, {
+    requestOrigin: 'manual', autonomousPolicyRevision: undefined, state: 'QUEUED',
+    queuedAt: Date.now(), queueExpiresAt: Date.now() + 30000,
+  }));
+  await configure({ enabled: false });
+  expect((await t.run(ctx => ctx.db.get(issued._id)))!.state).toBe('QUEUED');
+  expect(await t.run(ctx => ctx.db.query('federationOutbox').collect())).toHaveLength(1);
 });

@@ -6,6 +6,7 @@ import ConflictPanel from './ConflictPanel';
 import EndpointHistory from './EndpointHistory';
 import CredentialRotationPanel from './CredentialRotationPanel';
 import IdentityKeyRotationPanel from './IdentityKeyRotationPanel';
+import VisitorQueuePanel from './VisitorQueuePanel';
 import {
   AdminButton,
   EmptyState,
@@ -219,6 +220,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
             </form>
             {data.resources && (
               <>
+                <VisitorQueuePanel adminToken={adminToken} configurationOnly />
                 <h3>Town capacity</h3>
                 <p className="admin-muted">
                   Admission: <strong>{data.resources.admissionState}</strong> ·{' '}

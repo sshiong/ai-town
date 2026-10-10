@@ -7,15 +7,17 @@ import { tickRemoteVisitor } from './remoteTick';
 import { Id } from '../_generated/dataModel';
 import { DEFAULT_RESOURCE_LIMITS, ResourceLimits, residentChatCompletion } from './resources';
 import { mutationRef, queryRef } from './refs';
-import { dispatchLedgerMessage } from './ledger';
+import { dispatchLedgerMessage, homeResumed } from './ledger';
 import { dispatchRuntimeMessage } from './runtime';
 import { FederationMessage, PROTOCOL } from './protocol';
+import { validateResourcePolicy } from './backupHelpers';
 import { consumeRemoteEventBudget } from './resourceMonitoring';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/resources.ts': () => import('./resources'),
   '../federation/resourceMonitoring.ts': () => import('./resourceMonitoring'),
+  '../federation/peers.ts': () => import('./peers'),
   '../federation/admin.ts': () => import('./admin'),
   '../federation/decision.ts': () => import('./decision'),
   '../federation/transport.ts': () => import('./transport'),
@@ -752,4 +754,191 @@ test('only unique durably accepted inbound events are measured and failed transa
   await expect(t.mutation(mutationRef('transport/acceptMessage'), { message: invalid, payloadDigest: 'invalid' })).rejects.toThrow('SENDER_DEPLOYMENT_MISMATCH');
   expect((await t.query(queryRef('admin/status'), { adminToken })).resources.measurements.inboundEvents).toBe(1);
   expect(status.resources.cpu).toBeNull(); expect(status.resources.memory).toBeNull();
+});
+
+
+const queuePolicy = {
+  adminToken, enabled: true, maxQueuedVisits: 50, visitQueueTtlMs: 120000,
+  mode: 'SOURCE_ROUND_ROBIN' as const, maxQueuedVisitsPerSourceTown: null,
+};
+test('visitor queue configuration is validated, audited and preserves unrelated source/event budgets', async () => {
+  const { t } = await setup();
+  await t.mutation(mutationRef('resourceMonitoring/configureSourceQuota'), { adminToken, maxVisitorsPerSourceTown: 3 });
+  await t.mutation(mutationRef('resourceMonitoring/configureRemoteEventRate'), { adminToken, maxRemoteEventsPerSecond: 4 });
+  await t.run(ctx => consumeRemoteEventBudget(ctx, 'VISIT_RESERVE'));
+  const budget = await t.run(ctx => ctx.db.query('federationInboundBudget').unique());
+  await expect(t.mutation(mutationRef('resourceMonitoring/configureVisitorQueue'), {
+    ...queuePolicy, adminToken: 'invalid',
+  })).rejects.toThrow();
+  for (const invalid of [{ maxQueuedVisits: 0 }, { maxQueuedVisits: 1001 }, { maxQueuedVisits: 1.5 },
+    { visitQueueTtlMs: 999 }, { visitQueueTtlMs: 3600001 }, { maxQueuedVisitsPerSourceTown: -1 },
+    { maxQueuedVisitsPerSourceTown: 1001 }])
+    await expect(t.mutation(mutationRef('resourceMonitoring/configureVisitorQueue'), {
+      ...queuePolicy, ...invalid,
+    })).rejects.toThrow('INVALID_VISITOR_QUEUE_POLICY');
+  await t.mutation(mutationRef('resourceMonitoring/configureVisitorQueue'), queuePolicy);
+  const stored = (await t.run(ctx => ctx.db.query('federationResourcePolicy').unique()))!;
+  expect(stored).toMatchObject({ maxVisitorsPerSourceTown: 3, maxRemoteEventsPerSecond: 4,
+    visitorQueueEnabled: true, maxQueuedVisits: 50, visitQueueTtlMs: 120000, visitorQueueMode: 'SOURCE_ROUND_ROBIN' });
+  expect(await t.run(ctx => ctx.db.query('federationInboundBudget').unique())).toEqual(budget);
+  const audit = await t.run(ctx => ctx.db.query('federationResourceAudit').collect());
+  expect(audit.filter(a => a.operation === 'VISITOR_QUEUE_POLICY_CHANGED')).toHaveLength(1);
+  const status = await t.query(queryRef('admin/status'), { adminToken });
+  expect(status.resources.visitorQueue).toMatchObject({ enabled: true, waiting: 0, paused: 0 });
+  expect(() => validateResourcePolicy({ maxVisitorsPerSourceTown: null })).not.toThrow();
+  expect(() => validateResourcePolicy(stored)).not.toThrow();
+  for (const invalid of [{ visitorQueueEnabled: 'yes' }, { maxQueuedVisits: 0 }, { visitQueueTtlMs: Infinity },
+    { visitorQueueMode: 'anything' }, { maxQueuedVisitsPerSourceTown: -1 }, { visitorQueueLastSource: '' }])
+    expect(() => validateResourcePolicy({ maxVisitorsPerSourceTown: null, ...invalid })).toThrow('INVALID_VISITOR_QUEUE_POLICY');
+});
+async function pendingPolicyVisit(t: Awaited<ReturnType<typeof setup>>['t'], index: number, role = 'host') {
+  return t.run(ctx => ctx.db.insert('visitLedger', {
+    visitId: `policy-wait-${index}`, agentGlobalId: `home/agent:${index}`, homeTownId: role === 'host' ? 'home' : 'host',
+    hostTownId: role === 'host' ? 'host' : 'home', homeDeploymentEpoch: 1, hostDeploymentEpoch: 1,
+    agentAuthorityEpoch: 1, visitLeaseVersion: 1, leaseExpiry: Date.now() + 120000,
+    fencingToken: 'private-policy-fencing-token', role, state: 'QUEUED', profile: { name: 'Waiting resident' },
+    queuedAt: Date.now(), queueExpiresAt: Date.now() + 60000, queuePaused: false,
+    createdAt: Date.now(), updatedAt: Date.now(),
+  }));
+}
+test('disabling a visitor queue cleans a bounded batch and resumes the remaining waiting authorizations', async () => {
+  const { t } = await setup();
+  await peer(t);
+  await t.mutation(mutationRef('resourceMonitoring/configureVisitorQueue'), queuePolicy);
+  for (let i = 0; i < 35; i++) await pendingPolicyVisit(t, i);
+  await t.mutation(mutationRef('resourceMonitoring/configureVisitorQueue'), { ...queuePolicy, enabled: false });
+  await t.mutation(mutationRef('resourceMonitoring/reconcileVisitorQueuePolicy'), {});
+  const first = await t.run(ctx => ctx.db.query('visitLedger').collect());
+  expect(first.filter(l => l.state === 'QUEUED')).toHaveLength(19);
+  expect(first.filter(l => l.state === 'REJECTED' && l.cleanupConfirmed)).toHaveLength(16);
+  await t.mutation(mutationRef('resourceMonitoring/reconcileVisitorQueuePolicy'), {});
+  await t.mutation(mutationRef('resourceMonitoring/reconcileVisitorQueuePolicy'), {});
+  const done = await t.run(ctx => ctx.db.query('visitLedger').collect());
+  expect(done.every(l => l.state === 'REJECTED' && l.cleanupConfirmed)).toBe(true);
+  expect(await t.run(ctx => ctx.db.query('visitReservations').collect())).toEqual([]);
+  expect((await t.run(ctx => ctx.db.query('federationOutbox').collect())).map(m => m.envelope.type))
+    .toEqual(Array(35).fill('VISIT_CLEANED'));
+});
+test.each(['PAUSED', 'REVOKED', 'OUTBOUND_DISABLED'])(
+  'peer policy %s preserves or terminates queued requests without reviving old authority', async change => {
+    const { t } = await setup();
+    await peer(t);
+    const hostId = await pendingPolicyVisit(t, 1);
+    const homeId = await pendingPolicyVisit(t, 2, 'home');
+    await t.mutation(mutationRef('peers/setPolicy'), { adminToken, peerTownId: 'home',
+      inboundVisitsAllowed: change !== 'REVOKED', outboundVisitsAllowed: change === 'PAUSED',
+      trustState: change === 'OUTBOUND_DISABLED' ? 'TRUSTED' : change,
+    });
+    const host = await t.run(ctx => ctx.db.get(hostId)), home = await t.run(ctx => ctx.db.get(homeId));
+    expect(host!.state).toBe(change === 'REVOKED' ? 'REJECTED' : 'QUEUED');
+    expect(home!.state).toBe(change === 'PAUSED' ? 'QUEUED' : 'RETURN_PENDING');
+    if (change === 'REVOKED') expect(host!.cleanupConfirmed).toBe(true);
+    if (change !== 'PAUSED') expect(home!.cleanupConfirmed).toBeUndefined();
+  },
+);
+
+test('revoking a peer shares one 16-row budget across 47 mixed Host/Home requests and never restores old Home authority', async () => {
+  const { t } = await setup();
+  await peer(t);
+  const worldId = await world(t);
+  const original: Array<{ id: Id<'visitLedger'>; state: string; role: string }> = [];
+  for (let index = 0; index < 47; index++) {
+    const role = index < 17 ? 'host' : 'home';
+    const state = index < 32 && role === 'home' ? 'REQUESTED' : 'QUEUED';
+    const id = await pendingPolicyVisit(t, index, role);
+    await t.run(async ctx => {
+      await ctx.db.patch(id, { state, ...(role === 'home' ? {
+        agentGlobalId: `host/agent:${index}`, worldId, homePlayerId: `p:${index}`,
+      } : {}) });
+      if (role === 'home') await ctx.db.insert('federationAgentRuntimes', {
+        agentGlobalId: `host/agent:${index}`, homeTownId: 'host', worldId,
+        playerId: `p:${index}` as any, agentId: `a:${index}` as any,
+        state: 'TRAVEL_PREPARING', visitId: `policy-wait-${index}`,
+        agentAuthorityEpoch: 1, updatedAt: Date.now(),
+      });
+    });
+    original.push({ id, state, role });
+  }
+  await t.mutation(mutationRef('peers/setPolicy'), {
+    adminToken, peerTownId: 'home', inboundVisitsAllowed: false,
+    outboundVisitsAllowed: false, trustState: 'REVOKED',
+  });
+  for (const [page, processed] of [16, 32, 47].entries()) {
+    const rows = await t.run(ctx => ctx.db.query('visitLedger').collect());
+    const terminalHost = rows.filter(row => row.role === 'host' && row.state === 'REJECTED');
+    const returningHome = rows.filter(row => row.role === 'home' && row.state === 'RETURN_PENDING');
+    expect(terminalHost.length + returningHome.length).toBe(processed);
+    expect(rows).toHaveLength(47);
+    for (const item of original) {
+      const row = rows.find(row => row._id === item.id)!;
+      expect(row.agentAuthorityEpoch).toBe(1);
+      expect(row.leaseExpiry).toBeGreaterThan(Date.now());
+      expect(['QUEUED', 'REQUESTED', 'REJECTED', 'RETURN_PENDING']).toContain(row.state);
+      if (row.state === 'REJECTED') expect(row.cleanupConfirmed).toBe(true);
+      else if (row.state === 'RETURN_PENDING') expect(row.cleanupConfirmed).toBeUndefined();
+      else expect(row.state).toBe(item.state);
+    }
+    const messages = await t.run(ctx => ctx.db.query('federationOutbox').collect());
+    expect(messages).toHaveLength(processed);
+    expect(new Set(messages.map(row => row.envelope.visitId)).size).toBe(processed);
+    expect(messages.filter(row => row.envelope.type === 'VISIT_CLEANED')).toHaveLength(terminalHost.length);
+    expect(messages.filter(row => row.envelope.type === 'VISIT_RETURN')).toHaveLength(returningHome.length);
+    const jobs = await t.run(ctx => ctx.db.system.query('_scheduled_functions').collect());
+    expect(jobs.filter(job => String(job.name).includes('peers:reconcilePendingPeerVisits'))).toHaveLength(Math.min(page + 1, 2));
+    expect(jobs.some(job => String(job.name).includes('resumeHome') || String(job.name).includes('freezeHome'))).toBe(false);
+    const runtimes = await t.run(ctx => ctx.db.query('federationAgentRuntimes').collect());
+    expect(runtimes).toHaveLength(30);
+    expect(runtimes.every(row => row.state === 'TRAVEL_PREPARING' && row.visitId && row.agentAuthorityEpoch === 1)).toBe(true);
+    if (processed < 47) await t.mutation(mutationRef('peers/reconcilePendingPeerVisits'), { peerTownId: 'home' });
+  }
+  await t.mutation(mutationRef('peers/reconcilePendingPeerVisits'), { peerTownId: 'home' });
+  expect(await t.run(ctx => ctx.db.query('federationOutbox').collect())).toHaveLength(47);
+  for (const item of original.filter(item => item.role === 'home')) {
+    const row = (await t.run(ctx => ctx.db.get(item.id)))!;
+    const late = (type: string): FederationMessage => ({
+      protocol: PROTOCOL, messageId: `late-${type}-${row.visitId}`, fromTownId: 'home', toTownId: 'host',
+      senderDeploymentInstanceId: 'home-instance', senderDeploymentEpoch: 1,
+      expectedRecipientDeploymentEpoch: 1, type, sentAt: Date.now(), expiresAt: Date.now() + 10000,
+      nonce: `late-${type}-${row.visitId}`, credentialId: 'credential', visitId: row.visitId,
+      agentGlobalId: row.agentGlobalId, agentAuthorityEpoch: 1, visitLeaseVersion: 1,
+      streamId: 'lease-control', sequence: 1,
+      payload: { fencingToken: row.fencingToken, reservedUntil: Date.now() + 30000,
+        leaseExpiry: row.leaseExpiry, queueProtocolVersion: 1, queuedAt: row.queuedAt,
+        queueExpiresAt: row.queueExpiresAt, queueReason: 'HOST_CAPACITY_EXCEEDED' },
+    });
+    await t.run(ctx => dispatchLedgerMessage(ctx, late('VISIT_QUEUED')));
+    await t.run(ctx => dispatchLedgerMessage(ctx, late('VISIT_RESERVED')));
+    await expect(t.run(ctx => homeResumed(ctx, row.visitId))).rejects.toThrow('HOST_LEASE_STILL_VALID');
+    expect(await t.run(ctx => ctx.db.get(row._id))).toMatchObject({ state: 'RETURN_PENDING', agentAuthorityEpoch: 1 });
+  }
+  expect(await t.run(ctx => ctx.db.query('visitReservations').collect())).toEqual([]);
+  expect(await t.run(ctx => ctx.db.query('inputs').collect())).toEqual([]);
+});
+
+test('disabling outbound peer travel shares the 16-row budget between REQUESTED and QUEUED without removing inbound candidates', async () => {
+  const { t } = await setup();
+  await peer(t);
+  const hostId = await pendingPolicyVisit(t, 1000);
+  for (let index = 0; index < 47; index++) {
+    const id = await pendingPolicyVisit(t, index, 'home');
+    if (index < 27) await t.run(ctx => ctx.db.patch(id, { state: 'REQUESTED' }));
+  }
+  await t.mutation(mutationRef('peers/setPolicy'), {
+    adminToken, peerTownId: 'home', inboundVisitsAllowed: true,
+    outboundVisitsAllowed: false, trustState: 'TRUSTED',
+  });
+  for (const processed of [16, 32, 47]) {
+    const rows = await t.run(ctx => ctx.db.query('visitLedger').collect());
+    expect(rows.filter(row => row.role === 'home' && row.state === 'RETURN_PENDING')).toHaveLength(processed);
+    expect(rows.filter(row => row.role === 'home' && ['QUEUED', 'REQUESTED'].includes(row.state))).toHaveLength(47 - processed);
+    expect(await t.run(ctx => ctx.db.get(hostId))).toMatchObject({ state: 'QUEUED' });
+    const messages = await t.run(ctx => ctx.db.query('federationOutbox').collect());
+    expect(messages).toHaveLength(processed);
+    expect(new Set(messages.map(row => row.envelope.visitId)).size).toBe(processed);
+    expect(messages.every(row => row.envelope.type === 'VISIT_RETURN')).toBe(true);
+    if (processed < 47) await t.mutation(mutationRef('peers/reconcilePendingPeerVisits'), { peerTownId: 'home' });
+  }
+  await t.mutation(mutationRef('peers/reconcilePendingPeerVisits'), { peerTownId: 'home' });
+  expect(await t.run(ctx => ctx.db.query('federationOutbox').collect())).toHaveLength(47);
+  expect(await t.run(ctx => ctx.db.query('visitReservations').collect())).toEqual([]);
 });

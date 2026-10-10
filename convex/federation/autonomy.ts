@@ -13,7 +13,7 @@ import {
 } from './resources';
 import { assertNoIdentityConflict } from './identityConflict';
 import { recallHomeMemories } from './decision';
-import { startResidentVisit } from './ledger';
+import { beginReturn, startResidentVisit } from './ledger';
 import { ACTION_TIMEOUT } from '../constants';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -37,6 +37,7 @@ type Claimed = {
 
 export function validatePolicy(policy: {
   enabled: boolean;
+  allowQueue?: boolean;
   allowedPeerTownIds: string[];
   decisionIntervalMs: number;
   dailyRequestLimit: number;
@@ -44,6 +45,7 @@ export function validatePolicy(policy: {
   reason: string;
 }) {
   if (
+    (policy.allowQueue !== undefined && typeof policy.allowQueue !== 'boolean') ||
     !Number.isSafeInteger(policy.decisionIntervalMs) ||
     policy.decisionIntervalMs < 60_000 ||
     policy.decisionIntervalMs > 7 * DAY ||
@@ -135,6 +137,7 @@ export const configure = mutation({
     adminToken: v.string(),
     agentGlobalId: v.string(),
     enabled: v.boolean(),
+    allowQueue: v.optional(v.boolean()),
     allowedPeerTownIds: v.array(v.string()),
     decisionIntervalMs: v.number(),
     dailyRequestLimit: v.number(),
@@ -168,6 +171,7 @@ export const configure = mutation({
       .unique();
     const data = {
       ...policy,
+      allowQueue: policy.allowQueue ?? false,
       agentGlobalId,
       worldId: resident.worldId,
       playerId: resident.playerId,
@@ -177,6 +181,15 @@ export const configure = mutation({
     };
     if (existing) await ctx.db.patch(existing._id, data);
     else await ctx.db.insert('autonomousTravelPolicies', data);
+    // A changed authorization cannot launch a pending visit made under the old revision.
+    // Manual requests remain governed by their own explicit authorization.
+    for (const state of ['REQUESTED', 'QUEUED']) {
+      const waiting = await ctx.db.query('visitLedger')
+        .withIndex('agent_state', q => q.eq('agentGlobalId', agentGlobalId).eq('state', state)).take(2);
+      for (const row of waiting)
+        if (row.role === 'home' && row.requestOrigin === 'autonomous')
+          await beginReturn(ctx, row, 'AUTONOMOUS_AUTHORIZATION_CHANGED');
+    }
     await ctx.db.insert('modelAudits', {
       operation: 'AUTONOMOUS_TRAVEL_POLICY',
       subject: agentGlobalId,
@@ -350,6 +363,9 @@ export const finish = internalMutation({
       worldId: job.worldId,
       homePlayerId: job.playerId,
       peerTownId: choice.townId,
+      allowQueue: policy.allowQueue ?? false,
+      requestOrigin: 'autonomous',
+      autonomousPolicyRevision: policy.revision,
     });
     await ctx.db.patch(job._id, {
       state: 'VISIT_REQUESTED',

@@ -1,7 +1,6 @@
 import { defineTable } from 'convex/server';
 import { v } from 'convex/values';
-import { resourceLimits } from './resources';
-import { resourceMetricKind } from './resourceMonitoring';
+import { resourceLimits, resourceMetricKind } from './resourceValidators';
 import { credentialRotationTables } from './credentialRotationSchema';
 import { identityKeyRotationTables } from './identityKeyRotationSchema';
 
@@ -11,6 +10,12 @@ export const federationTables = {
   federationResourcePolicy: defineTable({
     maxVisitorsPerSourceTown: v.union(v.number(), v.null()),
     maxRemoteEventsPerSecond: v.optional(v.union(v.number(), v.null())),
+    visitorQueueEnabled: v.optional(v.boolean()),
+    maxQueuedVisits: v.optional(v.number()),
+    visitQueueTtlMs: v.optional(v.number()),
+    visitorQueueMode: v.optional(v.union(v.literal('FIFO'), v.literal('SOURCE_ROUND_ROBIN'))),
+    maxQueuedVisitsPerSourceTown: v.optional(v.union(v.number(), v.null())),
+    visitorQueueLastSource: v.optional(v.string()),
   }),
   // Ephemeral aggregate admission state, excluded from backups and migration.
   federationInboundBudget: defineTable({ tokens: v.number(), measuredAt: v.number(), limit: v.number() }),
@@ -120,7 +125,17 @@ export const federationTables = {
     role: v.string(), worldId: v.optional(v.id('worlds')), homePlayerId: v.optional(v.string()),
     hostPlayerId: v.optional(v.string()), profile: v.any(), createdAt: v.number(), updatedAt: v.number(),
     cleanupConfirmed: v.optional(v.boolean()), lastError: v.optional(v.string()),
-  }).index('visitId', ['visitId']).index('agentGlobalId', ['agentGlobalId']).index('state', ['state']),
+    queuedAt: v.optional(v.number()), queueExpiresAt: v.optional(v.number()),
+    queueReason: v.optional(v.string()), queuePaused: v.optional(v.boolean()),
+    allowQueue: v.optional(v.boolean()),
+    requestOrigin: v.optional(v.union(v.literal('manual'), v.literal('autonomous'))),
+    autonomousPolicyRevision: v.optional(v.number()),
+  }).index('visitId', ['visitId']).index('agentGlobalId', ['agentGlobalId']).index('state', ['state'])
+    .index('role_state_queued', ['role', 'state', 'queuedAt'])
+    .index('role_state_queueExpiry', ['role', 'state', 'queueExpiresAt'])
+    .index('role_source_state_queued', ['role', 'homeTownId', 'state', 'queuedAt'])
+    .index('role_host_state', ['role', 'hostTownId', 'state'])
+    .index('agent_state', ['agentGlobalId', 'state']),
   visitReservations: defineTable({ visitId: v.string(), hostTownId: v.string(), expiresAt: v.number(), reservedSlot: v.boolean() }).index('visitId', ['visitId']).index('active', ['reservedSlot', 'expiresAt']),
   federationReplayNonces: defineTable({ peerTownId: v.string(), nonce: v.string(), expiresAt: v.number() }).index('nonce', ['peerTownId', 'nonce']).index('expiry', ['expiresAt']),
 };

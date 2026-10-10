@@ -184,7 +184,7 @@ test('rate refusal writes no nonce, Inbox or stream cursor; identical signed mes
 });
 
 test('visit saga reserves, freezes Home, confirms Host exactly once, then cleans before return', async () => {
-  const { a, b } = await setup(); await markReady(b, a);
+  const { a, b } = await setup(); await markReady(b, a); await markReady(a, b);
   await seedVisit(a, b, 'home', 'REQUESTED');
   const reserve = visitMessage(a, b, 'VISIT_RESERVE', 1, 'lease-control', { payload: { fencingToken: 'test-fencing-token-32bytes', leaseExpiry: Date.now() + 250000,
     profile: { name: 'Alice', character: 'f1', description: 'Resident', homeTownName: 'Town A' } } });

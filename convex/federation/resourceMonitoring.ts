@@ -1,22 +1,16 @@
 import { v } from 'convex/values';
-import { DatabaseReader, MutationCtx, mutation } from '../maintenanceFunctions';
+import { DatabaseReader, MutationCtx, internalMutation, mutation } from '../maintenanceFunctions';
 import { requireAdmin } from './security';
 import { identity } from './store';
+import { configuredVisitorQueue, drainVisitorQueue } from './visitorQueue';
+import { beginReturn } from './ledger';
+import { mutationRef } from './refs';
 
 const BUCKET_MS = 10_000;
 const WINDOW_MS = 300_000;
 const RETENTION_MS = 24 * 60 * 60_000;
 const MAX_SAMPLES_PER_BUCKET = 256;
-export const resourceMetricKind = v.union(
-  v.literal('CHAT_QUEUE'),
-  v.literal('CHAT_PROVIDER'),
-  v.literal('CHAT_SUCCESS'),
-  v.literal('CHAT_FAILURE'),
-  v.literal('CHAT_ABANDONED'),
-  v.literal('INBOUND_EVENT'),
-  v.literal('DECISION_SUCCESS'),
-  v.literal('DECISION_FAILURE'),
-);
+export { resourceMetricKind } from './resourceValidators';
 type MetricKind =
   | 'CHAT_QUEUE'
   | 'CHAT_PROVIDER'
@@ -173,3 +167,48 @@ export async function resourceMeasurements(db: DatabaseReader, now = Date.now())
     failedDecision: metric('DECISION_FAILURE'),
   };
 }
+
+
+/** Disabling a queue terminates waiting authorizations in bounded transactions. */
+export const reconcileVisitorQueuePolicy = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    if ((await configuredVisitorQueue(ctx.db)).enabled) return;
+    const waiting = await ctx.db.query('visitLedger')
+      .withIndex('role_state_queued', q => q.eq('role', 'host').eq('state', 'QUEUED')).take(16);
+    for (const row of waiting) await beginReturn(ctx, row, 'HOST_QUEUE_DISABLED');
+    if (waiting.length === 16)
+      await ctx.scheduler.runAfter(0, mutationRef('resourceMonitoring/reconcileVisitorQueuePolicy'), {});
+  },
+});
+export const configureVisitorQueue = mutation({
+  args: {
+    adminToken: v.string(), enabled: v.boolean(), maxQueuedVisits: v.number(),
+    visitQueueTtlMs: v.number(), mode: v.union(v.literal('FIFO'), v.literal('SOURCE_ROUND_ROBIN')),
+    maxQueuedVisitsPerSourceTown: v.union(v.number(), v.null()),
+  },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    if (!Number.isSafeInteger(args.maxQueuedVisits) || args.maxQueuedVisits < 1 || args.maxQueuedVisits > 1000 ||
+        !Number.isSafeInteger(args.visitQueueTtlMs) || args.visitQueueTtlMs < 1000 || args.visitQueueTtlMs > 3600000 ||
+        (args.maxQueuedVisitsPerSourceTown !== null && (!Number.isSafeInteger(args.maxQueuedVisitsPerSourceTown) ||
+          args.maxQueuedVisitsPerSourceTown < 0 || args.maxQueuedVisitsPerSourceTown > 1000)))
+      throw new Error('INVALID_VISITOR_QUEUE_POLICY');
+    if (!(await identity(ctx))) throw new Error('INITIALIZE_IDENTITY_FIRST');
+    const previous = await configuredVisitorQueue(ctx.db);
+    const fields = {
+      visitorQueueEnabled: args.enabled, maxQueuedVisits: args.maxQueuedVisits,
+      visitQueueTtlMs: args.visitQueueTtlMs, visitorQueueMode: args.mode,
+      maxQueuedVisitsPerSourceTown: args.maxQueuedVisitsPerSourceTown,
+    };
+    const current = await ctx.db.query('federationResourcePolicy').unique();
+    if (current) await ctx.db.patch(current._id, fields);
+    else await ctx.db.insert('federationResourcePolicy', { maxVisitorsPerSourceTown: null, ...fields });
+    await ctx.db.insert('federationResourceAudit', {
+      operation: 'VISITOR_QUEUE_POLICY_CHANGED', previous, next: fields, createdAt: Date.now(),
+    });
+    if (!args.enabled)
+      await ctx.scheduler.runAfter(0, mutationRef('resourceMonitoring/reconcileVisitorQueuePolicy'), {});
+    else await drainVisitorQueue(ctx);
+  },
+});

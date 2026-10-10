@@ -109,6 +109,14 @@ export function validateResourcePolicy(row: BackupRow) {
   const value = row.maxVisitorsPerSourceTown;
   if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > 1000))
     throw new Error('INVALID_SOURCE_VISITOR_QUOTA');
+  if (row.visitorQueueEnabled !== undefined && typeof row.visitorQueueEnabled !== 'boolean' ||
+      row.maxQueuedVisits !== undefined && (!Number.isSafeInteger(row.maxQueuedVisits) || row.maxQueuedVisits < 1 || row.maxQueuedVisits > 1000) ||
+      row.visitQueueTtlMs !== undefined && (!Number.isSafeInteger(row.visitQueueTtlMs) || row.visitQueueTtlMs < 1000 || row.visitQueueTtlMs > 3600000) ||
+      row.visitorQueueMode !== undefined && !['FIFO', 'SOURCE_ROUND_ROBIN'].includes(row.visitorQueueMode) ||
+      row.maxQueuedVisitsPerSourceTown !== undefined && row.maxQueuedVisitsPerSourceTown !== null &&
+        (!Number.isSafeInteger(row.maxQueuedVisitsPerSourceTown) || row.maxQueuedVisitsPerSourceTown < 0 || row.maxQueuedVisitsPerSourceTown > 1000) ||
+      row.visitorQueueLastSource !== undefined && (typeof row.visitorQueueLastSource !== 'string' || !row.visitorQueueLastSource || row.visitorQueueLastSource.length > 256))
+    throw new Error('INVALID_VISITOR_QUEUE_POLICY');
   const rate = row.maxRemoteEventsPerSecond;
   if (rate !== undefined && rate !== null && (!Number.isSafeInteger(rate) || rate < 0 || rate > 1000))
     throw new Error('INVALID_REMOTE_EVENT_RATE');

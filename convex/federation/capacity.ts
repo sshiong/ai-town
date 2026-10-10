@@ -3,6 +3,7 @@ import { internalQuery, httpAction } from '../_generated/server';
 import { identity } from './store';
 import { configuredResourceLimits, pendingDecisionCount } from './resources';
 import { remoteEventRate, sourceVisitorQuota } from './resourceMonitoring';
+import { visitorQueueSummary } from './visitorQueue';
 import { PROTOCOL } from './protocol';
 import { queryRef } from './refs';
 import { sign } from './security';
@@ -47,6 +48,7 @@ export const signingSnapshot = internalQuery({
       .withIndex('key', (q) => q.eq('key', 'town'))
       .unique());
     const sourceQuota = await sourceVisitorQuota(ctx.db);
+    const waiting = await visitorQueueSummary(ctx.db);
     const countsAreLowerBounds =
       slots.length === MAX_COUNT ||
       pending >= MAX_COUNT ||
@@ -109,12 +111,18 @@ export const signingSnapshot = internalQuery({
         reasons,
         indicationOnly: true,
         authorization: 'TRUST_POLICY_AND_ATOMIC_RESERVATION_REQUIRED',
-        visitorQueue: 'REJECT_AND_RETRY',
+        visitorQueue: waiting.enabled ? 'BOUNDED_DURABLE_QUEUE' : 'REJECT_AND_RETRY',
+        visitorQueueProtocolVersion: 1,
+        visitorQueueMode: waiting.visitorQueueMode,
         observationScheduling: 'LEAST_RECENT_SOURCE_WITH_VISITOR_ROUNDS',
         chatScheduling: 'AUTHENTICATED_SOURCE_ROUND_ROBIN_WITH_FIFO_AND_DEADLINE',
       },
       capacity: {
         maxVisitors: local.maxVisitors,
+        waitingVisits: waiting.waiting,
+        pausedWaitingVisits: waiting.paused,
+        maxQueuedVisits: waiting.maxQueuedVisits,
+        visitQueueTtlMs: waiting.visitQueueTtlMs,
         occupiedVisitorsAndReservations: occupied,
         remainingVisitorSlots:
           slots.length === MAX_COUNT ? null : Math.max(0, local.maxVisitors - occupied),

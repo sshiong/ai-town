@@ -17,7 +17,7 @@ import { maintainCredentialRotations } from './peerCredentialRotation';
 import { maintainIdentityKeyRotations } from './identityKeyRotation';
 
 const CLEANUP_TYPES = new Set(['VISIT_RETURN', 'VISIT_CLEANED', 'SESSION_RESYNC', 'STREAM_NACK']);
-const VISIT_TYPES = new Set(['VISIT_RESERVE', 'VISIT_RESERVED', 'VISIT_CONFIRM', 'VISIT_ACTIVE', 'VISIT_REJECT', 'VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_RENEW']);
+const VISIT_TYPES = new Set(['VISIT_RESERVE', 'VISIT_QUEUED', 'VISIT_RESERVED', 'VISIT_CONFIRM', 'VISIT_ACTIVE', 'VISIT_REJECT', 'VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_RENEW']);
 const RUNTIME_TYPES = new Set(['OBSERVATION', 'DECISION', 'ACTION_RESULT', 'CONVERSATION_ENDED']);
 const EPHEMERAL_RUNTIME_TYPES = new Set(['OBSERVATION', 'DECISION', 'ACTION_RESULT']);
 const CONTROL_TYPES = new Set(['STREAM_NACK', 'SESSION_RESYNC']);
@@ -208,7 +208,9 @@ export const acceptMessage = internalMutation({ args: { message: v.any(), payloa
       throw new Error('MESSAGE_ID_CONFLICT');
     return existing.ack ?? ackFor(message, existing.status);
   }
-  if (message.type !== 'VISIT_RESERVE') await assertVisitAuthority(ctx, message);
+  // Only the first reservation can precede its ledger. Retries with a new
+  // message ID must still prove authority before any stale-sequence ACK.
+  if (message.type !== 'VISIT_RESERVE' || await visit(ctx, message.visitId!)) await assertVisitAuthority(ctx, message);
   await consumeRemoteEventBudget(ctx, message.type);
   await rememberNonce(ctx, message);
   const pending = await ctx.db.query('federationInbox').withIndex('status', q => q.eq('status', 'BUFFERED')).take(257);
@@ -252,7 +254,7 @@ export const drainStream = internalMutation({ args: { streamKey: v.string() }, h
       const credentialId = remote && !await credentialForPeer(ctx, remote, item.envelope.credentialId)
         ? await renewedCredentialIdForPeer(ctx, remote, item.envelope.credentialId) : item.envelope.credentialId;
       await authenticateIdentity(ctx, { ...item.envelope, credentialId: credentialId ?? item.envelope.credentialId });
-      if (item.envelope.type !== 'VISIT_RESERVE') await assertVisitAuthority(ctx, item.envelope);
+      if (item.envelope.type !== 'VISIT_RESERVE' || await visit(ctx, item.envelope.visitId!)) await assertVisitAuthority(ctx, item.envelope);
     }
     catch { await requireResync(ctx, item.envelope, cursor, 'BUFFERED_MESSAGE_NO_LONGER_VALID'); return; }
     await dispatch(ctx, item.envelope);

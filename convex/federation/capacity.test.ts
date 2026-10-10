@@ -222,3 +222,31 @@ test('bounded count truncation is explicit and does not advertise a fabricated r
   expect(body.capacity).toMatchObject({ countsAreLowerBounds: true, remainingVisitorSlots: null });
   expect(body.admission).toMatchObject({ state: 'DEGRADED', reasons: ['CAPACITY_SAMPLE_LIMIT'] });
 });
+
+
+test('public queue capability exposes signed aggregate counts without waiting identities or fencing', async () => {
+  const { t, keys } = await setup();
+  await t.run(async ctx => {
+    await ctx.db.insert('federationResourcePolicy', {
+      maxVisitorsPerSourceTown: null, visitorQueueEnabled: true, maxQueuedVisits: 50,
+      visitQueueTtlMs: 120000, visitorQueueMode: 'SOURCE_ROUND_ROBIN', maxQueuedVisitsPerSourceTown: 4,
+    });
+    for (const paused of [false, true]) await ctx.db.insert('visitLedger', {
+      visitId: crypto.randomUUID(), agentGlobalId: 'secret-source/private-agent', homeTownId: 'secret-source',
+      hostTownId: 'host', homeDeploymentEpoch: 1, hostDeploymentEpoch: 7, agentAuthorityEpoch: 1,
+      visitLeaseVersion: 1, leaseExpiry: Date.now() + 120000, fencingToken: 'private-fencing-token',
+      role: 'host', state: 'QUEUED', profile: { name: 'Private waiting name' },
+      createdAt: Date.now(), updatedAt: Date.now(), queuedAt: Date.now(),
+      queueExpiresAt: Date.now() + 60000, queuePaused: paused,
+    });
+  });
+  const response = await t.fetch('/federation/v1/capabilities');
+  expect(response.status).toBe(200);
+  const signed = await response.json();
+  expect(await verifySignature(signed.body, signed.signature, keys.publicKey)).toBe(true);
+  expect(signed.body.admission).toMatchObject({ visitorQueue: 'BOUNDED_DURABLE_QUEUE', visitorQueueProtocolVersion: 1 });
+  expect(signed.body.capacity).toMatchObject({ waitingVisits: 2, pausedWaitingVisits: 1, occupiedVisitorsAndReservations: 0 });
+  const text = JSON.stringify(signed);
+  for (const secret of ['secret-source', 'private-agent', 'private-fencing-token', 'Private waiting name'])
+    expect(text).not.toContain(secret);
+});
