@@ -5,6 +5,8 @@ import { registerPairingRoutes } from './federation/peers';
 import { registerMigrationRoutes } from './federation/migration';
 import { registerEndpointRoutes } from './federation/endpoints';
 import { registerCredentialRotationRoutes } from './federation/peerCredentialRotation';
+import { registerIdentityKeyRoutes } from './federation/identityKeyRotation';
+import { registerCapacityRoutes } from './federation/capacity';
 
 const http = httpRouter();
 http.route({
@@ -17,4 +19,6 @@ registerPairingRoutes(http);
 registerMigrationRoutes(http);
 registerEndpointRoutes(http);
 registerCredentialRotationRoutes(http);
+registerIdentityKeyRoutes(http);
+registerCapacityRoutes(http);
 export default http;

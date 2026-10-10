@@ -334,10 +334,12 @@ export const recover = internalMutation({
     const jobs = await ctx.db
       .query('federationDecisionJobs')
       .withIndex('state', (q) => q.eq('state', 'RUNNING'))
+      .filter((q) => q.lte(q.field('deadline'), now))
       .take(100);
     for (const job of jobs)
       if (job.deadline <= now) {
         await ctx.db.patch(job._id, { state: 'EXPIRED' });
+        await recordResourceMetric(ctx, 'DECISION_FAILURE', Math.max(0, now - job.createdAt));
         const ledger = await visit(ctx, job.visitId);
         const runtime =
           ledger &&
@@ -352,12 +354,53 @@ export const recover = internalMutation({
             updatedAt: now,
           });
       }
+    await ctx.scheduler.runAfter(0, internal.federation.decision.recoverPendingPage, {
+      cursor: null,
+      remaining: 10,
+    });
+  },
+});
+
+export const recoverPendingPage = internalMutation({
+  args: { cursor: v.union(v.string(), v.null()), remaining: v.number() },
+  handler: async (ctx, { cursor, remaining }) => {
+    if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > 10)
+      throw new Error('INVALID_DECISION_RECOVERY_BUDGET');
+    const now = Date.now();
     const pending = await ctx.db
       .query('federationDecisionJobs')
       .withIndex('state', (q) => q.eq('state', 'PENDING'))
-      .take(10);
-    for (const job of pending)
-      if (job.deadline <= now) await ctx.db.patch(job._id, { state: 'EXPIRED' });
-      else await ctx.scheduler.runAfter(0, internal.federation.decision.run, { jobId: job._id });
+      .paginate({ cursor, numItems: 20, maximumBytesRead: 512_000 });
+    const selectedRuntimes = new Set<string>();
+    let available = remaining;
+    for (const job of pending.page) {
+      const ledger = await visit(ctx, job.visitId);
+      const runtime =
+        ledger &&
+        (await ctx.db
+          .query('federationAgentRuntimes')
+          .withIndex('globalId', (q) => q.eq('agentGlobalId', ledger.agentGlobalId))
+          .unique());
+      if (
+        job.deadline <= now ||
+        !ledger ||
+        !runtime ||
+        runtime.state !== 'TRAVELING' ||
+        ledger.state !== 'ACTIVE' ||
+        ledger.leaseExpiry <= now
+      ) {
+        await ctx.db.patch(job._id, { state: 'EXPIRED' });
+        await recordResourceMetric(ctx, 'DECISION_FAILURE', Math.max(0, now - job.createdAt));
+      } else if (available && !runtime.activeDecisionId && !selectedRuntimes.has(runtime._id)) {
+        selectedRuntimes.add(runtime._id);
+        await ctx.scheduler.runAfter(0, internal.federation.decision.run, { jobId: job._id });
+        available--;
+      }
+    }
+    if (available && !pending.isDone)
+      await ctx.scheduler.runAfter(0, internal.federation.decision.recoverPendingPage, {
+        cursor: pending.continueCursor,
+        remaining: available,
+      });
   },
 });

@@ -661,7 +661,7 @@ export async function applyBackupData(
         });
       }
       fields = restoredAutonomyFields(name, fields);
-      const id = await ctx.db.insert(table(name), remapValue(fields, mapping) as never);
+      const id = await ctx.db.insert(table(name), (name === 'federationIdentityKeyHistory' ? fields : remapValue(fields, mapping)) as never);
       mapping[row._id] = id;
     }
   }
@@ -682,7 +682,7 @@ export async function applyBackupData(
       if (!mapping[row._id]) continue;
       const current = await ctx.db.get(mapping[row._id] as Id<typeof name>);
       if (current)
-        await ctx.db.replace(current._id, remapValue(stripSystem(current), mapping) as never);
+        await ctx.db.replace(current._id, (name === 'federationIdentityKeyHistory' ? stripSystem(current) : remapValue(stripSystem(current), mapping)) as never);
     }
   }
   // Repair original document-ID references (which were unresolved during allocation).

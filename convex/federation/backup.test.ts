@@ -1170,3 +1170,27 @@ test('export audit distinguishes legacy attribution and records no successful ex
   await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
   expect(await t.run(ctx => ctx.db.query('backupExportAudits').unique())).toMatchObject({ attribution: 'legacy-admin-token', operator: 'Unspecified administrator' });
 });
+
+test('public signing-key history survives a town backup only as untrusted immutable provenance', async () => {
+  const { t } = await town();
+  const certificate = { body: { townId: 'town:original', oldVersion: 1, newVersion: 2 }, oldSignature: 'historical-old', newSignature: 'historical-new' };
+  const activation = { body: { rotationId: 'history-backup-test' }, oldSignature: 'historical-old', newSignature: 'historical-new' };
+  await t.run(ctx => ctx.db.insert('federationIdentityKeyHistory', {
+    rotationId: 'history-backup-test', townId: 'town:original', oldVersion: 1, newVersion: 2,
+    oldPublicKey: 'historical-old-public', newPublicKey: 'historical-new-public', kind: 'SIGNED',
+    role: 'LOCAL', certificate, activation, verified: true, acceptedAt: 1,
+    operator: 'test operator', reason: 'test public backup provenance',
+  }));
+  const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  const exported = bundle.sections.federationIdentityKeyHistory.map(decodeRow);
+  expect(exported).toHaveLength(1);
+  expect(exported[0].certificate).toEqual(certificate);
+  expect(bundle.sections.federationIdentityKeyRotations).toBeUndefined();
+  expect(bundle.sections.federationIdentityKeyExchanges).toBeUndefined();
+  await t.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'restore', sourceStopped: true });
+  const restored = await t.run(ctx => ctx.db.query('federationIdentityKeyHistory').collect());
+  expect(restored).toHaveLength(1);
+  expect(restored[0].verified).toBe(false);
+  expect(restored[0].certificate).toEqual(certificate);
+  expect(restored[0].activation).toEqual(activation);
+});

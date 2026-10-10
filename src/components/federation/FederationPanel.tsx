@@ -5,6 +5,7 @@ import { api } from '../../../convex/_generated/api';
 import ConflictPanel from './ConflictPanel';
 import EndpointHistory from './EndpointHistory';
 import CredentialRotationPanel from './CredentialRotationPanel';
+import IdentityKeyRotationPanel from './IdentityKeyRotationPanel';
 import {
   AdminButton,
   EmptyState,
@@ -872,6 +873,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
             </details>
             <ConflictPanel adminToken={adminToken} />
             <CredentialRotationPanel adminToken={adminToken} peers={data.peers} />
+            <IdentityKeyRotationPanel adminToken={adminToken} peers={data.peers} />
           </>
         ))}
     </section>

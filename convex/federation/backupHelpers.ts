@@ -25,6 +25,7 @@ export const dataTables = [
   'federationAgentRuntimes',
   'deploymentRecords',
   'migrationHandoffRecords',
+  'federationIdentityKeyHistory',
   'storagePolicies',
   'federationActionFacts',
   'federationEventFacts',
@@ -51,6 +52,8 @@ export const snapshotTables = [
 ] as const;
 export type BackupRow = Record<string, any>;
 export function restoredAutonomyFields(table: string, fields: BackupRow): BackupRow {
+  if (table === 'federationIdentityKeyHistory')
+    return { ...fields, verified: false };
   if (table === 'autonomousTravelPolicies')
     return { ...fields, nextDecisionAt: Date.now() + fields.decisionIntervalMs };
   if (table === 'autonomousTravelDecisions' && fields.state === 'RUNNING')
@@ -201,7 +204,7 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
     }
   }
   if (count > 500) throw new Error('BACKUP_ATOMIC_RECORD_LIMIT');
-  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t) && !bundle.sections[t]))
+  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['federationIdentityKeyHistory', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t) && !bundle.sections[t]))
     throw new Error('INCOMPLETE_TOWN_BACKUP');
   if ((bundle.sections.federationResourcePolicy?.length ?? 0) > 1)
     throw new Error('BACKUP_SINGLETON_MISMATCH');

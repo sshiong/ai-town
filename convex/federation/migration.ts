@@ -29,6 +29,7 @@ import {
   toBase64,
   verifySignature,
 } from './security';
+import { verifiedIdentityKeySuccessor } from './identityKeyRotationProof';
 
 const PURPOSE = 'ai-town-migration-handoff/1';
 const TERMINAL = ['COMPLETED', 'REJECTED', 'CANCELLED'];
@@ -74,7 +75,7 @@ function validTarget(t: Target) {
   )
     throw new Error('INVALID_MIGRATION_TARGET');
 }
-async function validateHandoff(packet: HandoffPacket, publicKey: string) {
+async function validateHandoff(packet: HandoffPacket, publicKey: string, historicalKeyAccepted = false) {
   const b = packet?.body;
   if (
     !b ||
@@ -83,7 +84,7 @@ async function validateHandoff(packet: HandoffPacket, publicKey: string) {
     b.purpose !== PURPOSE ||
     !boundedString(b.handoffId) ||
     !boundedString(b.townId) ||
-    b.publicKey !== publicKey ||
+    !boundedString(b.publicKey) || (b.publicKey !== publicKey && !historicalKeyAccepted) ||
     !boundedString(b.sourceDeploymentInstanceId) ||
     !Number.isSafeInteger(b.sourceDeploymentEpoch) ||
     b.sourceDeploymentEpoch < 1 ||
@@ -101,10 +102,10 @@ async function validateHandoff(packet: HandoffPacket, publicKey: string) {
   validTarget(b.target);
   if (
     b.target.townId !== b.townId ||
-    b.target.publicKey !== publicKey ||
+    b.target.publicKey !== b.publicKey ||
     b.target.deploymentInstanceId === b.sourceDeploymentInstanceId ||
     b.target.deploymentEpoch <= b.sourceDeploymentEpoch ||
-    !(await verifySignature(b, packet.signature, publicKey))
+    !(await verifySignature(b, packet.signature, b.publicKey))
   )
     throw new Error('INVALID_MIGRATION_HANDOFF');
   const seen = new Set<string>();
@@ -510,7 +511,10 @@ export const receiveExchange = internalAction({
     const data = await ctx.runQuery(queryRef('store/context'), { peerTownId: townId });
     if (!data.identity || !data.peer || data.peer.trustState !== 'TRUSTED')
       throw new Error('PEER_NOT_TRUSTED');
-    await validateHandoff(packet.body.handoff, data.peer.publicKey);
+    await validateHandoff(packet.body.handoff, data.peer.publicKey,
+      packet.body.handoff.body.publicKey === data.peer.publicKey || await ctx.runQuery(queryRef('identityKeyRotation/historicalKeyAccepted'), {
+        townId: data.peer.townId, oldPublicKey: packet.body.handoff.body.publicKey, currentPublicKey: data.peer.publicKey,
+      }));
     if (!(await verifySignature(packet.body, packet.signature, data.peer.publicKey)))
       throw new Error('INVALID_MIGRATION_EXCHANGE');
     // Convex only permits randomized key generation in actions. The transaction
@@ -548,7 +552,8 @@ export const acceptExchange = internalMutation({
       remote.trustState !== 'TRUSTED'
     )
       throw new Error('PEER_NOT_TRUSTED');
-    await validateHandoff(request.handoff, remote.publicKey);
+    await validateHandoff(request.handoff, remote.publicKey,
+      await verifiedIdentityKeySuccessor(ctx, remote.townId, request.handoff.body.publicKey, remote.publicKey));
     if (
       request.toTownId !== local.townId ||
       request.recipientDeploymentInstanceId !== local.deploymentInstanceId ||
@@ -559,7 +564,7 @@ export const acceptExchange = internalMutation({
     const descriptor = b.peers.find((p: PublicPeer) => p.townId === local.townId);
     if (
       !descriptor ||
-      descriptor.publicKey !== local.publicKey ||
+      !(await verifiedIdentityKeySuccessor(ctx, local.townId, descriptor.publicKey, local.publicKey)) ||
       descriptor.deploymentInstanceId !== local.deploymentInstanceId ||
       descriptor.deploymentEpoch !== local.deploymentEpoch ||
       descriptor.trustState !== 'TRUSTED'

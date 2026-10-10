@@ -3,9 +3,11 @@ import { v } from 'convex/values';
 import { resourceLimits } from './resources';
 import { resourceMetricKind } from './resourceMonitoring';
 import { credentialRotationTables } from './credentialRotationSchema';
+import { identityKeyRotationTables } from './identityKeyRotationSchema';
 
 export const federationTables = {
   ...credentialRotationTables,
+  ...identityKeyRotationTables,
   federationResourcePolicy: defineTable({
     maxVisitorsPerSourceTown: v.union(v.number(), v.null()),
     maxRemoteEventsPerSecond: v.optional(v.union(v.number(), v.null())),
@@ -55,6 +57,7 @@ export const federationTables = {
   }).index('transcript', ['transcriptId']).index('state', ['state', 'createdAt'])
     .index('retry', ['state', 'nextRetryAt']).index('pendingMessage', ['pendingMessageId']),
   federationIdentity: defineTable({
+    identityVersion: v.optional(v.number()),
     townId: v.string(), townName: v.string(), publicKey: v.string(), privateKeyEncrypted: v.string(),
     fingerprint: v.string(), deploymentInstanceId: v.string(), deploymentEpoch: v.number(),
     endpoint: v.string(), enabled: v.boolean(), allowIncomingPairRequests: v.boolean(),
@@ -75,6 +78,7 @@ export const federationTables = {
     targetIdentity: v.optional(v.object({ townId: v.string(), townName: v.string(), publicKey: v.string(), fingerprint: v.string(), protocol: v.string() })),
   }).index('requestId', ['pairRequestId']).index('state', ['state']).index('direction_read', ['direction', 'readAt']),
   federationPeers: defineTable({
+    identityVersion: v.optional(v.number()),
     townId: v.string(), townName: v.string(), publicKey: v.string(), fingerprint: v.string(),
     deploymentInstanceId: v.string(), deploymentEpoch: v.number(), endpoint: v.string(),
     credentialId: v.string(), credentialEncrypted: v.string(), trustState: v.string(),

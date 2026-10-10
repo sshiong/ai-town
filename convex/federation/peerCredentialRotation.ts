@@ -27,6 +27,7 @@ import {
   verifyPacket,
 } from './security';
 import { assertNoIdentityConflict } from './identityConflict';
+import { assertIdentityKeyRotationIdle } from './identityKeyRotation';
 
 export const MIN_OVERLAP_MS = 10 * 60_000;
 export const MAX_OVERLAP_MS = 30 * 60_000;
@@ -195,6 +196,7 @@ export const storeOffer = internalMutation({
     )
       throw new Error('CREDENTIAL_ROTATION_AUTH_FAILED');
     await ensureIdle(ctx, remote.townId);
+    await assertIdentityKeyRotationIdle(ctx);
     await ctx.db.insert('federationCredentialRotations', {
       rotationId: b.rotationId,
       peerTownId: remote.townId,
@@ -312,6 +314,7 @@ export const accept = internalMutation({
       )
       .first();
     if (reused) throw new Error('CREDENTIAL_ROTATION_CONFLICT');
+    await assertIdentityKeyRotationIdle(ctx);
     // Both administrators may rotate at once. The lexically smaller Town wins,
     // so neither side can replace the other's newly committed credentials.
     const pending = await ctx.db

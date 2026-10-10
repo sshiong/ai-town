@@ -1126,7 +1126,8 @@ export const applyChunk = internalMutation({
             _creationTime: row._creationTime,
           }))
             if (!mapping[ref.id]) throw new Error('BACKUP_REFERENCE_NOT_ALLOCATED');
-        fields = remapValue(fields, mapping);
+        // Signed historical certificates are immutable provenance, never live trust.
+        if (chunk.table !== 'federationIdentityKeyHistory') fields = remapValue(fields, mapping);
         if (remapping) {
           if (!staged.newId) throw new Error('BACKUP_ALLOCATED_ID_MISSING');
           await ctx.db.replace(staged.newId as Id<TableNames>, fields as never);

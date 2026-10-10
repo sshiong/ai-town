@@ -26,7 +26,7 @@ import { internal } from '../_generated/api';
 import { HistoricalObject } from '../engine/historicalObject';
 import { AgentDescription, serializedAgentDescription } from './agentDescription';
 import { parseMap, serializeMap } from '../util/object';
-import { tickRemoteVisitor } from '../federation/remoteTick';
+import { tickRemoteVisitors } from '../federation/remoteTick';
 import { captureEndedConversation } from '../federation/transcripts';
 import {
   syncResidentRuntimes,
@@ -220,7 +220,7 @@ export class Game extends AbstractGame {
     for (const conversation of this.world.conversations.values()) {
       conversation.tick(this, now);
     }
-    for (const player of this.world.players.values()) tickRemoteVisitor(this, now, player);
+    tickRemoteVisitors(this, now);
     for (const agent of this.world.agents.values()) {
       agent.tick(this, now);
     }

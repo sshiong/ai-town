@@ -12,6 +12,7 @@ import { digest, requireAdmin, verifyPacket, verifySignature } from './security'
 import { FederationMessage, PROTOCOL, validateEnvelope } from './protocol';
 import { mutationRef } from './refs';
 import type { Handoff } from './migration';
+import { verifiedIdentityKeySuccessor } from './identityKeyRotationProof';
 
 const source = v.union(
   v.literal('HEALTH'),
@@ -135,12 +136,12 @@ async function recognizedHandoff(
     if (
       b?.purpose === 'ai-town-migration-handoff/1' &&
       b.townId === known.townId &&
-      b.publicKey === known.publicKey &&
+      (await verifiedIdentityKeySuccessor(ctx, known.townId, b.publicKey, known.publicKey)) &&
       typeof b.sourceDeploymentInstanceId === 'string' &&
       Number.isSafeInteger(b.sourceDeploymentEpoch) &&
       b.sourceDeploymentEpoch > 0 &&
       b.target?.townId === known.townId &&
-      b.target.publicKey === known.publicKey &&
+      b.target.publicKey === b.publicKey &&
       typeof b.target.deploymentInstanceId === 'string' &&
       b.target.deploymentInstanceId !== b.sourceDeploymentInstanceId &&
       Number.isSafeInteger(b.target.deploymentEpoch) &&
@@ -151,7 +152,7 @@ async function recognizedHandoff(
       Number.isFinite(b.issuedAt) &&
       b.issuedAt >= b.frozenAt &&
       b.issuedAt <= record.acceptedAt + 60_000 &&
-      (await verifySignature(b, record.signature, known.publicKey))
+      (await verifySignature(b, record.signature, b.publicKey))
     ) {
       handoffs.push(b);
       // The frozen source also knows its own authorized successor. Discovering

@@ -136,7 +136,7 @@ export async function validateManifest(manifest: LargeManifest, signature: strin
     bytes += entry.bytes;
   }
   if (bytes > MAX_ARCHIVE_BYTES) throw new Error('LARGE_BACKUP_ARCHIVE_BUDGET');
-  if (largeTables.some((table) => !['homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(table) && !tables.has(table)))
+  if (largeTables.some((table) => !['federationIdentityKeyHistory', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(table) && !tables.has(table)))
     throw new Error('INCOMPLETE_LARGE_BACKUP_MANIFEST');
   validateSourceRow('federationIdentity', manifest.source);
   if (manifest.source.fingerprint !== `sha256:${await digest(manifest.source.publicKey)}`)

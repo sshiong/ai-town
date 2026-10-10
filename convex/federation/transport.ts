@@ -14,6 +14,7 @@ import { observeSignedIdentity } from './identityConflict';
 import { consumeRemoteEventBudget, recordResourceMetric } from './resourceMonitoring';
 import { credentialForPeer, renewedCredentialIdForPeer } from './credentials';
 import { maintainCredentialRotations } from './peerCredentialRotation';
+import { maintainIdentityKeyRotations } from './identityKeyRotation';
 
 const CLEANUP_TYPES = new Set(['VISIT_RETURN', 'VISIT_CLEANED', 'SESSION_RESYNC', 'STREAM_NACK']);
 const VISIT_TYPES = new Set(['VISIT_RESERVE', 'VISIT_RESERVED', 'VISIT_CONFIRM', 'VISIT_ACTIVE', 'VISIT_REJECT', 'VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_RENEW']);
@@ -341,6 +342,7 @@ export const pendingDeliveries = internalQuery({ args: {}, handler: async ctx =>
 } });
 export const maintenance = internalMutation({ args: {}, handler: async ctx => {
   await maintainCredentialRotations(ctx);
+  await maintainIdentityKeyRotations(ctx);
   const nonces = await ctx.db.query('federationReplayNonces').withIndex('expiry', q => q.lte('expiresAt', now())).take(500);
   for (const nonce of nonces) await ctx.db.delete(nonce._id);
   const sessions = await ctx.db.query('transportSessions').collect();

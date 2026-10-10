@@ -1,5 +1,6 @@
 import type { Doc } from '../_generated/dataModel';
 import type { MutationCtx, QueryCtx } from '../_generated/server';
+import { verifiedIdentityKeySuccessor } from './identityKeyRotationProof';
 
 async function matchesDeployment(
   ctx: QueryCtx | MutationCtx,
@@ -9,8 +10,18 @@ async function matchesDeployment(
   const local = await ctx.db.query('federationIdentity').unique();
   if (
     !local ||
-    rotation.peerPublicKey !== remote.publicKey ||
-    rotation.localPublicKey !== local.publicKey
+    !(await verifiedIdentityKeySuccessor(
+      ctx,
+      remote.townId,
+      rotation.peerPublicKey,
+      remote.publicKey,
+    )) ||
+    !(await verifiedIdentityKeySuccessor(
+      ctx,
+      local.townId,
+      rotation.localPublicKey,
+      local.publicKey,
+    ))
   )
     return false;
   const sender = rotation.direction === 'OUTBOUND' ? local : remote;
