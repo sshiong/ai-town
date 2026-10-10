@@ -2,6 +2,8 @@
 // FEDERATION_TEST_CONFIG uses the same external 0600 JSON as federation-smoke.mjs.
 // Optional: FEDERATION_DIALOGUE_REPORT (external 0600 evidence), FEDERATION_DIALOGUE_HOME_INDEX (0/1),
 // FEDERATION_DIALOGUE_TIMEOUT_MS (whole dialogue phase), FEDERATION_DIALOGUE_ATTEMPTS.
+// FEDERATION_DIALOGUE_RESIDENT_GLOBAL_ID and FEDERATION_DIALOGUE_HOST_RESIDENT_GLOBAL_ID
+// optionally select the same identities for repeated encounters, without directing NPC actions.
 // This harness only controls travel lifecycle and world heartbeats. It never sends
 // dialogue, invitations, movement, generated actions, or fabricated transport ACKs.
 import fs from 'node:fs';
@@ -486,14 +488,21 @@ async function main() {
     })),
   );
   evidence.activeEmbeddingSpaceIds = originalModels.map((s) => s.settings.activeEmbeddingSpaceId);
-  const resident = residentLists[homeIndex].find((r) => r.state === 'HOME_ACTIVE');
+  const residentGlobalId = process.env.FEDERATION_DIALOGUE_RESIDENT_GLOBAL_ID;
+  const hostResidentGlobalId = process.env.FEDERATION_DIALOGUE_HOST_RESIDENT_GLOBAL_ID;
+  const resident = residentLists[homeIndex].find(
+    (r) => r.state === 'HOME_ACTIVE' && (!residentGlobalId || r.agentGlobalId === residentGlobalId),
+  );
   assert.ok(resident, 'Home needs an original available NPC resident');
   const hostStatus = await host.client.query(api.world.defaultWorldStatus, {});
   assert.ok(hostStatus?.worldId, 'Host needs an existing default world');
   const hostWorldId = hostStatus.worldId;
   const originalHostAgentIds = (await world(host, hostWorldId)).agents.map((a) => a.id).sort();
   const hostResidents = residentLists[1 - homeIndex].filter(
-    (r) => r.worldId === hostWorldId && r.state === 'HOME_ACTIVE',
+    (r) =>
+      r.worldId === hostWorldId &&
+      r.state === 'HOME_ACTIVE' &&
+      (!hostResidentGlobalId || r.agentGlobalId === hostResidentGlobalId),
   );
   assert.ok(hostResidents.length, 'Host needs an available original NPC resident');
   evidence.resident = {

@@ -225,3 +225,23 @@
 - 普通快照导出增加操作者/理由/范围/manifest摘要本地审计，旧客户端明确未署名，
   不把声明名字视为独立账号认证，不把服务器生成成功视为浏览器保存成功。
 - 实际浏览器 WebCrypto 往返与错误口令拒绝通过；320/390窄屏管理视图溢出已修复。
+
+## 2026-10-10 真实记忆根因与后续修复
+
+- 第三次同身份自然对话未达到各两次发言，虽然清理和绑定保持通过，不能计为社交验收成功。
+- 后续真实 UDF 日志定位原生 Ollama embeddings 未携带已配置的认证头，导致代理401、
+  Host 的原记忆链重试阻塞。已补 AuthHeaders，保持原embedding profile/space/1024D不变；
+  20项模型测试通过。修复后下一次真实Lucky/Bob各两句及双方canonical记忆/关系/原始来源通过。
+  双侧重复相遇仍继续验证，旧已丢失 c276/c433 待记忆不声称恢复。
+- Home 同镇对方出访时，原 loadConversation 找不到被悬挂的地图身体；已从同世界的
+  原agent.suspendedPlayer读取双方保留presence，不创建身体或更换身份。14项记忆测试通过。
+- 旧RETURN_PENDING在currentauthority已更高时无操作重试导致历史账本永不结束；
+  现仅旧lease+safety确已过期后关闭该旧记录，不修改当前身体/权限。真实旧记录COMPLETED，
+  同居民仍HOME_ACTIVE，24项core/runtime回归通过。
+- 邻居凭证ECDH交叠轮换已实测A/B双方提交及签名探针。95项专项覆盖重认证、丢ACK、
+  同钥ACK、过期/撤销/重新配对/部署fencing与maintenance调度恢复。身份公钥链仍待实现。
+
+- 上述认证/悬挂presence修复后，两次新的实际相遇 c648/c671 双方各两句，
+  同一Lucky/Bob身份、两个Home的canonical关系与两次新证据、原始消息来源一致性均通过；
+  Home摘要DONE、Host认证交付DELIVERED、返乡及模型/embedding空间不变。
+  这证明两镇重复相遇链路，仍不能替代三镇同名或长期压力验收；旧B待记忆缺口仍保留。
