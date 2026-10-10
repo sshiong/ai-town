@@ -1,18 +1,16 @@
 /* eslint-disable */
-  /**
-   * Generated `api` utility.
-   *
-   * THIS CODE IS AUTOMATICALLY GENERATED.
-   *
-   * To regenerate, run `npx convex dev`.
-   * @module
-   */
+/**
+ * Generated `api` utility.
+ *
+ * THIS CODE IS AUTOMATICALLY GENERATED.
+ *
+ * To regenerate, run `npx convex dev`.
+ * @module
+ */
 
-  import type { ApiFromModules, FilterApi, FunctionReference } from "convex/server";
-  import type * as agent_conversation from "../agent/conversation.js";
+import type * as agent_conversation from "../agent/conversation.js";
 import type * as agent_embeddingsCache from "../agent/embeddingsCache.js";
 import type * as agent_memory from "../agent/memory.js";
-import type * as agent_schema from "../agent/schema.js";
 import type * as agent_social from "../agent/social.js";
 import type * as agent_travelMemory from "../agent/travelMemory.js";
 import type * as agent_travelTranscript from "../agent/travelTranscript.js";
@@ -33,14 +31,12 @@ import type * as aiTown_main from "../aiTown/main.js";
 import type * as aiTown_movement from "../aiTown/movement.js";
 import type * as aiTown_player from "../aiTown/player.js";
 import type * as aiTown_playerDescription from "../aiTown/playerDescription.js";
-import type * as aiTown_schema from "../aiTown/schema.js";
 import type * as aiTown_world from "../aiTown/world.js";
 import type * as aiTown_worldMap from "../aiTown/worldMap.js";
 import type * as constants from "../constants.js";
 import type * as crons from "../crons.js";
 import type * as engine_abstractGame from "../engine/abstractGame.js";
 import type * as engine_historicalObject from "../engine/historicalObject.js";
-import type * as engine_schema from "../engine/schema.js";
 import type * as federation_admin from "../federation/admin.js";
 import type * as federation_auth from "../federation/auth.js";
 import type * as federation_autonomy from "../federation/autonomy.js";
@@ -57,6 +53,7 @@ import type * as federation_backupSelective from "../federation/backupSelective.
 import type * as federation_backupSelectiveHelpers from "../federation/backupSelectiveHelpers.js";
 import type * as federation_backupSelectiveImport from "../federation/backupSelectiveImport.js";
 import type * as federation_backupSelectiveImportHelpers from "../federation/backupSelectiveImportHelpers.js";
+import type * as federation_capacity from "../federation/capacity.js";
 import type * as federation_credentialRotationSchema from "../federation/credentialRotationSchema.js";
 import type * as federation_credentials from "../federation/credentials.js";
 import type * as federation_decision from "../federation/decision.js";
@@ -65,6 +62,9 @@ import type * as federation_endpoints from "../federation/endpoints.js";
 import type * as federation_endpointsSchema from "../federation/endpointsSchema.js";
 import type * as federation_engineInputs from "../federation/engineInputs.js";
 import type * as federation_identityConflict from "../federation/identityConflict.js";
+import type * as federation_identityKeyRotation from "../federation/identityKeyRotation.js";
+import type * as federation_identityKeyRotationProof from "../federation/identityKeyRotationProof.js";
+import type * as federation_identityKeyRotationSchema from "../federation/identityKeyRotationSchema.js";
 import type * as federation_identityRecovery from "../federation/identityRecovery.js";
 import type * as federation_identityRecoverySchema from "../federation/identityRecoverySchema.js";
 import type * as federation_ledger from "../federation/ledger.js";
@@ -83,7 +83,6 @@ import type * as federation_resourceMonitoring from "../federation/resourceMonit
 import type * as federation_resources from "../federation/resources.js";
 import type * as federation_runtime from "../federation/runtime.js";
 import type * as federation_runtimeSchema from "../federation/runtimeSchema.js";
-import type * as federation_schema from "../federation/schema.js";
 import type * as federation_security from "../federation/security.js";
 import type * as federation_storagePolicy from "../federation/storagePolicy.js";
 import type * as federation_storageSchema from "../federation/storageSchema.js";
@@ -97,9 +96,7 @@ import type * as messages from "../messages.js";
 import type * as models_compatibility from "../models/compatibility.js";
 import type * as models_embeddings from "../models/embeddings.js";
 import type * as models_profiles from "../models/profiles.js";
-import type * as models_schema from "../models/schema.js";
 import type * as music from "../music.js";
-import type * as schema from "../schema.js";
 import type * as testing from "../testing.js";
 import type * as util_FastIntegerCompression from "../util/FastIntegerCompression.js";
 import type * as util_assertNever from "../util/assertNever.js";
@@ -115,120 +112,142 @@ import type * as util_types from "../util/types.js";
 import type * as util_xxhash from "../util/xxhash.js";
 import type * as world from "../world.js";
 
-  /**
-   * A utility for referencing Convex functions in your app's API.
-   *
-   * Usage:
-   * ```js
-   * const myFunctionReference = api.myModule.myFunction;
-   * ```
-   */
-  declare const fullApi: ApiFromModules<{
-    "agent/conversation": typeof agent_conversation,
-"agent/embeddingsCache": typeof agent_embeddingsCache,
-"agent/memory": typeof agent_memory,
-"agent/schema": typeof agent_schema,
-"agent/social": typeof agent_social,
-"agent/travelMemory": typeof agent_travelMemory,
-"agent/travelTranscript": typeof agent_travelTranscript,
-"aiTown/agent": typeof aiTown_agent,
-"aiTown/agentDescription": typeof aiTown_agentDescription,
-"aiTown/agentInputs": typeof aiTown_agentInputs,
-"aiTown/agentModel": typeof aiTown_agentModel,
-"aiTown/agentOperations": typeof aiTown_agentOperations,
-"aiTown/conversation": typeof aiTown_conversation,
-"aiTown/conversationMembership": typeof aiTown_conversationMembership,
-"aiTown/game": typeof aiTown_game,
-"aiTown/ids": typeof aiTown_ids,
-"aiTown/inputHandler": typeof aiTown_inputHandler,
-"aiTown/inputs": typeof aiTown_inputs,
-"aiTown/insertInput": typeof aiTown_insertInput,
-"aiTown/location": typeof aiTown_location,
-"aiTown/main": typeof aiTown_main,
-"aiTown/movement": typeof aiTown_movement,
-"aiTown/player": typeof aiTown_player,
-"aiTown/playerDescription": typeof aiTown_playerDescription,
-"aiTown/schema": typeof aiTown_schema,
-"aiTown/world": typeof aiTown_world,
-"aiTown/worldMap": typeof aiTown_worldMap,
-"constants": typeof constants,
-"crons": typeof crons,
-"engine/abstractGame": typeof engine_abstractGame,
-"engine/historicalObject": typeof engine_historicalObject,
-"engine/schema": typeof engine_schema,
-"federation/admin": typeof federation_admin,
-"federation/auth": typeof federation_auth,
-"federation/autonomy": typeof federation_autonomy,
-"federation/autonomySchema": typeof federation_autonomySchema,
-"federation/backup": typeof federation_backup,
-"federation/backupExportAudit": typeof federation_backupExportAudit,
-"federation/backupHelpers": typeof federation_backupHelpers,
-"federation/backupLarge": typeof federation_backupLarge,
-"federation/backupLargeHelpers": typeof federation_backupLargeHelpers,
-"federation/backupLargeSchema": typeof federation_backupLargeSchema,
-"federation/backupResident": typeof federation_backupResident,
-"federation/backupSchema": typeof federation_backupSchema,
-"federation/backupSelective": typeof federation_backupSelective,
-"federation/backupSelectiveHelpers": typeof federation_backupSelectiveHelpers,
-"federation/backupSelectiveImport": typeof federation_backupSelectiveImport,
-"federation/backupSelectiveImportHelpers": typeof federation_backupSelectiveImportHelpers,
-"federation/credentialRotationSchema": typeof federation_credentialRotationSchema,
-"federation/credentials": typeof federation_credentials,
-"federation/decision": typeof federation_decision,
-"federation/direct": typeof federation_direct,
-"federation/endpoints": typeof federation_endpoints,
-"federation/endpointsSchema": typeof federation_endpointsSchema,
-"federation/engineInputs": typeof federation_engineInputs,
-"federation/identityConflict": typeof federation_identityConflict,
-"federation/identityRecovery": typeof federation_identityRecovery,
-"federation/identityRecoverySchema": typeof federation_identityRecoverySchema,
-"federation/ledger": typeof federation_ledger,
-"federation/maintenanceLock": typeof federation_maintenanceLock,
-"federation/migration": typeof federation_migration,
-"federation/peerCredentialRotation": typeof federation_peerCredentialRotation,
-"federation/peers": typeof federation_peers,
-"federation/presence": typeof federation_presence,
-"federation/protocol": typeof federation_protocol,
-"federation/publicInput": typeof federation_publicInput,
-"federation/queue": typeof federation_queue,
-"federation/refs": typeof federation_refs,
-"federation/remoteTick": typeof federation_remoteTick,
-"federation/replyPolicy": typeof federation_replyPolicy,
-"federation/resourceMonitoring": typeof federation_resourceMonitoring,
-"federation/resources": typeof federation_resources,
-"federation/runtime": typeof federation_runtime,
-"federation/runtimeSchema": typeof federation_runtimeSchema,
-"federation/schema": typeof federation_schema,
-"federation/security": typeof federation_security,
-"federation/storagePolicy": typeof federation_storagePolicy,
-"federation/storageSchema": typeof federation_storageSchema,
-"federation/store": typeof federation_store,
-"federation/transcripts": typeof federation_transcripts,
-"federation/transport": typeof federation_transport,
-"http": typeof http,
-"init": typeof init,
-"maintenanceFunctions": typeof maintenanceFunctions,
-"messages": typeof messages,
-"models/compatibility": typeof models_compatibility,
-"models/embeddings": typeof models_embeddings,
-"models/profiles": typeof models_profiles,
-"models/schema": typeof models_schema,
-"music": typeof music,
-"schema": typeof schema,
-"testing": typeof testing,
-"util/FastIntegerCompression": typeof util_FastIntegerCompression,
-"util/assertNever": typeof util_assertNever,
-"util/asyncMap": typeof util_asyncMap,
-"util/compression": typeof util_compression,
-"util/geometry": typeof util_geometry,
-"util/isSimpleObject": typeof util_isSimpleObject,
-"util/llm": typeof util_llm,
-"util/minheap": typeof util_minheap,
-"util/object": typeof util_object,
-"util/sleep": typeof util_sleep,
-"util/types": typeof util_types,
-"util/xxhash": typeof util_xxhash,
-"world": typeof world,
-  }>;
-  export declare const api: FilterApi<typeof fullApi, FunctionReference<any, "public">>;
-  export declare const internal: FilterApi<typeof fullApi, FunctionReference<any, "internal">>;
+import type {
+  ApiFromModules,
+  FilterApi,
+  FunctionReference,
+} from "convex/server";
+
+declare const fullApi: ApiFromModules<{
+  "agent/conversation": typeof agent_conversation;
+  "agent/embeddingsCache": typeof agent_embeddingsCache;
+  "agent/memory": typeof agent_memory;
+  "agent/social": typeof agent_social;
+  "agent/travelMemory": typeof agent_travelMemory;
+  "agent/travelTranscript": typeof agent_travelTranscript;
+  "aiTown/agent": typeof aiTown_agent;
+  "aiTown/agentDescription": typeof aiTown_agentDescription;
+  "aiTown/agentInputs": typeof aiTown_agentInputs;
+  "aiTown/agentModel": typeof aiTown_agentModel;
+  "aiTown/agentOperations": typeof aiTown_agentOperations;
+  "aiTown/conversation": typeof aiTown_conversation;
+  "aiTown/conversationMembership": typeof aiTown_conversationMembership;
+  "aiTown/game": typeof aiTown_game;
+  "aiTown/ids": typeof aiTown_ids;
+  "aiTown/inputHandler": typeof aiTown_inputHandler;
+  "aiTown/inputs": typeof aiTown_inputs;
+  "aiTown/insertInput": typeof aiTown_insertInput;
+  "aiTown/location": typeof aiTown_location;
+  "aiTown/main": typeof aiTown_main;
+  "aiTown/movement": typeof aiTown_movement;
+  "aiTown/player": typeof aiTown_player;
+  "aiTown/playerDescription": typeof aiTown_playerDescription;
+  "aiTown/world": typeof aiTown_world;
+  "aiTown/worldMap": typeof aiTown_worldMap;
+  constants: typeof constants;
+  crons: typeof crons;
+  "engine/abstractGame": typeof engine_abstractGame;
+  "engine/historicalObject": typeof engine_historicalObject;
+  "federation/admin": typeof federation_admin;
+  "federation/auth": typeof federation_auth;
+  "federation/autonomy": typeof federation_autonomy;
+  "federation/autonomySchema": typeof federation_autonomySchema;
+  "federation/backup": typeof federation_backup;
+  "federation/backupExportAudit": typeof federation_backupExportAudit;
+  "federation/backupHelpers": typeof federation_backupHelpers;
+  "federation/backupLarge": typeof federation_backupLarge;
+  "federation/backupLargeHelpers": typeof federation_backupLargeHelpers;
+  "federation/backupLargeSchema": typeof federation_backupLargeSchema;
+  "federation/backupResident": typeof federation_backupResident;
+  "federation/backupSchema": typeof federation_backupSchema;
+  "federation/backupSelective": typeof federation_backupSelective;
+  "federation/backupSelectiveHelpers": typeof federation_backupSelectiveHelpers;
+  "federation/backupSelectiveImport": typeof federation_backupSelectiveImport;
+  "federation/backupSelectiveImportHelpers": typeof federation_backupSelectiveImportHelpers;
+  "federation/capacity": typeof federation_capacity;
+  "federation/credentialRotationSchema": typeof federation_credentialRotationSchema;
+  "federation/credentials": typeof federation_credentials;
+  "federation/decision": typeof federation_decision;
+  "federation/direct": typeof federation_direct;
+  "federation/endpoints": typeof federation_endpoints;
+  "federation/endpointsSchema": typeof federation_endpointsSchema;
+  "federation/engineInputs": typeof federation_engineInputs;
+  "federation/identityConflict": typeof federation_identityConflict;
+  "federation/identityKeyRotation": typeof federation_identityKeyRotation;
+  "federation/identityKeyRotationProof": typeof federation_identityKeyRotationProof;
+  "federation/identityKeyRotationSchema": typeof federation_identityKeyRotationSchema;
+  "federation/identityRecovery": typeof federation_identityRecovery;
+  "federation/identityRecoverySchema": typeof federation_identityRecoverySchema;
+  "federation/ledger": typeof federation_ledger;
+  "federation/maintenanceLock": typeof federation_maintenanceLock;
+  "federation/migration": typeof federation_migration;
+  "federation/peerCredentialRotation": typeof federation_peerCredentialRotation;
+  "federation/peers": typeof federation_peers;
+  "federation/presence": typeof federation_presence;
+  "federation/protocol": typeof federation_protocol;
+  "federation/publicInput": typeof federation_publicInput;
+  "federation/queue": typeof federation_queue;
+  "federation/refs": typeof federation_refs;
+  "federation/remoteTick": typeof federation_remoteTick;
+  "federation/replyPolicy": typeof federation_replyPolicy;
+  "federation/resourceMonitoring": typeof federation_resourceMonitoring;
+  "federation/resources": typeof federation_resources;
+  "federation/runtime": typeof federation_runtime;
+  "federation/runtimeSchema": typeof federation_runtimeSchema;
+  "federation/security": typeof federation_security;
+  "federation/storagePolicy": typeof federation_storagePolicy;
+  "federation/storageSchema": typeof federation_storageSchema;
+  "federation/store": typeof federation_store;
+  "federation/transcripts": typeof federation_transcripts;
+  "federation/transport": typeof federation_transport;
+  http: typeof http;
+  init: typeof init;
+  maintenanceFunctions: typeof maintenanceFunctions;
+  messages: typeof messages;
+  "models/compatibility": typeof models_compatibility;
+  "models/embeddings": typeof models_embeddings;
+  "models/profiles": typeof models_profiles;
+  music: typeof music;
+  testing: typeof testing;
+  "util/FastIntegerCompression": typeof util_FastIntegerCompression;
+  "util/assertNever": typeof util_assertNever;
+  "util/asyncMap": typeof util_asyncMap;
+  "util/compression": typeof util_compression;
+  "util/geometry": typeof util_geometry;
+  "util/isSimpleObject": typeof util_isSimpleObject;
+  "util/llm": typeof util_llm;
+  "util/minheap": typeof util_minheap;
+  "util/object": typeof util_object;
+  "util/sleep": typeof util_sleep;
+  "util/types": typeof util_types;
+  "util/xxhash": typeof util_xxhash;
+  world: typeof world;
+}>;
+
+/**
+ * A utility for referencing Convex functions in your app's public API.
+ *
+ * Usage:
+ * ```js
+ * const myFunctionReference = api.myModule.myFunction;
+ * ```
+ */
+export declare const api: FilterApi<
+  typeof fullApi,
+  FunctionReference<any, "public">
+>;
+
+/**
+ * A utility for referencing Convex functions in your app's internal API.
+ *
+ * Usage:
+ * ```js
+ * const myFunctionReference = internal.myModule.myFunction;
+ * ```
+ */
+export declare const internal: FilterApi<
+  typeof fullApi,
+  FunctionReference<any, "internal">
+>;
+
+export declare const components: {};
