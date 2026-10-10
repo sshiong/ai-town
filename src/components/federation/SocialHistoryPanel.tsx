@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { ColdHistorySource } from './ColdHistorySource';
 import { useQuery } from 'convex/react';
 import { makeFunctionReference, type ApiFromModules } from 'convex/server';
 import type * as social from '../../../convex/agent/social';
@@ -258,6 +259,10 @@ function Evidence({ owner, memory }: { owner: Owner; memory: Memory }) {
         </>
       )}
       <RawSource owner={owner} memory={memory} />
+      {(memory.data.type === 'conversation' ||
+        (memory.data.type === 'travel' && memory.data.federationConversationId)) && (
+        <ColdHistorySource key={memory.memoryId} owner={owner} memoryId={memory.memoryId} />
+      )}
     </>
   );
 }

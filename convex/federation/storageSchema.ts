@@ -29,6 +29,15 @@ export const storagePolicyFields = {
   vectorRebuildBatchSize: v.number(),
 };
 export const storagePolicyTables = {
+  coldHistoryArchives: defineTable({
+    sourceKey: v.string(), worldId: v.id('worlds'), kind: v.union(v.literal('conversation'), v.literal('travel')),
+    sourceId: v.string(), ownerGlobalId: v.optional(v.string()),
+    state: v.union(v.literal('PENDING'), v.literal('VERIFIED')),
+    manifest: v.any(), signature: v.string(), publicKey: v.string(),
+    storageId: v.optional(v.id('_storage')), verifiedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  }).index('source', ['sourceKey']),
+
   storagePolicies: defineTable({
     key: v.string(),
     ...storagePolicyFields,

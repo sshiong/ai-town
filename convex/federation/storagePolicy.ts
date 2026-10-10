@@ -38,6 +38,7 @@ type Group = { category: Category; records: number; bytes: number };
 const measuredTables: Array<[TableNames, Category]> = [
   ['memories', 'canonicalMemory'],
   ['messages', 'history'],
+  ['coldHistoryArchives', 'history'],
   ['homeTravelTranscripts', 'history'],
   ['homeTravelTranscriptPages', 'history'],
   ['archivedConversations', 'history'],

@@ -14,7 +14,7 @@ const ownerArgs = {
 type Owner = { worldId: Id<'worlds'>; playerId: string; agentGlobalId?: string };
 const pageArgs = { cursor: v.union(v.string(), v.null()), numItems: v.number() };
 
-async function requireOwner(ctx: QueryCtx, args: Owner & { adminToken: string }) {
+export async function requireOwner(ctx: QueryCtx, args: Owner & { adminToken: string }) {
   requireAdmin(args.adminToken);
   const binding = await ctx.db
     .query('residentModelBindings')
@@ -24,7 +24,7 @@ async function requireOwner(ctx: QueryCtx, args: Owner & { adminToken: string })
     throw new Error('SOCIAL_HISTORY_OWNER_MISMATCH');
 }
 
-function owns(memory: Doc<'memories'>, owner: Owner) {
+export function owns(memory: Doc<'memories'>, owner: Owner) {
   // Older local memories have no global owner. Their world/player scope remains authoritative.
   return (
     memory.worldId === owner.worldId &&
