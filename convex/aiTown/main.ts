@@ -74,7 +74,7 @@ export async function kickEngine(ctx: MutationCtx, worldId: Id<'worlds'>) {
     throw new Error(`Engine ${engineId} isn't currently running`);
   }
   const generationNumber = engine.generationNumber + 1;
-  await ctx.db.patch(engineId, { generationNumber });
+  await ctx.db.patch(engineId, { generationNumber, lastRecoveryAt: Date.now() });
   await ctx.scheduler.runAfter(0, internal.aiTown.main.runStep, {
     worldId: worldId,
     generationNumber,

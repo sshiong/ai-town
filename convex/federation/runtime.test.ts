@@ -11,6 +11,7 @@ import { createIdentityKeys, randomSecret, sealSecret } from './security';
 import { hostCreated } from './ledger';
 import { insertInput } from '../aiTown/insertInput';
 import { Id } from '../_generated/dataModel';
+import { ENGINE_ACTION_DURATION } from '../constants';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 const modules = {
@@ -75,6 +76,88 @@ async function engineStep(t: ReturnType<typeof convexTest<typeof schema.tables>>
 }
 beforeEach(() => jest.useFakeTimers());
 afterEach(() => jest.useRealTimers());
+
+test.each([
+  { role: 'home', state: 'FREEZING', operation: 'freezeHome', input: 'federationSuspend', result: 'CONFIRMING' },
+  { role: 'home', state: 'RETURN_PENDING', operation: 'resumeHome', input: 'federationResume', result: 'COMPLETED' },
+  { role: 'host', state: 'CREATING', operation: 'createHostPresence', input: 'federationCreateVisitor', result: 'ACTIVE' },
+] as const)('a stalled running engine processes persisted $input after one fenced recovery kick', async scenario => {
+  const { t, worldId } = await setup(scenario.role, scenario.state);
+  const stalledAt = Date.now() - ENGINE_ACTION_DURATION * 2 - 1000;
+  await t.run(async ctx => {
+    const status = (await ctx.db.query('worldStatus').unique())!;
+    await ctx.db.patch(status.engineId, { currentTime: stalledAt, generationNumber: 7 });
+    if (scenario.role === 'home') await ctx.db.insert('transportSessions', {
+      peerTownId: 'host', transportType: 'DIRECT_HTTPS', channelState: 'TRANSPORT_READY',
+      localDeploymentEpoch: 1, verifiedPeerDeploymentEpoch: 1, inboundVerifiedAt: Date.now(), outboundVerifiedAt: Date.now(),
+    });
+    if (scenario.operation === 'resumeHome') {
+      const world = (await ctx.db.get(worldId))!, ledger = (await ctx.db.query('visitLedger').unique())!;
+      await ctx.db.patch(worldId, { players: [], agents: [{ ...world.agents[0], travelVisitId: 'visit-1', suspendedPlayer: world.players[0] }] });
+      await ctx.db.patch(ledger._id, { cleanupConfirmed: true });
+    }
+  });
+  await t.mutation(mutationRef(`runtime/${scenario.operation}`), { visitId: 'visit-1' });
+  await t.mutation(mutationRef(`runtime/${scenario.operation}`), { visitId: 'visit-1' });
+  const engine = (await t.run(ctx => ctx.db.query('engines').unique()))!;
+  expect(engine.generationNumber).toBe(8);
+  expect(engine.currentTime).toBe(stalledAt);
+  expect(engine.lastRecoveryAt).toBe(Date.now());
+  const scheduled = await t.run(ctx => ctx.db.system.query('_scheduled_functions').collect());
+  expect(scheduled.filter(row => row.name.includes('runStep'))).toHaveLength(1);
+  const inputs = await t.run(ctx => ctx.db.query('inputs').collect());
+  expect(inputs.map(input => input.name)).toEqual([scenario.input]);
+  await engineStep(t, worldId);
+  expect((await t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe(scenario.result);
+  expect((await t.run(ctx => ctx.db.query('federationPresenceJobs').unique()))?.state).toBe('COMMITTED');
+  const world = (await t.run(ctx => ctx.db.get(worldId)))!;
+  if (scenario.operation === 'freezeHome') {
+    expect(world.players).toEqual([]);
+    expect((await t.run(ctx => ctx.db.query('federationOutbox').collect())).some(row => row.envelope.type === 'VISIT_CONFIRM')).toBe(true);
+  } else if (scenario.operation === 'resumeHome') {
+    expect(world.players[0].id).toBe('p:0');
+    expect(world.agents[0].travelVisitId).toBeUndefined();
+    expect((await t.run(ctx => ctx.db.query('federationAgentRuntimes').unique()))?.state).toBe('HOME_ACTIVE');
+  } else expect(world.players[0].remoteVisitor?.visitId).toBe('visit-1');
+});
+
+test('retrying a persisted pending freeze wakes a stalled engine and fences an earlier world commit', async () => {
+  const { t, worldId } = await setup('home', 'FREEZING');
+  await t.run(ctx => ctx.db.insert('transportSessions', {
+    peerTownId: 'host', transportType: 'DIRECT_HTTPS', channelState: 'TRANSPORT_READY',
+    localDeploymentEpoch: 1, verifiedPeerDeploymentEpoch: 1, inboundVerifiedAt: Date.now(), outboundVerifiedAt: Date.now(),
+  }));
+  await t.mutation(mutationRef('runtime/freezeHome'), { visitId: 'visit-1' });
+  await t.run(async ctx => {
+    const engine = (await ctx.db.query('engines').unique())!;
+    await ctx.db.patch(engine._id, { currentTime: Date.now() - ENGINE_ACTION_DURATION * 2 - 1 });
+  });
+  const earlier = await prepareEngineCommit(t, worldId);
+  await t.mutation(mutationRef('runtime/freezeHome'), { visitId: 'visit-1' });
+  const recovered = (await t.run(ctx => ctx.db.query('engines').unique()))!;
+  await expect(t.mutation(makeFunctionReference<'mutation'>('aiTown/game:saveWorld'), earlier)).rejects.toThrow('Generation number mismatch');
+  expect(await t.run(ctx => ctx.db.query('engines').unique())).toEqual(recovered);
+  expect((await t.run(ctx => ctx.db.get(worldId)))?.players[0].id).toBe('p:0');
+  expect((await t.run(ctx => ctx.db.query('inputs').unique()))?.returnValue).toBeUndefined();
+  await engineStep(t, worldId);
+  expect((await t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('CONFIRMING');
+  expect((await t.run(ctx => ctx.db.query('engines').unique()))?.lastRecoveryAt).toBe(recovered.lastRecoveryAt);
+});
+
+test('healthy presence input retries do not kick the engine or duplicate input, and developer stops remain stopped', async () => {
+  const { t } = await setup('home', 'FREEZING');
+  await t.run(async ctx => { const engine = (await ctx.db.query('engines').unique())!; await ctx.db.patch(engine._id, { currentTime: Date.now() }); });
+  await t.mutation(mutationRef('runtime/freezeHome'), { visitId: 'visit-1' });
+  await t.mutation(mutationRef('runtime/freezeHome'), { visitId: 'visit-1' });
+  const engine = (await t.run(ctx => ctx.db.query('engines').unique()))!;
+  expect(engine.generationNumber).toBe(0);
+  expect(engine.lastRecoveryAt).toBeUndefined();
+  expect(await t.run(ctx => ctx.db.query('inputs').collect())).toHaveLength(1);
+  expect((await t.run(ctx => ctx.db.system.query('_scheduled_functions').collect())).filter(row => row.name.includes('runStep'))).toEqual([]);
+  await t.run(async ctx => { const status = (await ctx.db.query('worldStatus').unique())!; await ctx.db.patch(status._id, { status: 'stoppedByDeveloper' }); });
+  await expect(t.mutation(mutationRef('runtime/freezeHome'), { visitId: 'visit-1' })).rejects.toThrow('WORLD_NOT_RUNNING');
+  expect(await t.run(ctx => ctx.db.query('engines').unique())).toEqual(engine);
+});
 
 test('cancel before a delayed freeze job leaves the original resident active and schedules no suspend', async () => {
   const { t, worldId } = await setup('home', 'FREEZING');

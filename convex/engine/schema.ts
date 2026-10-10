@@ -38,6 +38,9 @@ export const engine = v.object({
   // What was `currentTime` for the preceding step of the engine?
   lastStepTs: v.optional(v.number()),
 
+  // Throttle recovery kicks while a restarted action catches the simulation up.
+  lastRecoveryAt: v.optional(v.number()),
+
   // How far has the engine processed in the input queue?
   processedInputNumber: v.optional(v.number()),
 

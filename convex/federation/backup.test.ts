@@ -402,19 +402,22 @@ test('full-town export is signed, versioned, binary-safe and excludes private ke
 
 test('restoring a nonzero source input cursor preserves its audit snapshot and executes the new queue input zero', async () => {
   const { t } = await town();
+  const sourceRecoveryAt = Date.now() + 86400000;
   await t.run(async ctx => {
     const engine = (await ctx.db.query('engines').unique())!;
-    await ctx.db.patch(engine._id, { processedInputNumber: 37 });
+    await ctx.db.patch(engine._id, { processedInputNumber: 37, lastRecoveryAt: sourceRecoveryAt });
     await ctx.db.insert('inputs', { engineId: engine._id, number: 37, name: 'join', args: {}, received: 1, returnValue: { kind: 'ok', value: 'source-only-input' } });
   });
   const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
   expect(decodeRow(bundle.sections.engines[0]).processedInputNumber).toBe(37);
+  expect(decodeRow(bundle.sections.engines[0]).lastRecoveryAt).toBe(sourceRecoveryAt);
   await t.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'restore', sourceStopped: true });
   const { engine, worldId, inputId } = await t.run(async ctx => {
     const engine = (await ctx.db.query('engines').unique())!;
     const status = (await ctx.db.query('worldStatus').unique())!;
     const audit = (await ctx.db.query('backupImports').unique())!;
     expect(engine.processedInputNumber).toBeUndefined();
+    expect(engine.lastRecoveryAt).toBeUndefined();
     expect(await ctx.db.query('inputs').collect()).toEqual([]);
     expect(decodeRow(audit.runtimeSnapshot.inputs[0]).number).toBe(37);
     await ctx.db.patch(engine._id, { running: true });

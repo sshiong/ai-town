@@ -16,6 +16,7 @@ import { recordConfirmedObservation } from '../agent/travelMemory';
 import { receiveConversationEnded } from '../agent/travelTranscript';
 import { homeFrozen, hostCreated, hostRemoved, homeResumed } from './ledger';
 import type { InputNames, InputArgs } from '../aiTown/inputs';
+import { ENGINE_ACTION_DURATION } from '../constants';
 
 export async function syncResidentRuntimes(ctx: MutationCtx, worldId: Id<'worlds'>) {
   const local = await identity(ctx);
@@ -134,7 +135,7 @@ async function schedulePresence<Name extends InputNames>(
     .query('federationPresenceJobs')
     .withIndex('visit_kind', (q) => q.eq('visitId', visitId).eq('kind', kind))
     .unique();
-  if (old && old.state !== 'FAILED') return;
+  if (old && old.state === 'COMMITTED') return;
   const status = await ctx.db
     .query('worldStatus')
     .withIndex('worldId', (q) => q.eq('worldId', worldId))
@@ -145,7 +146,22 @@ async function schedulePresence<Name extends InputNames>(
     const { startEngine } = await import('../aiTown/main');
     await ctx.db.patch(status._id, { status: 'running' });
     await startEngine(ctx, worldId);
+  } else {
+    const engine = await ctx.db.get(status.engineId);
+    if (!engine) throw new Error('ENGINE_NOT_FOUND');
+    if (!engine.running) throw new Error('WORLD_NOT_RUNNING');
+    // A process restart can fail its active runStep without changing the
+    // persisted running flag. Use the watchdog's stale threshold, and fence
+    // the abandoned action through the existing generation increment.
+    const latestProgress = Math.max(engine.currentTime ?? engine._creationTime, engine.lastRecoveryAt ?? 0);
+    if (latestProgress < Date.now() - ENGINE_ACTION_DURATION * 2) {
+      const { kickEngine } = await import('../aiTown/main');
+      await kickEngine(ctx, worldId);
+    }
   }
+  // Retried pending jobs must still wake a stalled engine, but their ordered
+  // inputs must never be duplicated or replaced.
+  if (old && old.state === 'PENDING') return;
   const inputId = await insertInput(ctx, worldId, name, args);
   const job = { visitId, kind, inputId, state: 'PENDING', createdAt: Date.now() };
   if (old) await ctx.db.replace(old._id, job);

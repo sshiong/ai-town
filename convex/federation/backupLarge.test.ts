@@ -341,13 +341,15 @@ test('chunked restore resets a nonzero source cursor and commits the first new e
   jest.useFakeTimers();
   try {
     const { t, engineId } = await town();
+    const sourceRecoveryAt = Date.now() + 86400000;
     await t.run(async ctx => {
-      await ctx.db.patch(engineId, { processedInputNumber: 58 });
+      await ctx.db.patch(engineId, { processedInputNumber: 58, lastRecoveryAt: sourceRecoveryAt });
       await ctx.db.insert('inputs', { engineId, number: 58, name: 'join', args: {}, received: 1, returnValue: { kind: 'ok', value: 'source-only-input' } });
     });
     const archive = await exported(t);
     const sourceEngine = archive.chunks.find(c => c.table === 'engines' && c.rows.length)!;
     expect(decodeRow(sourceEngine.rows[0]).processedInputNumber).toBe(58);
+    expect(decodeRow(sourceEngine.rows[0]).lastRecoveryAt).toBe(sourceRecoveryAt);
     const sourceInputs = archive.chunks.find(c => c.table === 'inputs' && c.rows.length)!;
     expect(decodeRow(sourceInputs.rows[0]).number).toBe(58);
     const jobId = await staged(t, archive);
@@ -358,6 +360,7 @@ test('chunked restore resets a nonzero source cursor and commits the first new e
       const engine = (await ctx.db.query('engines').unique())!;
       const status = (await ctx.db.query('worldStatus').unique())!;
       expect(engine.processedInputNumber).toBeUndefined();
+      expect(engine.lastRecoveryAt).toBeUndefined();
       expect(await ctx.db.query('inputs').collect()).toEqual([]);
       const audit = (await ctx.db.query('backupImports').unique())!;
       expect(audit.runtimeSnapshot.largeJobId).toBe(jobId);

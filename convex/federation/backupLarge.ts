@@ -975,7 +975,7 @@ function activeFields(name: string, row: BackupRow, job: Job, allocation: boolea
   let fields = stripSystem(row);
   if (name === 'engines')
     // Runtime inputs are audit snapshots, not the new active input queue.
-    fields = { ...fields, running: false, generationNumber: fields.generationNumber + 1, processedInputNumber: undefined };
+    fields = { ...fields, running: false, generationNumber: fields.generationNumber + 1, processedInputNumber: undefined, lastRecoveryAt: undefined };
   if (name === 'worldStatus') fields = { ...fields, status: 'stoppedByDeveloper' };
   if (name === 'memories') {
     const { embeddingId, embeddingSpaceId, ...canonical } = fields;
