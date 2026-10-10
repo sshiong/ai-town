@@ -53,6 +53,8 @@ const measuredTables: Array<[TableNames, Category]> = [
   ['federationInbox', 'operational'],
   ['federationOutbox', 'operational'],
   ['federationDecisionJobs', 'operational'],
+  ['federationLlmRequests', 'operational'],
+  ['federationChatScheduling', 'operational'],
   ['federationTranscriptJobs', 'operational'],
   ['federationTurns', 'operational'],
   ['federationPendingActions', 'operational'],
@@ -408,8 +410,10 @@ async function pruneRecord(
         record.status === 'COMMITTED';
     }
   } else if (table === 'federationOutbox') {
-    const transcript = await ctx.db.query('federationTranscriptJobs')
-      .withIndex('pendingMessage', q => q.eq('pendingMessageId', record.messageId)).first();
+    const transcript = await ctx.db
+      .query('federationTranscriptJobs')
+      .withIndex('pendingMessage', (q) => q.eq('pendingMessageId', record.messageId))
+      .first();
     if (transcript) return { deleted: false };
     // Failed deliveries retain their error until the same bounded message retention
     // and safe visit termination checks as actual acknowledgements are satisfied.

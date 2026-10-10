@@ -111,7 +111,7 @@ export const signingSnapshot = internalQuery({
         authorization: 'TRUST_POLICY_AND_ATOMIC_RESERVATION_REQUIRED',
         visitorQueue: 'REJECT_AND_RETRY',
         observationScheduling: 'LEAST_RECENT_SOURCE_WITH_VISITOR_ROUNDS',
-        chatScheduling: 'GLOBAL_FIFO_WITH_QUEUE_DEADLINE',
+        chatScheduling: 'AUTHENTICATED_SOURCE_ROUND_ROBIN_WITH_FIFO_AND_DEADLINE',
       },
       capacity: {
         maxVisitors: local.maxVisitors,

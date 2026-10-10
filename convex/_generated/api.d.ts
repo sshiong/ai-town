@@ -54,6 +54,7 @@ import type * as federation_backupSelectiveHelpers from "../federation/backupSel
 import type * as federation_backupSelectiveImport from "../federation/backupSelectiveImport.js";
 import type * as federation_backupSelectiveImportHelpers from "../federation/backupSelectiveImportHelpers.js";
 import type * as federation_capacity from "../federation/capacity.js";
+import type * as federation_chatScheduling from "../federation/chatScheduling.js";
 import type * as federation_credentialRotationSchema from "../federation/credentialRotationSchema.js";
 import type * as federation_credentials from "../federation/credentials.js";
 import type * as federation_decision from "../federation/decision.js";
@@ -165,6 +166,7 @@ declare const fullApi: ApiFromModules<{
   "federation/backupSelectiveImport": typeof federation_backupSelectiveImport;
   "federation/backupSelectiveImportHelpers": typeof federation_backupSelectiveImportHelpers;
   "federation/capacity": typeof federation_capacity;
+  "federation/chatScheduling": typeof federation_chatScheduling;
   "federation/credentialRotationSchema": typeof federation_credentialRotationSchema;
   "federation/credentials": typeof federation_credentials;
   "federation/decision": typeof federation_decision;

@@ -41,7 +41,12 @@ export const federationTables = {
     request: v.any(), response: v.optional(v.any()),
     ephemeralPrivateEncrypted: v.optional(v.string()), state: v.string(), createdAt: v.number(),
   }).index('exchange', ['handoffId', 'peerTownId', 'direction']),
+  federationChatScheduling: defineTable({
+    key: v.string(), lastSource: v.string(), updatedAt: v.number(),
+  }).index('key', ['key']),
   federationLlmRequests: defineTable({
+    sourceKey: v.optional(v.string()),
+    decisionJobId: v.optional(v.id('federationDecisionJobs')),
     state: v.string(), createdAt: v.number(), deadline: v.number(),
     startedAt: v.optional(v.number()),
     queueDeadline: v.number(), expiresAt: v.number(),

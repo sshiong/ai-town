@@ -97,6 +97,7 @@ export async function decideRemoteAction(
     memoryRetrievalMode: string;
     observation: Parameters<typeof decisionRules>[0];
     deadline: number;
+    decisionJobId?: Id<'federationDecisionJobs'>;
   },
 ): Promise<RemoteAction> {
   const rules = decisionRules(args.observation);
@@ -128,7 +129,10 @@ export async function decideRemoteAction(
           : {}),
       },
       config,
-      { deadline: args.deadline },
+      {
+        deadline: args.deadline,
+        ...(args.decisionJobId ? { decisionJobId: args.decisionJobId } : {}),
+      },
     );
     try {
       return validateObservedDecision(parseDecision(content), args.observation);
@@ -314,6 +318,7 @@ export const run = internalAction({
         memoryRetrievalMode: recall.retrievalMode,
         observation,
         deadline: data.job.deadline,
+        decisionJobId: jobId,
       });
       await ctx.runMutation(internal.federation.decision.finish, {
         jobId,

@@ -11,6 +11,13 @@ import {
 import { sleep } from '../util/sleep';
 import { mutationRef } from './refs';
 import { recordResourceMetric } from './resourceMonitoring';
+import {
+  chatSource,
+  LOCAL_CHAT_SOURCE,
+  nextChatRequest,
+  recordChatSourceGrant,
+  sourceQueueLimit,
+} from './chatScheduling';
 
 export const resourceLimits = v.object({
   maxResidentAgents: v.number(),
@@ -49,14 +56,20 @@ export async function pendingDecisionCount(db: DatabaseReader, now = Date.now())
     .query('federationTurns')
     .withIndex('state_deadline', (q) => q.eq('state', 'PENDING').gt('deadline', now))
     .take(1001);
-  const remote = await db.query('federationDecisionJobs')
-    .filter(q => q.and(
-      q.or(q.eq(q.field('state'), 'PENDING'), q.eq(q.field('state'), 'RUNNING')),
-      q.gt(q.field('deadline'), now),
-    )).take(1001);
-  const autonomous = await db.query('autonomousTravelDecisions')
-    .withIndex('state', q => q.eq('state', 'RUNNING'))
-    .filter(q => q.gt(q.field('deadline'), now)).take(1001);
+  const remote = await db
+    .query('federationDecisionJobs')
+    .filter((q) =>
+      q.and(
+        q.or(q.eq(q.field('state'), 'PENDING'), q.eq(q.field('state'), 'RUNNING')),
+        q.gt(q.field('deadline'), now),
+      ),
+    )
+    .take(1001);
+  const autonomous = await db
+    .query('autonomousTravelDecisions')
+    .withIndex('state', (q) => q.eq('state', 'RUNNING'))
+    .filter((q) => q.gt(q.field('deadline'), now))
+    .take(1001);
   return turns.length + remote.length + autonomous.length;
 }
 
@@ -66,11 +79,12 @@ const REQUEST_TIMEOUT_MS = 90_000;
 const QUEUE_TIMEOUT_MS = 30_000;
 const EXPIRY_GRACE_MS = 5_000;
 export const enqueueChat = internalMutation({
-  args: { deadline: v.number() },
-  handler: async (ctx, { deadline }) => {
+  args: { deadline: v.number(), decisionJobId: v.optional(v.id('federationDecisionJobs')) },
+  handler: async (ctx, { deadline, decisionJobId }) => {
     const now = Date.now();
     if (!Number.isSafeInteger(deadline) || deadline <= now || deadline > now + REQUEST_TIMEOUT_MS)
       throw new Error('INVALID_CHAT_DEADLINE');
+    const sourceKey = await chatSource(ctx, decisionJobId);
     const limits = await configuredResourceLimits(ctx.db);
     if (!limits.maxConcurrentLocalLLM) throw new Error('LOCAL_LLM_PAUSED');
     // Reclaim abandoned permits only after their bounded HTTP deadline plus grace.
@@ -95,7 +109,16 @@ export const enqueueChat = internalMutation({
     const canRun = pending.length === 0 && running.length < limits.maxConcurrentLocalLLM;
     if (!canRun && pending.length >= limits.maxPendingLocalLLM)
       throw new Error('LOCAL_LLM_QUEUE_FULL');
+    if (
+      !canRun &&
+      pending.filter((row) => (row.sourceKey ?? LOCAL_CHAT_SOURCE) === sourceKey).length >=
+        (await sourceQueueLimit(ctx, limits.maxPendingLocalLLM))
+    )
+      throw new Error('LOCAL_LLM_SOURCE_QUEUE_FULL');
+    if (canRun) await recordChatSourceGrant(ctx, sourceKey);
     return ctx.db.insert('federationLlmRequests', {
+      sourceKey,
+      ...(decisionJobId ? { decisionJobId } : {}),
       state: canRun ? 'RUNNING' : 'PENDING',
       createdAt: now,
       ...(canRun ? { startedAt: now } : {}),
@@ -111,6 +134,7 @@ export const claimChat = internalMutation({
     const request = await ctx.db.get(requestId),
       now = Date.now();
     if (!request || request.deadline <= now) throw new Error('CHAT_REQUEST_DEADLINE');
+    if (request.decisionJobId) await chatSource(ctx, request.decisionJobId);
     if (request.state === 'RUNNING') return true;
     if (request.queueDeadline <= now) throw new Error('LOCAL_LLM_QUEUE_TIMEOUT');
     const limits = await configuredResourceLimits(ctx.db);
@@ -122,15 +146,17 @@ export const claimChat = internalMutation({
       await recordResourceMetric(ctx, 'CHAT_ABANDONED');
       await ctx.db.delete(row._id);
     }
-    const first = await ctx.db
+    const pending = await ctx.db
       .query('federationLlmRequests')
       .withIndex('state_created', (q) => q.eq('state', 'PENDING'))
-      .first();
+      .take(1001);
+    const first = await nextChatRequest(ctx, pending);
     const running = await ctx.db
       .query('federationLlmRequests')
       .withIndex('state_expiry', (q) => q.eq('state', 'RUNNING').gt('expiresAt', now))
       .take(33);
     if (first?._id !== requestId || running.length >= limits.maxConcurrentLocalLLM) return false;
+    await recordChatSourceGrant(ctx, request.sourceKey ?? LOCAL_CHAT_SOURCE);
     await ctx.db.patch(requestId, {
       state: 'RUNNING',
       startedAt: now,
@@ -140,16 +166,26 @@ export const claimChat = internalMutation({
   },
 });
 export const releaseChat = internalMutation({
-  args: { requestId: v.id('federationLlmRequests'), outcome: v.optional(v.union(v.literal('SUCCESS'), v.literal('FAILED'))), providerDurationMs: v.optional(v.number()) },
+  args: {
+    requestId: v.id('federationLlmRequests'),
+    outcome: v.optional(v.union(v.literal('SUCCESS'), v.literal('FAILED'))),
+    providerDurationMs: v.optional(v.number()),
+  },
   handler: async (ctx, { requestId, outcome, providerDurationMs }) => {
     const request = await ctx.db.get(requestId);
     if (!request) return;
     if (outcome) {
       await recordResourceMetric(ctx, outcome === 'SUCCESS' ? 'CHAT_SUCCESS' : 'CHAT_FAILURE');
       if (request.startedAt !== undefined) {
-        await recordResourceMetric(ctx, 'CHAT_QUEUE', Math.max(0, request.startedAt - request.createdAt));
-        if (providerDurationMs !== undefined) await recordResourceMetric(ctx, 'CHAT_PROVIDER', providerDurationMs);
-      } else await recordResourceMetric(ctx, 'CHAT_QUEUE', Math.max(0, Date.now() - request.createdAt));
+        await recordResourceMetric(
+          ctx,
+          'CHAT_QUEUE',
+          Math.max(0, request.startedAt - request.createdAt),
+        );
+        if (providerDurationMs !== undefined)
+          await recordResourceMetric(ctx, 'CHAT_PROVIDER', providerDurationMs);
+      } else
+        await recordResourceMetric(ctx, 'CHAT_QUEUE', Math.max(0, Date.now() - request.createdAt));
     }
     await ctx.db.delete(requestId);
   },
@@ -160,12 +196,12 @@ export async function residentChatCompletion(
   ctx: ActionCtx,
   body: Omit<CreateChatCompletionRequest, 'model' | 'stream'> & { model?: string; stream?: false },
   config: ChatConfig,
-  options?: ChatRequestOptions,
+  options?: ChatRequestOptions & { decisionJobId?: Id<'federationDecisionJobs'> },
 ): Promise<{ content: string; retries: number; ms: number }> {
   const deadline = Math.min(options?.deadline ?? Infinity, Date.now() + REQUEST_TIMEOUT_MS);
   const requestId: Id<'federationLlmRequests'> = await ctx.runMutation(
     mutationRef('resources/enqueueChat'),
-    { deadline },
+    { deadline, ...(options?.decisionJobId ? { decisionJobId: options.decisionJobId } : {}) },
   );
   let outcome: 'SUCCESS' | 'FAILED' = 'FAILED';
   let providerStartedAt: number | undefined;
@@ -177,7 +213,12 @@ export async function residentChatCompletion(
     outcome = 'SUCCESS';
     return result;
   } finally {
-    await ctx.runMutation(mutationRef('resources/releaseChat'), { requestId, outcome,
-      ...(providerStartedAt === undefined ? {} : { providerDurationMs: Math.max(0, Date.now() - providerStartedAt) }) });
+    await ctx.runMutation(mutationRef('resources/releaseChat'), {
+      requestId,
+      outcome,
+      ...(providerStartedAt === undefined
+        ? {}
+        : { providerDurationMs: Math.max(0, Date.now() - providerStartedAt) }),
+    });
   }
 }
