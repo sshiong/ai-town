@@ -84,7 +84,7 @@ function publicJob(job: Job) {
 async function owned(ctx: { db: DatabaseReader }, jobId: Id<'backupLargeJobs'>) {
   const job = await ctx.db.get(jobId);
   if (!job) throw new Error('BACKUP_JOB_NOT_FOUND');
-  if (job.mode === 'selective-archive') throw new Error('SELECTIVE_ARCHIVE_USE_SELECTIVE_API');
+  if (job.mode?.startsWith('selective-')) throw new Error('SELECTIVE_ARCHIVE_USE_SELECTIVE_API');
   const lock = await ctx.db
     .query('backupMaintenanceLocks')
     .withIndex('key', (q) => q.eq('key', 'town'))
@@ -122,7 +122,7 @@ export const listJobs = query({
     return (
       await ctx.db
         .query('backupLargeJobs')
-        .filter((q) => q.neq(q.field('mode'), 'selective-archive'))
+        .filter((q) => q.and(q.neq(q.field('mode'), 'selective-archive'), q.neq(q.field('mode'), 'selective-import')))
         .order('desc')
         .take(30)
     ).map(publicJob);
@@ -969,7 +969,7 @@ function activeFields(name: string, row: BackupRow, job: Job, allocation: boolea
       historicalLocations: [],
     };
     fields.agents = fields.agents.map((agent: BackupRow) => {
-      const { inProgressOperation, toRemember, ...fresh } = agent;
+      const { inProgressOperation, toRemember, queuedConversations, ...fresh } = agent;
       if (job.mode === 'clone') {
         if (
           agent.suspendedPlayer &&

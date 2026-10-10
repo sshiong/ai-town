@@ -10,6 +10,7 @@ import IdentityRecoveryPanel from './IdentityRecoveryPanel';
 import StoragePolicyPanel from './StoragePolicyPanel';
 import MigrationPanel from './MigrationPanel';
 import SelectiveExportPanel from './SelectiveExportPanel';
+import SelectiveImportPanel from './SelectiveImportPanel';
 import {
   AdminButton,
   downloadBundle,
@@ -288,6 +289,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
         archives below. Private identity recovery uses a separate encrypted package.
       </p>
       <SelectiveExportPanel adminToken={adminToken} />
+      <SelectiveImportPanel adminToken={adminToken} />
       <h3>Import &amp; recovery</h3>
       {mode !== 'clone' && (
         <>

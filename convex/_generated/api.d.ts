@@ -55,9 +55,10 @@ import type * as federation_backupResident from "../federation/backupResident.js
 import type * as federation_backupSchema from "../federation/backupSchema.js";
 import type * as federation_backupSelective from "../federation/backupSelective.js";
 import type * as federation_backupSelectiveHelpers from "../federation/backupSelectiveHelpers.js";
+import type * as federation_backupSelectiveImport from "../federation/backupSelectiveImport.js";
+import type * as federation_backupSelectiveImportHelpers from "../federation/backupSelectiveImportHelpers.js";
 import type * as federation_credentialRotationSchema from "../federation/credentialRotationSchema.js";
 import type * as federation_credentials from "../federation/credentials.js";
-import type * as federation_peerCredentialRotation from "../federation/peerCredentialRotation.js";
 import type * as federation_decision from "../federation/decision.js";
 import type * as federation_direct from "../federation/direct.js";
 import type * as federation_endpoints from "../federation/endpoints.js";
@@ -69,6 +70,7 @@ import type * as federation_identityRecoverySchema from "../federation/identityR
 import type * as federation_ledger from "../federation/ledger.js";
 import type * as federation_maintenanceLock from "../federation/maintenanceLock.js";
 import type * as federation_migration from "../federation/migration.js";
+import type * as federation_peerCredentialRotation from "../federation/peerCredentialRotation.js";
 import type * as federation_peers from "../federation/peers.js";
 import type * as federation_presence from "../federation/presence.js";
 import type * as federation_protocol from "../federation/protocol.js";
@@ -168,9 +170,10 @@ import type * as world from "../world.js";
 "federation/backupSchema": typeof federation_backupSchema,
 "federation/backupSelective": typeof federation_backupSelective,
 "federation/backupSelectiveHelpers": typeof federation_backupSelectiveHelpers,
+"federation/backupSelectiveImport": typeof federation_backupSelectiveImport,
+"federation/backupSelectiveImportHelpers": typeof federation_backupSelectiveImportHelpers,
 "federation/credentialRotationSchema": typeof federation_credentialRotationSchema,
 "federation/credentials": typeof federation_credentials,
-"federation/peerCredentialRotation": typeof federation_peerCredentialRotation,
 "federation/decision": typeof federation_decision,
 "federation/direct": typeof federation_direct,
 "federation/endpoints": typeof federation_endpoints,
@@ -182,6 +185,7 @@ import type * as world from "../world.js";
 "federation/ledger": typeof federation_ledger,
 "federation/maintenanceLock": typeof federation_maintenanceLock,
 "federation/migration": typeof federation_migration,
+"federation/peerCredentialRotation": typeof federation_peerCredentialRotation,
 "federation/peers": typeof federation_peers,
 "federation/presence": typeof federation_presence,
 "federation/protocol": typeof federation_protocol,

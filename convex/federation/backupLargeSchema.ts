@@ -2,6 +2,19 @@ import { defineTable } from 'convex/server';
 import { v } from 'convex/values';
 
 export const backupLargeTables = {
+  backupSelectiveJournal: defineTable({
+    jobId: v.id('backupLargeJobs'),
+    table: v.string(),
+    targetId: v.string(),
+  }).index('job', ['jobId']),
+  backupSelectiveHistory: defineTable({
+    jobId: v.id('backupLargeJobs'),
+    sourceTownId: v.string(),
+    sourceId: v.string(),
+    table: v.string(),
+    agentGlobalIds: v.array(v.string()),
+    record: v.string(),
+  }).index('job', ['jobId']),
   backupMaintenanceLocks: defineTable({
     key: v.string(),
     jobId: v.id('backupLargeJobs'),

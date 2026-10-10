@@ -164,7 +164,8 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
       <p className="admin-muted">
         Export one or more residents, configuration, memories or history without a 500-record cap.
         Pause all worlds, end visits and disable federation before starting. These signed archives
-        are for reading and audit; use the snapshot formats for restore or merge.
+        support selective import with explicit owner and model mappings. Older read-only archives
+        remain available for audit.
       </p>
       <TaskFeedback task={task} />
       <Field label="Export scope">

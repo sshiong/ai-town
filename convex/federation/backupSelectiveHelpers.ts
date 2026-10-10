@@ -158,7 +158,7 @@ const archiveEnvelope = v.union(
 );
 export type SelectiveManifest = {
   format: 'ai-town-selective-archive';
-  version: 1;
+  version: 1 | 2;
   schemaVersion: 1;
   exportId: string;
   source: BackupRow;
@@ -166,7 +166,7 @@ export type SelectiveManifest = {
   scope: SelectiveScope;
   selection: Selection;
   includeVectors: false;
-  usage: 'read-only-archive';
+  usage: 'read-only-archive' | 'selective-transfer';
   operator: string;
   reason: string;
   chunks: ChunkDescriptor[];
@@ -224,8 +224,16 @@ export function rowOwner(row: BackupRow, s: Selection): Owner | undefined {
     row.agentGlobalId
       ? row.agentGlobalId === o.agentGlobalId &&
         (!row.worldId || row.worldId === o.worldId) &&
-        (!row.playerId || row.playerId === o.playerId)
-      : row.worldId === o.worldId && row.playerId === o.playerId,
+        (!row.playerId || row.playerId === o.playerId) &&
+        (!row.agentId || row.agentId === o.agentId)
+      : row.worldId === o.worldId &&
+        (row.playerId
+          ? row.playerId === o.playerId &&
+            (!row.agentId || row.agentId === o.agentId) &&
+            (typeof row.id !== 'string' || !row.id.startsWith('a:') || row.id === o.agentId)
+          : row.agentId
+            ? row.agentId === o.agentId
+            : row.id === o.playerId || row.id === o.agentId),
   );
 }
 export function eventTime(table: string, row: BackupRow) {
@@ -255,9 +263,9 @@ export function scopedWorld(row: BackupRow, s: Selection): BackupRow {
 export async function validateSelectiveManifest(m: SelectiveManifest, signature: string) {
   if (
     m?.format !== 'ai-town-selective-archive' ||
-    m.version !== 1 ||
+    ![1, 2].includes(m.version) ||
     m.schemaVersion !== 1 ||
-    m.usage !== 'read-only-archive' ||
+    (m.version === 1 ? m.usage !== 'read-only-archive' : m.usage !== 'selective-transfer') ||
     m.includeVectors !== false ||
     m.scope !== m.selection?.scope ||
     typeof m.exportId !== 'string' ||

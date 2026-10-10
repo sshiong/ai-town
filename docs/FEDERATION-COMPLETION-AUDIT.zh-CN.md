@@ -245,3 +245,7 @@
   同一Lucky/Bob身份、两个Home的canonical关系与两次新证据、原始消息来源一致性均通过；
   Home摘要DONE、Host认证交付DELIVERED、返乡及模型/embedding空间不变。
   这证明两镇重复相遇链路，仍不能替代三镇同名或长期压力验收；旧B待记忆缺口仍保留。
+
+## 2026-10-10 选择性 v2 导入检查点
+
+此前 v1 只读归档边界保留；新 v2 选择性导入已实现显式所有者/Profile/外部记忆引用映射、全块闭包预检、确认摘要、持久恢复和部分回滚。12 项导入测试通过。隔离 C 实际签名 8 块/8 条记录克隆完成，原居民和模型配置不变；另一次实际 REMAP 后取消并恢复全部原记录和 ID。C 此包没有 canonical memory，实际 embedding 重建仍待验收。详情见 `FEDERATION-SELECTIVE-IMPORT.zh-CN.md`。完整 R01–R46 目标继续执行。

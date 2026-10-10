@@ -335,6 +335,19 @@ async function envelope(
     row = ownership;
   }
   const references = validateSourceRow(table, row);
+  if (
+    table === 'homeTravelTranscriptPages' ||
+    (table === 'memories' && row.data.type === 'travel' && row.data.transcriptId)
+  ) {
+    const transcriptId = table === 'memories' ? row.data.transcriptId : row.transcriptId;
+    const transcript = await db
+      .query('homeTravelTranscripts')
+      .withIndex('owner_transcript', (q) =>
+        q.eq('agentGlobalId', row.agentGlobalId).eq('transcriptId', transcriptId),
+      )
+      .unique();
+    if (transcript) references.push({ id: transcript._id, table: 'homeTravelTranscripts' });
+  }
   let context: Awaited<ReturnType<typeof conversation>> = null;
   if (['federationActionFacts', 'federationEventFacts'].includes(table)) {
     const visit = await db
@@ -783,7 +796,7 @@ export const advanceExport = action({
         } while (cursor);
         const manifest: SelectiveManifest = {
           format: 'ai-town-selective-archive',
-          version: 1,
+          version: 2,
           schemaVersion: 1,
           exportId: job._id,
           source: job.source,
@@ -791,7 +804,7 @@ export const advanceExport = action({
           scope: job.metadata.selection.scope,
           selection: job.metadata.selection,
           includeVectors: false,
-          usage: 'read-only-archive',
+          usage: 'selective-transfer',
           operator: job.metadata.operator,
           reason: job.metadata.reason,
           chunks,
