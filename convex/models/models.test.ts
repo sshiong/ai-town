@@ -7,7 +7,7 @@ import { embeddingFingerprint, verifiedCompatible, validateVector } from './comp
 import { cacheNamespace } from '../agent/embeddingsCache';
 import { bindResident, profileChatConfig } from './profiles';
 import { ensureEmbeddingSpace, profileEmbeddingConfig } from './embeddings';
-import { chatCompletion, fetchEmbeddingBatch } from '../util/llm';
+import { chatCompletion, fetchEmbeddingBatch, ollamaFetchEmbedding } from '../util/llm';
 import { recallHomeMemories } from '../federation/decision';
 
 const modules = {
@@ -972,4 +972,20 @@ test('explicit chat reasoning setting survives profile storage and sends usable-
     adminToken,
   });
   expect(profiles.embeddingProfiles).toEqual([]);
+});
+
+
+test('native Ollama embeddings send the configured bearer credential without changing model or prompt', async () => {
+  const requests: {url: string; init?: RequestInit}[] = [];
+  jest.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+    requests.push({url: String(url), init});
+    return new Response(JSON.stringify({embedding: [1, 0]}), {status: 200});
+  });
+  const config = { provider: 'ollama' as const, url: 'http://localhost:11434', embeddingModel: 'qwen3-embedding:0.6b', dimensions: 2, apiKey: 'local-test-token' };
+  expect(await ollamaFetchEmbedding('unchanged prompt', config)).toEqual({embedding: [1, 0]});
+  expect(requests[0].url).toBe('http://localhost:11434/api/embeddings');
+  expect(requests[0].init?.headers).toMatchObject({Authorization: 'Bearer local-test-token'});
+  expect(JSON.parse(requests[0].init?.body as string)).toEqual({model: 'qwen3-embedding:0.6b', prompt: 'unchanged prompt'});
+  await ollamaFetchEmbedding('unchanged prompt', {...config, apiKey: undefined});
+  expect(requests[1].init?.headers).not.toHaveProperty('Authorization');
 });

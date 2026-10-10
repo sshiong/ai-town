@@ -760,6 +760,7 @@ export async function ollamaFetchEmbedding(text: string, config = getEmbeddingCo
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...AuthHeaders(config),
       },
       body: JSON.stringify({ model: config.embeddingModel, prompt: text }),
     });
