@@ -11,6 +11,7 @@ import {
   validateSourceRow,
 } from './backupLargeHelpers';
 import { digest, verifySignature } from './security';
+import { validateColdLargeRow } from './coldLarge';
 
 export const selectiveScope = v.union(
   v.literal('agent-one'),
@@ -170,6 +171,11 @@ export type SelectiveManifest = {
   operator: string;
   reason: string;
   chunks: ChunkDescriptor[];
+  coldHistoryFiles?: {
+    policy: 'complete-selected-source-only';
+    included: number;
+    excluded: { CANONICAL_MEMORY_NOT_SELECTED: number; SOURCE_SCOPE_INCOMPLETE: number; SOURCE_SCOPE_NOT_SELECTED: number };
+  };
 };
 export function allowedCategories(scope: SelectiveScope): readonly string[] {
   if (scope === 'config-only') return ['configuration'];
@@ -291,7 +297,7 @@ export async function validateSelectiveManifest(m: SelectiveManifest, signature:
   for (const [index, c] of m.chunks.entries()) {
     if (
       c.index !== index ||
-      ![...selectiveTables, 'referenceMappings'].includes(c.table as any) ||
+      ![...selectiveTables, 'coldHistoryFiles', 'referenceMappings'].includes(c.table as any) ||
       !Number.isSafeInteger(c.count) ||
       c.count < 0 ||
       c.count > 20 ||
@@ -302,7 +308,13 @@ export async function validateSelectiveManifest(m: SelectiveManifest, signature:
     )
       throw new Error('INVALID_SELECTIVE_DESCRIPTOR');
     bytes += c.bytes;
+    if (c.table === 'coldHistoryFiles' && c.count !== 1) throw new Error('BACKUP_COLD_FILES_SINGLE_FILE_CHUNK_REQUIRED');
   }
+  const cold = m.coldHistoryFiles;
+  if (cold && (cold.policy !== 'complete-selected-source-only' ||
+    cold.included !== m.chunks.filter(c => c.table === 'coldHistoryFiles').reduce((n, c) => n + c.count, 0) ||
+    [cold.included, cold.excluded?.CANONICAL_MEMORY_NOT_SELECTED, cold.excluded?.SOURCE_SCOPE_INCOMPLETE, cold.excluded?.SOURCE_SCOPE_NOT_SELECTED]
+      .some(n => !Number.isSafeInteger(n) || n < 0))) throw new Error('INVALID_SELECTIVE_COLD_SUMMARY');
   if (bytes > MAX_ARCHIVE_BYTES) throw new Error('SELECTIVE_ARCHIVE_BUDGET');
   if (
     m.chunks
@@ -315,7 +327,7 @@ export async function validateSelectiveManifest(m: SelectiveManifest, signature:
 }
 export async function validateSelectiveChunk(chunk: LargeChunk, expected: ChunkDescriptor) {
   const envelopes = await validateChunk(chunk, expected);
-  return envelopes.map((value) => {
+  return Promise.all(envelopes.map(async (value) => {
     try {
       validateFields(value, (archiveEnvelope as unknown as { json: unknown }).json);
     } catch {
@@ -331,6 +343,7 @@ export async function validateSelectiveChunk(chunk: LargeChunk, expected: ChunkD
       )
         throw new Error('INVALID_SELECTIVE_RECORD');
       const row = decodeRow(e.record);
+      if (chunk.table === 'coldHistoryFiles') await validateColdLargeRow(row);
       assertNoSecrets(row);
       try {
         validateSourceRow(chunk.table, row);
@@ -388,5 +401,5 @@ export async function validateSelectiveChunk(chunk: LargeChunk, expected: ChunkD
     )
       throw new Error('INVALID_SELECTIVE_RECORD');
     return e;
-  });
+  }));
 }

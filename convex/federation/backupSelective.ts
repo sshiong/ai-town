@@ -11,6 +11,9 @@ import {
 import { Doc, Id, TableNames } from '../_generated/dataModel';
 import { requireAdmin, sign } from './security';
 import { assertTownUnlocked } from './maintenanceLock';
+import { selectiveColdCandidate, selectiveColdScope } from './coldSelective';
+import { load as loadColdHistory } from './coldHistory';
+import { checkColdLargeExport, type ColdLargeRow } from './coldLarge';
 import { BackupRow, decodeRow, encodeRow } from './backupHelpers';
 import {
   ChunkDescriptor,
@@ -62,6 +65,7 @@ function view(j: Job) {
     operator: j.metadata.operator as string,
     updatedAt: j.updatedAt,
     error: j.error,
+    coldHistoryFiles: j.metadata.coldHistoryFiles ?? null,
   };
 }
 async function owned(ctx: { db: DatabaseReader }, id: Id<'backupLargeJobs'>) {
@@ -471,6 +475,18 @@ export const page = internalQuery({
     const local = await stable(ctx);
     if (local.fingerprint !== job.source.fingerprint) throw new Error('BACKUP_IDENTITY_CHANGED');
     const selection = job.metadata.selection as Selection;
+    if (job.phase === 'COLD_FILES') {
+      const archives = await ctx.db.query('coldHistoryArchives')
+        .filter(q => q.eq(q.field('state'), 'VERIFIED'))
+        .paginate({ cursor: job.cursor, numItems: 1, maximumBytesRead: TARGET_CHUNK_BYTES });
+      const candidates = [];
+      for (const archive of archives.page) {
+        const candidate = await selectiveColdCandidate(ctx, job, archive);
+        if (candidate) candidates.push(candidate);
+      }
+      return { table: 'coldHistoryFiles', rows: [] as ArchiveEnvelope[],
+        candidates, cursor: archives.continueCursor, done: archives.isDone, queued: [] as string[] };
+    }
     if (job.phase === 'SCANNING') {
       const table = selectiveTables[job.tableIndex];
       if (!table) throw new Error('BACKUP_CHECKPOINT_CHANGED');
@@ -619,7 +635,9 @@ export const savePage = internalMutation({
         .query('backupLargeRows')
         .withIndex('job_source', (q) => q.eq('jobId', job._id).eq('sourceId', sourceId))
         .unique();
-      if (existing) await ctx.db.patch(existing._id, { state: 'EMITTED' });
+      if (existing) await ctx.db.patch(existing._id, { state: 'EMITTED',
+        ...(e.kind === 'record' ? { worldId: decodeRow(e.record).worldId,
+          sourceScope: selectiveColdScope(a.page.table, decodeRow(e.record)) } : {}) });
       else
         await ctx.db.insert('backupLargeRows', {
           jobId: job._id,
@@ -631,6 +649,8 @@ export const savePage = internalMutation({
           state: 'EMITTED',
           references: [],
           metadata: {},
+          worldId: e.kind === 'record' ? decodeRow(e.record).worldId : undefined,
+          sourceScope: e.kind === 'record' ? selectiveColdScope(a.page.table, decodeRow(e.record)) : undefined,
         });
     }
     for (const e of a.page.rows as ArchiveEnvelope[]) {
@@ -683,11 +703,25 @@ export const savePage = internalMutation({
       phase: scanDone
         ? 'CLOSURE'
         : job.phase === 'CLOSURE' && a.page.done
-          ? 'REFERENCE_MAPPINGS'
+          ? 'COLD_FILES'
+          : job.phase === 'COLD_FILES' && a.page.done
+            ? 'REFERENCE_MAPPINGS'
           : job.phase === 'REFERENCE_MAPPINGS' && a.page.done
             ? 'SIGNING'
             : job.phase,
       updatedAt: Date.now(),
+      ...(job.phase === 'COLD_FILES' ? {
+        cursor: a.page.done ? null : a.page.cursor,
+        metadata: { ...job.metadata, coldHistoryFiles: {
+          policy: 'complete-selected-source-only',
+          included: (job.metadata.coldHistoryFiles?.included ?? 0) + a.page.rows.length,
+          excluded: {
+            CANONICAL_MEMORY_NOT_SELECTED: (job.metadata.coldHistoryFiles?.excluded?.CANONICAL_MEMORY_NOT_SELECTED ?? 0) + (a.page.excluded?.CANONICAL_MEMORY_NOT_SELECTED ?? 0),
+            SOURCE_SCOPE_INCOMPLETE: (job.metadata.coldHistoryFiles?.excluded?.SOURCE_SCOPE_INCOMPLETE ?? 0) + (a.page.excluded?.SOURCE_SCOPE_INCOMPLETE ?? 0),
+            SOURCE_SCOPE_NOT_SELECTED: (job.metadata.coldHistoryFiles?.excluded?.SOURCE_SCOPE_NOT_SELECTED ?? 0) + (a.page.excluded?.SOURCE_SCOPE_NOT_SELECTED ?? 0),
+          },
+        } },
+      } : {}),
     });
   },
 });
@@ -809,6 +843,7 @@ export const advanceExport = action({
           operator: job.metadata.operator,
           reason: job.metadata.reason,
           chunks,
+          coldHistoryFiles: job.metadata.coldHistoryFiles,
         };
         const signature = await sign(manifest, privateKey);
         await validateSelectiveManifest(manifest, signature);
@@ -821,6 +856,22 @@ export const advanceExport = action({
         publicationPending = false;
       } else {
         const page = await ctx.runQuery(refQ('page'), { jobId: a.jobId });
+        if (page.table === 'coldHistoryFiles') {
+          page.excluded = { CANONICAL_MEMORY_NOT_SELECTED: 0, SOURCE_SCOPE_INCOMPLETE: 0, SOURCE_SCOPE_NOT_SELECTED: 0 };
+          for (const candidate of page.candidates) {
+            const { archive, owner, exclusion } = candidate;
+            if (!candidate.verifyOriginal) { page.excluded[exclusion]++; continue; }
+            const payload = await loadColdHistory(ctx, archive);
+            const row: ColdLargeRow = { _id: archive._id, _creationTime: archive._creationTime,
+              owner, file: { format: 'ai-town-cold-history-file', version: 1,
+                manifest: archive.manifest, publicKey: archive.publicKey, signature: archive.signature, payload },
+              authorAliases: archive.authorAliases ?? [] };
+            await ctx.runQuery(refQ('checkColdFile'), { row, adminToken: a.adminToken });
+            if (exclusion) page.excluded[exclusion]++;
+            else page.rows.push({ kind: 'record', role: 'dependency', record: encodeRow(row),
+              references: validateSourceRow('coldHistoryFiles', row) });
+          }
+        }
         const groups: string[][] = [];
         let current: string[] = [];
         for (const row of page.rows) {
@@ -871,6 +922,10 @@ export const advanceExport = action({
     job = await ctx.runQuery(refQ('jobData'), { jobId: a.jobId });
     return view(job);
   },
+});
+export const checkColdFile = internalQuery({
+  args: { row: v.any(), adminToken: v.string() },
+  handler: async (ctx, a) => { requireAdmin(a.adminToken); await checkColdLargeExport(ctx, a.row, a.adminToken); },
 });
 export const chunkData = internalQuery({
   args: { jobId: v.id('backupLargeJobs'), index: v.number() },

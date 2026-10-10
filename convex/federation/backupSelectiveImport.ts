@@ -14,7 +14,10 @@ import { Doc, Id, TableNames } from '../_generated/dataModel';
 import { assertTownUnlocked } from './maintenanceLock';
 import { assertNoIdentityConflict } from './identityConflict';
 import { requireAdmin, digest } from './security';
-import { BackupRow, decodeRow, encodeRow, stripSystem } from './backupHelpers';
+import { BackupRow, BackupBundle, decodeRow, encodeRow, stripSystem } from './backupHelpers';
+import { coldScope } from './coldLarge';
+import { restoreColdFiles, validateColdAttachments } from './coldBackup';
+import { captureSource } from './coldHistory';
 import {
   ChunkDescriptor,
   LargeChunk,
@@ -545,6 +548,8 @@ export const saveChunk = internalMutation({
         references: e.kind === 'record' ? e.references : [],
         metadata: { envelope: e },
         ownerGlobalId: row ? rowOwner(row, m.selection)?.agentGlobalId : undefined,
+        worldId: row?.worldId,
+        sourceScope: row ? coldScope(chunk.table, row) : undefined,
       });
     }
     await ctx.db.insert('backupLargeChunks', {
@@ -598,6 +603,10 @@ async function ownersFor(ctx: { db: DatabaseReader }, j: Job, r: Row): Promise<s
     row = data(r),
     envelope = record(r);
   const owner = rowOwner(row, m.selection);
+  if (r.table === 'coldHistoryFiles') {
+    const coldOwner = rowOwner(row.owner, m.selection);
+    return coldOwner ? [coldOwner.agentGlobalId] : [];
+  }
   if (owner) return [owner.agentGlobalId];
   if (['playerDescriptions', 'archivedPlayers'].includes(r.table))
     return m.selection.owners
@@ -629,6 +638,7 @@ async function checkRecord(ctx: { db: DatabaseReader }, j: Job, r: Row) {
     scope = m.selection.scope;
   const owners = await ownersFor(ctx, j, r);
   const privateRow =
+    r.table === 'coldHistoryFiles' ||
     r.table === 'memories' ||
     archivalTables.has(r.table) ||
     [
@@ -698,6 +708,7 @@ async function checkRecord(ctx: { db: DatabaseReader }, j: Job, r: Row) {
   if (e.publicParticipants?.some((p) => p.worldId !== row.worldId))
     throw new Error('SELECTIVE_IMPORT_PUBLIC_CONTEXT_WORLD_MISMATCH');
   if (e.role === 'primary') {
+    if (r.table === 'coldHistoryFiles') throw new Error('SELECTIVE_IMPORT_PRIMARY_SCOPE_MISMATCH');
     if ((residentTables as readonly string[]).includes(r.table) && !owners.length)
       throw new Error('SELECTIVE_IMPORT_PRIMARY_OWNER_MISMATCH');
     if (scope === 'config-only') {
@@ -824,9 +835,18 @@ export const validatePage = internalMutation({
       await ctx.db
         .query('backupLargeRows')
         .withIndex('job_state', (q) => q.eq('jobId', j._id).eq('state', 'VERIFIED'))
-        .first()
+        .filter(q => q.neq(q.field('table'), 'coldHistoryFiles')).first()
     )
       throw new Error('SELECTIVE_IMPORT_ORPHAN_DEPENDENCY');
+    const cold = await ctx.db.query('backupLargeRows').withIndex('job_state', q =>
+      q.eq('jobId', j._id).eq('state', 'VERIFIED')).filter(q => q.eq(q.field('table'), 'coldHistoryFiles')).first();
+    if (cold) {
+      const memory = await source(ctx, j, data(cold).owner.memoryId);
+      if (memory?.state !== 'CHECKED' || memory.table !== 'memories' || memory.ownerGlobalId !== (await ownersFor(ctx, j, cold))[0])
+        throw new Error('SELECTIVE_IMPORT_ORPHAN_DEPENDENCY');
+      await ctx.db.patch(cold._id, { state: 'ROOTED' });
+      return;
+    }
     for (const mapping of m.options.profiles) {
       const profile = await source(ctx, j, mapping.sourceId);
       if (!profile || profile.table !== 'chatProfiles' || profile.state === 'EXTERNAL')
@@ -962,7 +982,7 @@ export const validatePage = internalMutation({
       targets: m.targetOwners,
     });
     await ctx.db.patch(j._id, {
-      phase: 'CAPTURE_TARGET',
+      phase: 'VALIDATE_COLD',
       state: 'VALIDATING',
       tableIndex: 0,
       cursor: null,
@@ -974,6 +994,107 @@ export const validatePage = internalMutation({
       },
       updatedAt: Date.now(),
     });
+  },
+});
+
+export const coldPageData = internalQuery({
+  args: { jobId: v.id('backupLargeJobs') },
+  handler: async (ctx, a) => {
+    const j = await owned(ctx, a.jobId), m = metadata(j);
+    if (!['VALIDATE_COLD', 'APPLY_COLD'].includes(j.phase)) throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    const page = await ctx.db.query('backupLargeRows').withIndex('job_table', q =>
+      q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', 'coldHistoryFiles'))
+      .paginate({ cursor: j.cursor, numItems: 1, maximumBytesRead: TARGET_CHUNK_BYTES });
+    const entries = [];
+    for (const r of page.page) {
+      const row = data(r), file = { owner: row.owner, file: row.file, authorAliases: row.authorAliases };
+      const apply = m.targetOwners.some(o => o.sourceAgentGlobalId === row.owner.agentGlobalId);
+      const rows: Record<string, BackupRow[]> = {};
+      if (j.phase === 'VALIDATE_COLD') {
+        const memory = await source(ctx, j, row.owner.memoryId), world = await source(ctx, j, row.owner.worldId);
+        const binding = await ctx.db.query('backupLargeRows').withIndex('job_owner', q =>
+          q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', 'residentModelBindings').eq('ownerGlobalId', row.owner.agentGlobalId)).unique();
+        if (!memory || memory.table !== 'memories' || !world || world.table !== 'worlds' || !binding)
+          throw new Error('BACKUP_COLD_FILES_OWNER_INVALID');
+        const graph = [memory, world, binding], memoryData = data(memory).data;
+        const scope = memoryData.type === 'conversation' ? memoryData.conversationId :
+          JSON.stringify([row.owner.agentGlobalId, memoryData.transcriptId ?? `${memoryData.federationConversationId}/${memoryData.visitId}`]);
+        for (const name of memoryData.type === 'conversation' ? ['archivedConversations', 'messages'] : ['homeTravelTranscripts', 'homeTravelTranscriptPages']) {
+          const matches = await ctx.db.query('backupLargeRows').withIndex('job_scope', q =>
+            q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', name)
+              .eq('worldId', name === 'homeTravelTranscriptPages' ? undefined : row.owner.worldId).eq('sourceScope', scope)).take(1001);
+          if (matches.length > 1000) throw new Error('COLD_HISTORY_REQUIRES_CHUNKED_ARCHIVE');
+          graph.push(...matches);
+        }
+        for (const staged of graph) (rows[staged.table] ??= []).push(data(staged));
+      }
+      entries.push({ sourceId: r.sourceId, file, rows, apply });
+    }
+    return { isDone: page.isDone, continueCursor: page.continueCursor, entries };
+  },
+});
+export const saveColdPage = internalMutation({
+  args: { jobId: v.id('backupLargeJobs'), expectedCursor: v.union(v.string(), v.null()),
+    cursor: v.string(), done: v.boolean(), sourceIds: v.array(v.string()) },
+  handler: async (ctx, a) => {
+    const j = await owned(ctx, a.jobId);
+    if (j.phase !== 'VALIDATE_COLD' || j.cursor !== a.expectedCursor) throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    for (const id of a.sourceIds) {
+      const r = await source(ctx, j, id);
+      if (!r || r.table !== 'coldHistoryFiles') throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
+      const row = data(r), memory = await source(ctx, j, row.owner.memoryId);
+      if (!memory || memory.table !== 'memories') throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
+      const d = data(memory).data;
+      const relationKey = d.type === 'conversation' ? key('conversation', row.owner.worldId, d.conversationId) :
+        key('travel', row.owner.worldId, row.owner.agentGlobalId, d.transcriptId ?? `${d.federationConversationId}/${d.visitId}`);
+      const existing = await ctx.db.query('backupLargeRows').withIndex('job_relation', q =>
+        q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', 'coldHistoryFiles').eq('relationKey', relationKey)).unique();
+      if (existing && existing.sourceId !== id) throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+      await ctx.db.patch(r._id, { relationKey });
+    }
+    await ctx.db.patch(j._id, { cursor: a.done ? null : a.cursor,
+      phase: a.done ? 'CAPTURE_TARGET' : j.phase, updatedAt: Date.now() });
+  },
+});
+export const applyColdPage = internalMutation({
+  args: { jobId: v.id('backupLargeJobs'), expectedCursor: v.union(v.string(), v.null()),
+    cursor: v.string(), done: v.boolean(), sourceId: v.optional(v.string()), storageId: v.optional(v.id('_storage')) },
+  handler: async (ctx, a) => {
+    const j = await owned(ctx, a.jobId), m = metadata(j);
+    if (j.phase !== 'APPLY_COLD' || j.cursor !== a.expectedCursor) throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    if (a.sourceId) {
+      const staged = await source(ctx, j, a.sourceId);
+      if (!staged || staged.table !== 'coldHistoryFiles') throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
+      const row = data(staged), target = m.targetOwners.find(o => o.sourceAgentGlobalId === row.owner.agentGlobalId);
+      if (target) {
+        if (!a.storageId) throw new Error('BACKUP_COLD_FILES_STORAGE_REQUIRED');
+        const memory = await source(ctx, j, row.owner.memoryId);
+        if (!memory?.newId) throw new Error('BACKUP_COLD_FILES_TARGET_MAPPING_REQUIRED');
+        const mapping: Record<string, string> = { [row.owner.worldId]: target.worldId,
+          [row.owner.memoryId]: memory.newId, [row.owner.playerId]: target.playerId,
+          [row.owner.agentGlobalId]: target.agentGlobalId };
+        const prior = new Map<string, string>(row.authorAliases.map((alias: any) => [alias.sourceAuthor, alias.targetAuthor]));
+        const authors = new Set<string>(row.file.payload.messages.map((message: any) => message.authorGlobalId ?? message.authorPlayerId));
+        if (row.file.manifest.kind === 'travel') authors.add(JSON.parse(row.file.manifest.sourceKey)[2]);
+        for (const author of authors) {
+          const localAuthor = prior.get(author) ?? author;
+          mapping[localAuthor] = row.file.manifest.kind === 'conversation' ?
+            await localId(ctx, j, 'player', row.owner.worldId, localAuthor) :
+            (await getMap(ctx, j, key('global', localAuthor))) ?? localAuthor;
+        }
+        const owner = { adminToken: process.env.FEDERATION_ADMIN_TOKEN ?? '',
+          worldId: target.worldId as Id<'worlds'>, playerId: target.playerId,
+          agentGlobalId: target.agentGlobalId, memoryId: memory.newId as Id<'memories'> };
+        const before = await captureSource(ctx, owner, true);
+        await restoreColdFiles(ctx, owner.adminToken, { coldHistoryFiles: [{ owner: row.owner,
+          file: row.file, authorAliases: row.authorAliases }] } as BackupBundle, mapping, [{ index: 0, storageId: a.storageId }]);
+        const after = await captureSource(ctx, owner);
+        if (!before.existing && after.existing) await journal(ctx, j, 'coldHistoryArchives', after.existing._id);
+        await ctx.db.patch(staged._id, { state: 'APPLIED' });
+      }
+    }
+    await ctx.db.patch(j._id, { cursor: a.done ? null : a.cursor,
+      phase: a.done ? 'VECTOR_RESET' : j.phase, updatedAt: Date.now() });
   },
 });
 
@@ -1382,6 +1503,9 @@ async function fieldsFor(ctx: MutationCtx, j: Job, r: Row, remapping: boolean) {
     fields.memoryIds = remapping
       ? (await Promise.all((row.memoryIds as string[]).map(memoryRef))).filter(Boolean)
       : [];
+    fields.messages = await Promise.all(row.messages.map(async (message: BackupRow) => ({
+      ...message, author: (await getMap(ctx, j, key('global', message.author))) ?? message.author,
+    })));
   }
   if (r.table === 'homeTravelTranscripts' && target)
     fields.participants = await Promise.all(
@@ -1521,7 +1645,7 @@ export const applyPage = internalMutation({
       }
     }
     await ctx.db.patch(j._id, {
-      phase: page.isDone ? (remapping ? 'VECTOR_RESET' : 'REMAP') : j.phase,
+      phase: page.isDone ? (remapping ? 'APPLY_COLD' : 'REMAP') : j.phase,
       cursor: page.isDone ? null : page.continueCursor,
       metadata: { ...m, created, replaced, skipped, rebuildCount, externalEdgesSkipped },
       updatedAt: Date.now(),
@@ -1778,6 +1902,31 @@ export const advanceImport = action({
     try {
       if (['STAGING', 'VALIDATING', 'REACHABILITY'].includes(j.phase))
         await ctx.runMutation(mref('validatePage'), { jobId: j._id });
+      else if (j.phase === 'VALIDATE_COLD') {
+        const page = await ctx.runQuery(qref('coldPageData'), { jobId: j._id });
+        for (const entry of page.entries) {
+          const files = [entry.file], bytes = size(files);
+          await validateColdAttachments({ coldHistoryFiles: files, signature: j.signature,
+            manifest: { coldHistoryFiles: { count: 1, bytes, digest: await digest(files) } } } as BackupBundle, entry.rows);
+        }
+        await ctx.runMutation(mref('saveColdPage'), { jobId: j._id, expectedCursor: j.cursor,
+          cursor: page.continueCursor, done: page.isDone, sourceIds: page.entries.map((e: any) => e.sourceId) });
+      } else if (j.phase === 'APPLY_COLD') {
+        const page = await ctx.runQuery(qref('coldPageData'), { jobId: j._id });
+        let storageId: Id<'_storage'> | undefined;
+        if (page.entries.length && page.entries[0].apply) {
+          const file = page.entries[0].file.file;
+          storageId = await ctx.storage.store(new Blob([JSON.stringify(file.payload)], { type: 'application/json' }));
+          stored.push(storageId);
+          const object = await ctx.storage.get(storageId);
+          if (!object || object.size !== file.manifest.bytes || (await digest(JSON.parse(await object.text()))) !== file.manifest.digest)
+            throw new Error('COLD_HISTORY_INTEGRITY_FAILED');
+        }
+        publicationPending = !!storageId;
+        await ctx.runMutation(mref('applyColdPage'), { jobId: j._id, expectedCursor: j.cursor,
+          cursor: page.continueCursor, done: page.isDone, sourceId: page.entries[0]?.sourceId, storageId });
+        publicationPending = false;
+      }
       else if (j.phase === 'CAPTURE_TARGET') {
         const page = await ctx.runQuery(qref('capturePage'), { jobId: j._id });
         const groups: string[][] = [];

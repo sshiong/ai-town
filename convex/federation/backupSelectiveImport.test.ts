@@ -17,6 +17,8 @@ const modules = {
   '../federation/backupSelective.ts': () => import('./backupSelective'),
   '../federation/backupSelectiveImport.ts': () => import('./backupSelectiveImport'),
   '../federation/backupLarge.ts': () => import('./backupLarge'),
+  '../federation/coldHistory.ts': () => import('./coldHistory'),
+  '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../models/embeddings.ts': async () => ({
     indexMemory: internalAction({ args: { memoryId: v.id('memories') }, handler: () => undefined }),
   }),
@@ -264,6 +266,186 @@ async function apply(f: Fixture, jobId: Id<'backupLargeJobs'>) {
   });
   return drive(f, jobId);
 }
+async function signedConversation(f: Fixture, index = 0, firstText?: string) {
+  const conversationId: `c:${number}` = `c:${40 + index}`;
+  const memoryId = await f.t.run(async ctx => {
+    const memoryId = await ctx.db.insert('memories', { worldId: f.worldId, playerId: `p:${index}`,
+      agentGlobalId: f.globals[index], description: `Signed conversation owner ${index}`, importance: 8, lastAccess: 1,
+      data: { type: 'conversation', conversationId, playerIds: index ? [] : ['p:1'] } });
+    await ctx.db.insert('archivedConversations', { worldId: f.worldId, id: conversationId,
+      creator: `p:${index}`, created: 10, ended: 20, numMessages: 3, participants: index ? ['p:1'] : ['p:0', 'p:1'] });
+    for (let n = 0; n < 3; n++) await ctx.db.insert('messages', { worldId: f.worldId, conversationId,
+      author: index ? 'p:1' : n % 2 ? 'p:1' : 'p:0', text: n === 0 && firstText ? firstText : `Signed owner ${index} message ${n}`,
+      messageUuid: `signed-owner-${index}-${n}` });
+    return memoryId;
+  });
+  const owner = { adminToken, worldId: f.worldId, playerId: `p:${index}`, agentGlobalId: f.globals[index], memoryId };
+  const { archiveId } = await f.t.action(ref('coldHistory', 'archive', 'action'), owner);
+  const file = await f.t.action(ref('coldHistoryFiles', 'exportFile', 'action'), owner);
+  const original = (await f.t.run(ctx => ctx.db.get(archiveId as Id<'coldHistoryArchives'>)))!;
+  return { owner, file, original };
+}
+async function restoredColdOwner(f: Fixture, globalId: string) {
+  const binding = (await f.t.run(ctx => ctx.db.query('residentModelBindings').withIndex('globalAgent', q => q.eq('agentGlobalId', globalId)).unique()))!;
+  const memory = (await f.t.run(ctx => ctx.db.query('memories').withIndex('globalAgent', q => q.eq('agentGlobalId', globalId))
+    .filter(q => q.eq(q.field('description'), 'Signed conversation owner 0')).unique()))!;
+  return { adminToken, worldId: binding.worldId, playerId: binding.playerId, agentGlobalId: globalId, memoryId: memory._id };
+}
+test('selective clone carries only the selected complete signed cold scope and preserves source proof through re-export', async () => {
+  const source = await fixture('cold-source'), cold = await signedConversation(source);
+  await signedConversation(source, 1, 'Other resident private cold original');
+  const exported = await archive(source);
+  const attached = exported.chunks.filter(c => c.table === 'coldHistoryFiles').flatMap(c => c.rows.map(decodeRow)).map(e => decodeRow(e.record));
+  expect(attached).toHaveLength(1);
+  expect(attached[0].file).toEqual(cold.file);
+  expect(attached[0].owner.memoryId).toBe(cold.owner.memoryId);
+  expect(JSON.stringify(exported)).not.toContain('Other resident private cold original');
+  expect(JSON.stringify(exported)).not.toContain('storageId');
+  const target = await fixture('cold-target');
+  const result = await apply(target, await start(target, exported));
+  const owner = await restoredColdOwner(target, result.targetOwners[0].agentGlobalId);
+  expect(await target.t.action(ref('coldHistoryFiles', 'exportFile', 'action'), owner)).toEqual(cold.file);
+  const reexported = await archive(target, { agentGlobalIds: [owner.agentGlobalId] });
+  const carried = reexported.chunks.find(c => c.table === 'coldHistoryFiles')!;
+  expect(decodeRow(decodeRow(carried.rows[0]).record).file).toEqual(cold.file);
+});
+test('memory-only and filtered history state why immutable cold files are excluded without adding out-of-range originals', async () => {
+  const source = await fixture('filtered-cold');
+  await signedConversation(source);
+  const memoryOnly = await archive(source, { scope: 'memories-only', categories: ['conversation'] });
+  expect(memoryOnly.manifest.coldHistoryFiles).toMatchObject({ included: 0, excluded: { SOURCE_SCOPE_NOT_SELECTED: 1 } });
+  expect(JSON.stringify(memoryOnly)).not.toContain('Signed owner 0 message');
+  expect(JSON.stringify(memoryOnly)).toContain('Signed conversation owner 0');
+  const fullHistory = await archive(source, { scope: 'history', categories: ['conversation'] });
+  expect(fullHistory.manifest.coldHistoryFiles).toMatchObject({ included: 0, excluded: { CANONICAL_MEMORY_NOT_SELECTED: 1 } });
+  const filtered = await archive(source, { scope: 'history', categories: ['conversation'], from: 10, to: 21 });
+  expect(filtered.manifest.coldHistoryFiles?.included).toBe(0);
+  // The conversation's event-time is selected, while the retained message times
+  // are outside it. Immutable files must not add those excluded original texts.
+  expect(filtered.chunks.some(c => c.table === 'coldHistoryFiles')).toBe(false);
+  expect(JSON.stringify(filtered)).not.toContain('Signed owner 0 message');
+});
+test('missing signed cold entity fails export at a resumable checkpoint and never becomes a silent exclusion', async () => {
+  const source = await fixture('missing-cold'), cold = await signedConversation(source);
+  const body = await source.t.run(async ctx => (await ctx.storage.get(cold.original.storageId!))!.text());
+  await source.t.run(ctx => ctx.storage.delete(cold.original.storageId!));
+  await expect(archive(source)).rejects.toThrow('COLD_HISTORY_STORAGE_MISSING');
+  const job = (await source.t.run(ctx => ctx.db.query('backupLargeJobs').filter(q => q.eq(q.field('mode'), 'selective-archive')).unique()))!;
+  expect(job).toMatchObject({ state: 'FAILED', phase: 'COLD_FILES' });
+  const storageId = await source.t.run(ctx => ctx.storage.store(new Blob([body], { type: 'application/json' })));
+  await source.t.run(ctx => ctx.db.patch(cold.original._id, { storageId }));
+  await source.t.mutation(ref('backupSelective', 'resume', 'mutation'), { adminToken, jobId: job._id });
+  for (let n = 0; n < 20; n++) {
+    const state = await source.t.action(ref('backupSelective', 'advanceExport', 'action'), { adminToken, jobId: job._id });
+    if (state.state === 'COMPLETE') break;
+  }
+  expect((await source.t.query(ref('backupSelective', 'status', 'query'), { adminToken, jobId: job._id })).state).toBe('COMPLETE');
+});
+test('required cold-only original history fails, while independently complete canonical memory-only export stays available', async () => {
+  const source = await fixture('missing-hot-cold');
+  await signedConversation(source);
+  await source.t.run(async ctx => { for (const message of await ctx.db.query('messages').collect()) await ctx.db.delete(message._id); });
+  const memories = await archive(source, { scope: 'memories-only', categories: ['conversation'] });
+  expect(memories.manifest.coldHistoryFiles).toMatchObject({ included: 0, excluded: { SOURCE_SCOPE_NOT_SELECTED: 1 } });
+  expect(JSON.stringify(memories)).toContain('Signed conversation owner 0');
+  expect(JSON.stringify(memories)).not.toContain('Signed owner 0 message');
+  await expect(archive(source, { scope: 'history', categories: ['conversation'] })).rejects.toThrow('COLD_HISTORY_EMPTY_OR_DUPLICATE_MESSAGES');
+});
+test('inner signature forgery and signed hot original mismatch reject selective import before target writes', async () => {
+  const source = await fixture('forged-cold');
+  await signedConversation(source);
+  const exported = await archive(source), target = await fixture('forged-target');
+  const forged = structuredClone(exported), chunk = forged.chunks.find(c => c.table === 'coldHistoryFiles')!;
+  const envelope = decodeRow(chunk.rows[0]), row = decodeRow(envelope.record);
+  row.file.signature = 'invalid'; envelope.record = encodeRow(row); chunk.rows[0] = encodeRow(envelope);
+  await resign(source, forged);
+  await expect(start(target, forged)).rejects.toThrow('COLD_FILE_INTEGRITY_FAILED');
+  const job = (await target.t.run(ctx => ctx.db.query('backupLargeJobs').unique()))!;
+  await target.t.mutation(am('cancel'), { adminToken, jobId: job._id });
+  const inconsistent = structuredClone(exported), messages = inconsistent.chunks.find(c => c.table === 'messages')!;
+  const messageEnvelope = decodeRow(messages.rows[0]), message = decodeRow(messageEnvelope.record);
+  message.text = 'Signed outer package disagrees with immutable history'; messageEnvelope.record = encodeRow(message); messages.rows[0] = encodeRow(messageEnvelope);
+  await resign(source, inconsistent);
+  await expectPreflightFailure(target, inconsistent, options(target, inconsistent), 'BACKUP_COLD_FILES_MESSAGES_MISMATCH');
+});
+test('cancellation after publishing selective cold files restores original target indexes, storage and readable signatures', async () => {
+  const source = await fixture('cancel-cold-source'), cold = await signedConversation(source), exported = await archive(source);
+  const target = await fixture('cancel-cold-target'), prior = await signedConversation(target);
+  const originalWorld = await target.t.run(ctx => ctx.db.get(target.worldId));
+  const jobId = await start(target, exported), ready = await drive(target, jobId, 'READY');
+  await target.t.mutation(am('startApply'), { adminToken, jobId, expectedPlanDigest: ready.planDigest, expectedTargetDigest: ready.targetDigest, confirmChanges: true });
+  await drive(target, jobId, 'VECTOR_RESET');
+  expect(await target.t.run(ctx => ctx.db.query('coldHistoryArchives').collect())).toHaveLength(2);
+  await target.t.mutation(am('cancel'), { adminToken, jobId });
+  await drive(target, jobId, 'CANCELLED');
+  expect(await target.t.run(ctx => ctx.db.get(target.worldId))).toEqual(originalWorld);
+  expect(await target.t.run(ctx => ctx.db.query('coldHistoryArchives').collect())).toEqual([prior.original]);
+  expect(await target.t.action(ref('coldHistoryFiles', 'exportFile', 'action'), prior.owner)).toEqual(prior.file);
+  expect(cold.file.signature).toBeTruthy();
+});
+test('selective travel files map worldless pages and global authors while keeping the original signed file', async () => {
+  const source = await fixture('travel-cold'), transcriptId = 'conversation/completed-visit';
+  const memoryId = await source.t.run(async ctx => {
+    const memoryId = await ctx.db.insert('memories', { worldId: source.worldId, playerId: 'p:0',
+      agentGlobalId: source.globals[0], description: 'Signed travel original', importance: 8, lastAccess: 1,
+      data: { type: 'travel', eventId: 'travel-ended', visitId: 'completed-visit', hostTownId: 'town:friend',
+        federationConversationId: 'conversation', transcriptId, participants: [], occurredAt: 20 } });
+    await ctx.db.insert('homeTravelTranscripts', { worldId: source.worldId, playerId: 'p:0',
+      agentGlobalId: source.globals[0], transcriptId, visitId: 'completed-visit', hostTownId: 'town:friend',
+      federationConversationId: 'conversation', endedAt: 20, participants: [], finalPageNumber: 0,
+      receivedPageCount: 1, highestPageNumber: 0, totalMessageCount: 2, state: 'COMPLETE', summaryState: 'DONE', endMemoryId: memoryId });
+    await ctx.db.insert('homeTravelTranscriptPages', { agentGlobalId: source.globals[0], transcriptId,
+      pageNumber: 0, eventId: 'travel-page', finalPage: true, memoryIds: [memoryId],
+      messages: [{ messageId: 'travel-message-0', text: 'Home travel original', author: source.globals[0], occurredAt: 10 },
+        { messageId: 'travel-message-1', text: 'Foreign travel original', author: 'town:friend/visitor:bob', occurredAt: 11 }] });
+    return memoryId;
+  });
+  const owner = { adminToken, worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.globals[0], memoryId };
+  await source.t.action(ref('coldHistory', 'archive', 'action'), owner);
+  const file = await source.t.action(ref('coldHistoryFiles', 'exportFile', 'action'), owner);
+  const bounded = await archive(source, { categories: ['travel'], from: 10, to: 25 });
+  expect(bounded.manifest.coldHistoryFiles).toMatchObject({ included: 0, excluded: { SOURCE_SCOPE_INCOMPLETE: 1 } });
+  expect(JSON.stringify(bounded)).not.toContain('Home travel original');
+  const exported = await archive(source), target = await fixture('travel-cold-target');
+  const result = await apply(target, await start(target, exported)), clone = result.targetOwners[0];
+  const memory = (await target.t.run(ctx => ctx.db.query('memories').withIndex('globalAgent', q => q.eq('agentGlobalId', clone.agentGlobalId))
+    .filter(q => q.eq(q.field('description'), 'Signed travel original')).unique()))!;
+  const targetOwner = { adminToken, worldId: target.worldId, playerId: clone.playerId, agentGlobalId: clone.agentGlobalId, memoryId: memory._id };
+  expect(await target.t.action(ref('coldHistoryFiles', 'exportFile', 'action'), targetOwner)).toEqual(file);
+  const page = (await target.t.run(ctx => ctx.db.query('homeTravelTranscriptPages').unique()))!;
+  expect(page.messages[0].author).toBe(clone.agentGlobalId);
+  expect(page.messages[1].author).toBe('town:friend/visitor:bob');
+});
+test('lost selective cold publication response retains the referenced file and resumes after the saved checkpoint', async () => {
+  const source = await fixture('lost-cold-source'), cold = await signedConversation(source), exported = await archive(source);
+  const target = await fixture('lost-cold-target'), jobId = await start(target, exported), ready = await drive(target, jobId, 'READY');
+  await target.t.mutation(am('startApply'), { adminToken, jobId, expectedPlanDigest: ready.planDigest, expectedTargetDigest: ready.targetDigest, confirmChanges: true });
+  await drive(target, jobId, 'APPLY_COLD');
+  await selectiveLostAck(target, selectiveImportFunctions.advanceImport, 'applyColdPage', { adminToken, jobId });
+  const state = await target.t.query(aq('status'), { adminToken, jobId });
+  expect(state).toMatchObject({ state: 'FAILED', phase: 'VECTOR_RESET' });
+  const owner = await restoredColdOwner(target, state.targetOwners[0].agentGlobalId);
+  expect(await target.t.action(ref('coldHistoryFiles', 'exportFile', 'action'), owner)).toEqual(cold.file);
+  await target.t.mutation(am('resume'), { adminToken, jobId });
+  await drive(target, jobId);
+  expect(await target.t.action(ref('coldHistoryFiles', 'exportFile', 'action'), owner)).toEqual(cold.file);
+});
+test('selective cold preflight rejects the same local source across files and across saved validation pages', async () => {
+  const source = await fixture('duplicate-cold'), cold = await signedConversation(source), exported = await archive(source);
+  const original = exported.chunks.find(c => c.table === 'coldHistoryFiles')!, envelope = decodeRow(original.rows[0]), row = decodeRow(envelope.record);
+  row._id = 'distinct-import-file'; envelope.record = encodeRow(row);
+  exported.chunks.push({ index: exported.chunks.length, table: 'coldHistoryFiles', rows: [encodeRow(envelope)] });
+  exported.manifest.coldHistoryFiles!.included++;
+  await resign(source, exported);
+  const target = await fixture('duplicate-cold-target'), jobId = await start(target, exported);
+  await expect(drive(target, jobId, 'READY')).rejects.toThrow('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+  const checked = await target.t.run(ctx => ctx.db.query('backupLargeRows').withIndex('job_relation', q =>
+    q.eq('jobId', jobId).eq('role', 'SOURCE').eq('table', 'coldHistoryFiles')
+      .eq('relationKey', JSON.stringify(['conversation', source.worldId, 'c:40']))).collect());
+  expect(checked).toHaveLength(1);
+  expect(checked[0].sourceId).toBe(cold.original._id);
+  expect(await target.t.run(ctx => ctx.db.query('coldHistoryArchives').collect())).toEqual([]);
+});
 test('clone imports all 530 canonical memories and cyclic references with explicit Chat mapping and new Home identity', async () => {
   const original = await fixture('source', 530),
     exported = await archive(original),

@@ -21,6 +21,7 @@ type Job = {
   chunkCount: number;
   bytes: number;
   selection: Selection;
+  coldHistoryFiles?: SelectiveManifest['coldHistoryFiles'] | null;
   error?: string;
 };
 const status = makeFunctionReference<'query', JobArgs, Job>('federation/backupSelective:status');
@@ -298,6 +299,19 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
             {job.selection.from === null ? 'start' : new Date(job.selection.from).toISOString()} —{' '}
             {job.selection.to === null ? 'end' : new Date(job.selection.to).toISOString()}
           </p>
+          {job.coldHistoryFiles && (
+            <div className="admin-hint" role="status">
+              <p>Signed cold history files: {job.coldHistoryFiles.included} included.</p>
+              {Object.values(job.coldHistoryFiles.excluded).some(count => count > 0) && (
+                <p>
+                  Cold copies excluded: {job.coldHistoryFiles.excluded.SOURCE_SCOPE_NOT_SELECTED} outside
+                  the selected history categories; {job.coldHistoryFiles.excluded.CANONICAL_MEMORY_NOT_SELECTED} without
+                  a selected memory; {job.coldHistoryFiles.excluded.SOURCE_SCOPE_INCOMPLETE} with
+                  originals outside the selected range. The archive follows your chosen scope.
+                </p>
+              )}
+            </div>
+          )}
           {job.error && <p role="alert">{job.error}</p>}
           <div className="admin-toolbar">
             <AdminButton

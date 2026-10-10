@@ -59,6 +59,7 @@ import type * as federation_coldBackup from "../federation/coldBackup.js";
 import type * as federation_coldHistory from "../federation/coldHistory.js";
 import type * as federation_coldHistoryFiles from "../federation/coldHistoryFiles.js";
 import type * as federation_coldLarge from "../federation/coldLarge.js";
+import type * as federation_coldSelective from "../federation/coldSelective.js";
 import type * as federation_credentialRotationSchema from "../federation/credentialRotationSchema.js";
 import type * as federation_credentials from "../federation/credentials.js";
 import type * as federation_decision from "../federation/decision.js";
@@ -177,6 +178,7 @@ declare const fullApi: ApiFromModules<{
   "federation/coldHistory": typeof federation_coldHistory;
   "federation/coldHistoryFiles": typeof federation_coldHistoryFiles;
   "federation/coldLarge": typeof federation_coldLarge;
+  "federation/coldSelective": typeof federation_coldSelective;
   "federation/credentialRotationSchema": typeof federation_credentialRotationSchema;
   "federation/credentials": typeof federation_credentials;
   "federation/decision": typeof federation_decision;
