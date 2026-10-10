@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { action, internalMutation, internalQuery } from '../maintenanceFunctions';
 import type { Doc, Id } from '../_generated/dataModel';
-import type { QueryCtx } from '../_generated/server';
+import type { QueryCtx, MutationCtx } from '../_generated/server';
 import {
   archiveFor,
   captureSource,
@@ -145,7 +145,12 @@ export async function validateFile(
     throw new Error('COLD_FILE_INTEGRITY_FAILED');
   return file;
 }
-async function plan(ctx: QueryCtx, args: OwnerArgs, file: PortableHistory, authorAliases: Alias[]) {
+export async function plan(
+  ctx: QueryCtx,
+  args: OwnerArgs,
+  file: PortableHistory,
+  authorAliases: Alias[],
+) {
   const target = await captureSource(ctx, args, true);
   if (target.source.kind !== file.manifest.kind) throw new Error('COLD_FILE_TARGET_KIND_MISMATCH');
   if (authorAliases.length > 100) throw new Error('COLD_FILE_AUTHOR_MAPPING_INVALID');
@@ -173,11 +178,13 @@ async function plan(ctx: QueryCtx, args: OwnerArgs, file: PortableHistory, autho
       throw new Error('COLD_FILE_OWNER_MAPPING_REQUIRED');
   }
   const normalized = (messages: Payload['messages'], mapped: boolean) =>
-    messages.map((m) => ({
-      messageId: m.messageId,
-      text: m.text,
-      author: mapped ? (mapping.get(actor(m)) ?? actor(m)) : actor(m),
-    }));
+    messages
+      .map((m) => ({
+        messageId: m.messageId,
+        text: m.text,
+        author: mapped ? (mapping.get(actor(m)) ?? actor(m)) : actor(m),
+      }))
+      .sort((a, b) => a.messageId.localeCompare(b.messageId));
   if (
     (await digest(normalized(file.payload.messages, true))) !==
     (await digest(normalized(target.messages, false)))
@@ -233,38 +240,48 @@ export const preflight = action({
     return ctx.runQuery(queryRef('coldHistoryFiles/preflightData'), args);
   },
 });
+export async function adoptHistoryFile(
+  ctx: MutationCtx,
+  args: OwnerArgs & {
+    fileJson: string;
+    expectedFingerprint: string;
+    authorAliases: Alias[];
+    storageId: Id<'_storage'>;
+    confirmation: string;
+  },
+) {
+  const file = await validateFile(args.fileJson, args.expectedFingerprint),
+    p = await plan(ctx, args, file, args.authorAliases);
+  if (args.confirmation !== p.confirmation)
+    throw new Error('COLD_FILE_TARGET_CHANGED_REVIEW_AGAIN');
+  if (p.existing?.state === 'VERIFIED')
+    return { archiveId: p.existing._id, storageId: p.existing.storageId };
+  const fields = {
+    sourceKey: file.manifest.sourceKey,
+    lookupKey: p.source.sourceKey,
+    sourceId: file.manifest.sourceId,
+    worldId: args.worldId,
+    kind: file.manifest.kind,
+    ownerGlobalId: p.source.ownerGlobalId,
+    state: 'VERIFIED' as const,
+    manifest: file.manifest,
+    signature: file.signature,
+    publicKey: file.publicKey,
+    storageId: args.storageId,
+    createdAt: p.existing?.createdAt ?? Date.now(),
+    verifiedAt: Date.now(),
+    importedAt: Date.now(),
+    authorAliases: p.sortedAliases,
+  };
+  const archiveId = p.existing
+    ? p.existing._id
+    : await ctx.db.insert('coldHistoryArchives', fields);
+  if (p.existing) await ctx.db.replace(archiveId, fields);
+  return { archiveId, storageId: args.storageId };
+}
 export const adopt = internalMutation({
   args: { ...fileArgs, storageId: v.id('_storage'), confirmation: v.string() },
-  handler: async (ctx, args) => {
-    const file = await validateFile(args.fileJson, args.expectedFingerprint),
-      p = await plan(ctx, args, file, args.authorAliases);
-    if (args.confirmation !== p.confirmation)
-      throw new Error('COLD_FILE_TARGET_CHANGED_REVIEW_AGAIN');
-    if (p.existing?.state === 'VERIFIED')
-      return { archiveId: p.existing._id, storageId: p.existing.storageId };
-    const fields = {
-      sourceKey: file.manifest.sourceKey,
-      lookupKey: p.source.sourceKey,
-      sourceId: file.manifest.sourceId,
-      worldId: args.worldId,
-      kind: file.manifest.kind,
-      ownerGlobalId: p.source.ownerGlobalId,
-      state: 'VERIFIED' as const,
-      manifest: file.manifest,
-      signature: file.signature,
-      publicKey: file.publicKey,
-      storageId: args.storageId,
-      createdAt: p.existing?.createdAt ?? Date.now(),
-      verifiedAt: Date.now(),
-      importedAt: Date.now(),
-      authorAliases: p.sortedAliases,
-    };
-    const archiveId = p.existing
-      ? p.existing._id
-      : await ctx.db.insert('coldHistoryArchives', fields);
-    if (p.existing) await ctx.db.replace(archiveId, fields);
-    return { archiveId, storageId: args.storageId };
-  },
+  handler: adoptHistoryFile,
 });
 export const referenced = internalQuery({
   args: { ...ownerArgs, storageId: v.id('_storage') },
@@ -289,7 +306,7 @@ export const importFile = action({
     const storageId = await ctx.storage.store(
       new Blob([JSON.stringify(file.payload)], { type: 'application/json' }),
     );
-    let retained = false;
+    let retained = false, publicationStarted = false, acknowledged = false;
     try {
       const object = await ctx.storage.get(storageId);
       if (!object) throw new Error('COLD_HISTORY_STORAGE_MISSING');
@@ -298,12 +315,14 @@ export const importFile = action({
         (await digest(JSON.parse(await object.text()))) !== file.manifest.digest
       )
         throw new Error('COLD_FILE_INTEGRITY_FAILED');
+      publicationStarted = true;
       const result: { archiveId: Id<'coldHistoryArchives'>; storageId?: Id<'_storage'> } =
         await ctx.runMutation(mutationRef('coldHistoryFiles/adopt'), { ...args, storageId });
+      acknowledged = true;
       retained = result.storageId === storageId;
       return { archiveId: result.archiveId, state: 'VERIFIED' as const };
     } finally {
-      if (!retained) {
+      if (!retained && (!publicationStarted || acknowledged)) {
         let safeToDelete = false;
         try {
           safeToDelete = !(await ctx.runQuery(queryRef('coldHistoryFiles/referenced'), {

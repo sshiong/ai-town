@@ -1,3 +1,4 @@
+import { validateColdAttachments, type ColdBackupAttachment } from './coldBackup';
 import { convexToJson, jsonToConvex, Value } from 'convex/values';
 import { digest, verifySignature } from './security';
 import { validateResourceLimits } from './resources';
@@ -69,9 +70,11 @@ export type BackupBundle = {
     sourceTownId: string;
     exportedAt: number;
     sections: Record<string, { digest: string; count: number; bytes: number }>;
+    coldHistoryFiles?: { digest: string; count: number; bytes: number };
   };
   sections: Record<string, unknown[]>;
   signature?: string;
+  coldHistoryFiles?: ColdBackupAttachment[];
 };
 export type ImportMode = 'restore' | 'migrate' | 'clone' | 'merge';
 const allowed = new Set<string>([
@@ -203,6 +206,7 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
       ids.add(doc._id);
     }
   }
+  count += bundle.coldHistoryFiles?.length ?? 0;
   if (count > 500) throw new Error('BACKUP_ATOMIC_RECORD_LIMIT');
   if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['federationIdentityKeyHistory', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t) && !bundle.sections[t]))
     throw new Error('INCOMPLETE_TOWN_BACKUP');
@@ -220,6 +224,7 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
     !(await verifySignature(bundle.manifest, bundle.signature, identities[0].publicKey))
   )
     throw new Error('BACKUP_SIGNATURE_INVALID');
+  await validateColdAttachments(bundle, Object.fromEntries(Object.entries(bundle.sections).map(([name, values]) => [name, values.map(decodeRow)])));
   return bundle;
 }
 

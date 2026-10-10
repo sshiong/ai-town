@@ -1,3 +1,5 @@
+import { packColdFiles, restoreColdFiles, type PreparedColdFile } from './coldBackup';
+import { queryRef } from './refs';
 import { ObjectType, v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
 import {
@@ -126,9 +128,20 @@ export const getResident = internalQuery({
     if (!binding) throw new Error('RESIDENT_BINDING_MISSING');
     const history = await ctx.db.query('participatedTogether')
       .withIndex('playerHistory', q => q.eq('worldId', args.worldId).eq('player1', args.playerId)).take(501);
+    const residentMemories: BackupRow[] = await ctx.db.query('memories').withIndex('resident', q => q.eq('worldId', args.worldId).eq('playerId', args.playerId)).take(501);
+    const legacy = await ctx.db.query('memories').withIndex('playerId', q => q.eq('playerId', args.playerId))
+      .filter(q => q.eq(q.field('worldId'), undefined)).take(501);
+    if (legacy.length) {
+      const owners = await ctx.db.query('residentModelBindings').filter(q => q.eq(q.field('playerId'), args.playerId)).take(2);
+      if (owners.length !== 1) throw new Error('LEGACY_MEMORY_OWNER_AMBIGUOUS');
+      residentMemories.push(...legacy.map(m => ({ ...m, worldId: args.worldId, agentGlobalId: binding.agentGlobalId })));
+    }
+    // Imported canonical memories may have no native encounter-counter row.
+    // Their closed conversation and complete original messages still belong in the backup.
+    const referencedConversations = residentMemories.filter(m => m.data.type === 'conversation').map(m => m.data.conversationId as `c:${number}`);
     const archived: BackupRow[] = [];
     const messages: BackupRow[] = [];
-    for (const conversationId of new Set(history.map(h => h.conversationId))) {
+    for (const conversationId of new Set([...history.map(h => h.conversationId), ...referencedConversations])) {
       const conversation = await ctx.db.query('archivedConversations')
         .withIndex('worldId', q => q.eq('worldId', args.worldId).eq('id', conversationId)).unique();
       if (conversation) archived.push(conversation);
@@ -149,7 +162,7 @@ export const getResident = internalQuery({
     }
     const all: Record<string, BackupRow[]> = {
       worlds: [world], residentModelBindings: [binding],
-      memories: await ctx.db.query('memories').withIndex('resident', q => q.eq('worldId', args.worldId).eq('playerId', args.playerId)).take(501),
+      memories: residentMemories,
       maps: await ctx.db.query('maps').withIndex('worldId', q => q.eq('worldId', args.worldId)).take(2),
       playerDescriptions: descriptions,
       agentDescriptions: await ctx.db.query('agentDescriptions').withIndex('worldId', q => q.eq('worldId', args.worldId).eq('agentId', agent.id)).take(2),
@@ -158,15 +171,6 @@ export const getResident = internalQuery({
       archivedConversations: archived, messages, participatedTogether: history,
       archivedPlayers: oldPlayers, federationIdentity: [sanitize(local)],
     };
-    // Unscoped legacy memories can only be attributed when the local player ID
-    // has exactly one fixed Home binding across all worlds.
-    const legacy = await ctx.db.query('memories').withIndex('playerId', q => q.eq('playerId', args.playerId))
-      .filter(q => q.eq(q.field('worldId'), undefined)).take(501);
-    if (legacy.length) {
-      const owners = await ctx.db.query('residentModelBindings').filter(q => q.eq(q.field('playerId'), args.playerId)).take(2);
-      if (owners.length !== 1) throw new Error('LEGACY_MEMORY_OWNER_AMBIGUOUS');
-      all.memories.push(...legacy.map(m => ({ ...m, worldId: args.worldId, agentGlobalId: binding.agentGlobalId })));
-    }
     const rows: Record<string, BackupRow[]> = {};
     const memories = all.memories.filter(
       (m) => m.worldId === args.worldId && m.playerId === args.playerId,
@@ -420,7 +424,7 @@ export const checkPreflight = internalQuery({
     args = { ...args, bundle: importBundle(args) };
     if (args.mode === 'restore' && args.bundle?.manifest?.scope === 'resident') {
       const plan = await residentRestorePlan(ctx, args);
-      return { valid: true as const, mode: args.mode, scope: 'resident', counts: plan.counts, vectorPolicy: 'REBUILD' as const,
+      return { valid: true as const, mode: args.mode, scope: 'resident', counts: {...plan.counts,...(args.bundle.manifest.coldHistoryFiles ? {coldHistoryFiles:args.bundle.manifest.coldHistoryFiles.count} : {})}, vectorPolicy: 'REBUILD' as const,
         warnings: ['Only this Home resident is restored; newer memory IDs and other residents are retained.',
           'Runtime snapshots, travel leases and pending jobs are not replayed.',
           'Confirm the target digest before applying the resident restore.'], residentRestorePlan: plan.report };
@@ -430,7 +434,7 @@ export const checkPreflight = internalQuery({
       valid: true as const,
       mode: args.mode,
       scope: bundle.manifest.scope,
-      counts: Object.fromEntries(Object.entries(rows).map(([key, values]) => [key, values.length])),
+      counts: {...Object.fromEntries(Object.entries(rows).map(([key, values]) => [key, values.length])),...(bundle.manifest.coldHistoryFiles ? {coldHistoryFiles:bundle.manifest.coldHistoryFiles.count} : {})},
       vectorPolicy: 'REBUILD' as const,
       warnings: [
         'Imported vectors and caches are rebuilt.',
@@ -451,15 +455,42 @@ export const importBackup = action({
     mapping: Record<string, string>;
     rebuildRequired: true;
     importId?: Id<'backupImports'>;
+    coldFilesRestored?: number;
     residentRestoreReport?: Awaited<ReturnType<typeof residentRestorePlan>>['report'];
   }> => {
     requireAdmin(args.adminToken);
     // Generate fresh identity material outside the database transaction; never accept an imported private key.
     const keys = args.mode === 'clone' ? await createIdentityKeys() : undefined;
-    return ctx.runMutation(makeFunctionReference<'mutation'>('federation/backup:applyImport'), {
-      ...args,
-      keys,
-    });
+    const bundle = await validateBundle(importBundle(args));
+    // Review all canonical ownership and target constraints before creating storage objects.
+    await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:checkPreflight'), args);
+    const preparedColdFiles: PreparedColdFile[] = [];
+    let publicationStarted = false, acknowledged = false;
+    try {
+      for (const [index, attachment] of (bundle.coldHistoryFiles ?? []).entries()) {
+        const storageId = await ctx.storage.store(new Blob([JSON.stringify(attachment.file.payload)], {type:'application/json'}));
+        preparedColdFiles.push({index,storageId});
+        const blob = await ctx.storage.get(storageId);
+        if (!blob || blob.size !== attachment.file.manifest.bytes || await digest(JSON.parse(await blob.text())) !== attachment.file.manifest.digest)
+          throw new Error('BACKUP_COLD_FILES_STORAGE_INVALID');
+      }
+      publicationStarted = true;
+      const result = await ctx.runMutation(makeFunctionReference<'mutation'>('federation/backup:applyImport'), {
+        ...args, keys, preparedColdFiles,
+      });
+      acknowledged = true;
+      return result;
+    } finally {
+      for (const {storageId} of preparedColdFiles) {
+        // A lost response can leave publication in flight. A separate read cannot
+        // prove that it will never commit later, so preserve every staged object.
+        if (publicationStarted && !acknowledged) continue;
+        let safe = false;
+        try { safe = !(await ctx.runQuery(queryRef('coldBackup/referenced'),{storageId})); }
+        catch { /* Preserve an object when publication acknowledgement is unknown. */ }
+        if (safe) await ctx.storage.delete(storageId);
+      }
+    }
   },
 });
 
@@ -476,6 +507,7 @@ function mergePosition(map: WorldMap, occupied: Point[], desired: Point): Point 
 }
 const applyImportFields = {
   ...importArgs,
+  preparedColdFiles: v.optional(v.array(v.object({index:v.number(),storageId:v.id('_storage')}))),
   keys: v.optional(
     v.object({ publicKey: v.string(), privateKeyEncrypted: v.string(), fingerprint: v.string() }),
   ),
@@ -486,7 +518,12 @@ export async function applyBackupData(
 ) {
   requireAdmin(args.adminToken);
   args = { ...args, bundle: importBundle(args) };
-  if (args.mode === 'restore' && args.bundle?.manifest?.scope === 'resident') return applyResidentRestore(ctx, args);
+  if (args.mode === 'restore' && args.bundle?.manifest?.scope === 'resident') {
+    const result = await applyResidentRestore(ctx, args);
+    const bundle = await validateBundle(args.bundle);
+    const coldFilesRestored = await restoreColdFiles(ctx,args.adminToken,bundle,result.mapping,args.preparedColdFiles);
+    return {...result,coldFilesRestored};
+  }
   const { bundle, local, rows } = await checkImport(ctx, args);
   const mapping: Record<string, string> = {};
   const snapshots = Object.fromEntries(
@@ -778,7 +815,9 @@ export async function applyBackupData(
       makeFunctionReference<'action'>('models/embeddings:indexMemory'),
       { memoryId: mapping[memory._id] },
     );
+  const coldFilesRestored = await restoreColdFiles(ctx,args.adminToken,bundle,mapping,args.preparedColdFiles);
   return {
+    coldFilesRestored,
     mode: args.mode,
     worldIds: [...new Set((rows.worlds ?? []).map((w) => mapping[w._id]))],
     mapping,
@@ -816,8 +855,8 @@ async function recordExport(
     sourceTownId: bundle.manifest.sourceTownId,
     exportedAt: bundle.manifest.exportedAt,
     manifestDigest: await digest(bundle.manifest),
-    sectionCounts: Object.fromEntries(Object.entries(bundle.manifest.sections).map(([name, section]) => [name, section.count])),
-    bytes: Object.values(bundle.manifest.sections).reduce((total, section) => total + section.bytes, 0),
+    sectionCounts: {...Object.fromEntries(Object.entries(bundle.manifest.sections).map(([name, section]) => [name, section.count])), ...(bundle.manifest.coldHistoryFiles ? {coldHistoryFiles:bundle.manifest.coldHistoryFiles.count} : {})},
+    bytes: Object.values(bundle.manifest.sections).reduce((total, section) => total + section.bytes, 0) + (bundle.manifest.coldHistoryFiles?.bytes ?? 0),
   });
 }
 
@@ -826,7 +865,8 @@ export const exportTown = action({
   handler: async (ctx, args): Promise<BackupBundle> => {
     requireAdmin(args.adminToken);
     attribution(args);
-    const bundle: BackupBundle = await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getTown'), { adminToken: args.adminToken });
+    const base: BackupBundle = await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getTown'), { adminToken: args.adminToken });
+    const bundle = await packColdFiles(ctx,args.adminToken,base);
     await recordExport(ctx, args, bundle);
     return bundle;
   },
@@ -836,7 +876,8 @@ export const exportResident = action({
   handler: async (ctx, args): Promise<BackupBundle> => {
     requireAdmin(args.adminToken);
     attribution(args);
-    const bundle: BackupBundle = await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getResident'), { adminToken: args.adminToken, worldId: args.worldId, playerId: args.playerId });
+    const base: BackupBundle = await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getResident'), { adminToken: args.adminToken, worldId: args.worldId, playerId: args.playerId });
+    const bundle = await packColdFiles(ctx,args.adminToken,base);
     await recordExport(ctx, args, bundle, { worldId: args.worldId, playerId: args.playerId });
     return bundle;
   },

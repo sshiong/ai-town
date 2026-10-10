@@ -348,3 +348,21 @@ test('travel owner alias is required independently of same-name or identical ret
     }),
   ).rejects.toThrow('COLD_FILE_OWNER_MAPPING_REQUIRED');
 });
+
+test('restored hot insertion order may differ while the signed original chronology remains intact', async () => {
+  const src = await sourceFile('conversation'), dst = await town('copy','conversation');
+  await dst.t.run(async ctx => {
+    const rows = await ctx.db.query('messages').collect();
+    for (const r of rows) await ctx.db.delete(r._id);
+    for (const index of [0,2,1]) {
+      const {_id,_creationTime,...fields} = rows[index];
+      await ctx.db.insert('messages',fields);
+    }
+  });
+  const args = {...dst.owner,fileJson:JSON.stringify(src.file),expectedFingerprint:src.fingerprint,authorAliases:aliases('conversation')};
+  const review = await dst.t.action(action('coldHistoryFiles:preflight'),args);
+  await dst.t.action(action('coldHistoryFiles:importFile'),{...args,confirmation:review.confirmation});
+  const restored = await dst.t.action(action('coldHistoryFiles:exportFile'),dst.owner);
+  expect(restored).toEqual(src.file);
+  expect((await dst.t.run(ctx => ctx.db.query('messages').collect())).map(m => m.messageUuid)).toEqual(['uuid-0','uuid-2','uuid-1']);
+});

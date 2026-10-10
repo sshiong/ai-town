@@ -8,7 +8,7 @@ import { convexToJson, type Value } from 'convex/values';
 import { createIdentityKeys, digest, sign } from './security';
 import { BackupBundle, decodeRow, encodeRow, validateBundle } from './backupHelpers';
 import { embeddingFingerprint } from '../models/compatibility';
-import { applyBackupData } from './backup';
+import { applyBackupData, importBackup } from './backup';
 import { defaultStoragePolicy } from './storagePolicy';
 import { receiveConversationEnded } from '../agent/travelTranscript';
 import { DEFAULT_RESOURCE_LIMITS } from './resources';
@@ -18,6 +18,9 @@ import type { ActionCtx } from '../_generated/server';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
+  '../federation/coldBackup.ts': () => import('./coldBackup'),
+  '../federation/coldHistory.ts': () => import('./coldHistory'),
+  '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../federation/backup.ts': () => import('./backup'),
   '../federation/backupExportAudit.ts': () => import('./backupExportAudit'),
   '../models/embeddings.ts': () => import('../models/embeddings'),
@@ -933,8 +936,19 @@ test('canonical completed travel transcripts and relationship evidence survive s
       messages: [{ messageId: 'raw-self', text: 'p:0', author: 'p:9', occurredAt: 1 },
         { messageId: 'raw-other', text: 'I remember our visit.', author: 'p:0', occurredAt: 2 }] });
   });
-  const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
-  await t.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'restore', sourceStopped: true });
+  const coldOwner = await t.run(async ctx => {
+    const transcript = (await ctx.db.query('homeTravelTranscripts').unique())!;
+    await ctx.db.patch(transcript._id,{summaryState:'DONE'});
+    const page = (await ctx.db.query('homeTravelTranscriptPages').unique())!;
+    return {adminToken,worldId,playerId:'p:0' as const,agentGlobalId,memoryId:page.memoryIds[0]};
+  });
+  await t.action(action('federation/coldHistory:archive'),coldOwner);
+  const bundle: BackupBundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(bundle.coldHistoryFiles).toHaveLength(1);
+  const originalFile = bundle.coldHistoryFiles![0].file;
+  const restored = await t.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'restore', sourceStopped: true });
+  expect(restored.coldFilesRestored).toBe(1);
+  expect(await t.action(action('federation/coldHistoryFiles:exportFile'),{...coldOwner,worldId:restored.mapping[worldId],memoryId:restored.mapping[coldOwner.memoryId]})).toEqual(originalFile);
   const check = async () => t.run(async ctx => {
     const transcripts = await ctx.db.query('homeTravelTranscripts').collect(), pages = await ctx.db.query('homeTravelTranscriptPages').collect();
     const memories = await ctx.db.query('memories').collect();
@@ -1193,4 +1207,94 @@ test('public signing-key history survives a town backup only as untrusted immuta
   expect(restored[0].verified).toBe(false);
   expect(restored[0].certificate).toEqual(certificate);
   expect(restored[0].activation).toEqual(activation);
+});
+
+async function nativeColdOwner(t: Awaited<ReturnType<typeof town>>['t'], worldId: Id<'worlds'>) {
+  return t.run(async ctx => {
+    const binding = await ctx.db.query('residentModelBindings').first();
+    const memoryId = await ctx.db.insert('memories', {worldId,playerId:'p:0',agentGlobalId:binding!.agentGlobalId,
+      description:'Closed original conversation',importance:6,lastAccess:1,data:{type:'conversation',conversationId:'c:2',playerIds:['p:7']}});
+    return {adminToken,worldId,playerId:'p:0' as const,agentGlobalId:binding!.agentGlobalId,memoryId};
+  });
+}
+test('small signed town backup automatically packs real cold objects and clones them into an independent database without opaque storage IDs', async () => {
+  const src = await town(), owner = await nativeColdOwner(src.t,src.worldId);
+  await src.t.action(action('federation/coldHistory:archive'),owner);
+  const bundle: BackupBundle = await src.t.action(action('federation/backup:exportTown'),{adminToken});
+  expect(bundle.coldHistoryFiles).toHaveLength(1);
+  expect(JSON.stringify(bundle.coldHistoryFiles)).not.toContain('storageId');
+  const originalFile = bundle.coldHistoryFiles![0].file;
+  const dst = convexTest(schema,modules);
+  const result = await dst.action(action('federation/backup:importBackup'),{adminToken,bundleJson:JSON.stringify(bundle),mode:'clone',targetEndpoint:'https://cloned.example/federation/v1'});
+  expect(result.coldFilesRestored).toBe(1);
+  const mappedOwner = {...owner,worldId:result.mapping[owner.worldId],memoryId:result.mapping[owner.memoryId],agentGlobalId:result.mapping[owner.agentGlobalId!]};
+  const recovered = await dst.action(action('federation/coldHistoryFiles:exportFile'),mappedOwner);
+  expect(recovered).toEqual(originalFile);
+  const cold = await dst.run(ctx => ctx.db.query('coldHistoryArchives').first());
+  expect(cold!.worldId).toBe(mappedOwner.worldId);
+  expect(cold!.sourceKey).toBe(originalFile.manifest.sourceKey);
+  expect(cold!.lookupKey).not.toBe(cold!.sourceKey);
+  const audit = await src.t.run(ctx => ctx.db.query('backupExportAudits').order('desc').first());
+  expect(audit!.sectionCounts.coldHistoryFiles).toBe(1);
+});
+test('resident merge restores signed native files with composed author mappings and leaves source proof intact', async () => {
+  const src = await town(), owner = await nativeColdOwner(src.t,src.worldId);
+  await src.t.action(action('federation/coldHistory:archive'),owner);
+  await src.t.run(async ctx => { for (const row of await ctx.db.query('participatedTogether').collect()) await ctx.db.delete(row._id); });
+  const bundle: BackupBundle = await src.t.action(action('federation/backup:exportResident'),{adminToken,worldId:owner.worldId,playerId:owner.playerId});
+  expect(bundle.sections.participatedTogether).toHaveLength(0);
+  expect(bundle.sections.archivedConversations).toHaveLength(1);
+  const dst = await town();
+  const result = await dst.t.action(action('federation/backup:importBackup'),{adminToken,bundle,mode:'merge',targetWorldId:dst.worldId});
+  const binding = await dst.t.run(ctx => ctx.db.get(result.mapping[decodeRow(bundle.sections.residentModelBindings[0])._id] as Id<'residentModelBindings'>));
+  const mappedOwner = {...owner,worldId:dst.worldId,memoryId:result.mapping[owner.memoryId],playerId:binding!.playerId,agentGlobalId:binding!.agentGlobalId};
+  expect(await dst.t.action(action('federation/coldHistoryFiles:exportFile'),mappedOwner)).toEqual(bundle.coldHistoryFiles![0].file);
+  const read = await dst.t.action(action('federation/coldHistory:read'),{...mappedOwner,offset:0,numItems:25});
+  expect(read.page[0].targetAuthor).toBe(binding!.playerId);
+});
+test('attachment tampering, unsigned endorsement and missing prepared objects cannot mutate a target', async () => {
+  const src = await town(), owner = await nativeColdOwner(src.t,src.worldId);
+  await src.t.action(action('federation/coldHistory:archive'),owner);
+  const bundle: BackupBundle = await src.t.action(action('federation/backup:exportResident'),{adminToken,worldId:owner.worldId,playerId:owner.playerId});
+  const unsigned = structuredClone(bundle); delete unsigned.signature;
+  await expect(validateBundle(unsigned)).rejects.toThrow('BACKUP_COLD_FILES_CHECKSUM_MISMATCH');
+  const tampered = structuredClone(bundle); tampered.coldHistoryFiles![0].file.payload.messages[0].text = 'tampered';
+  await expect(validateBundle(tampered)).rejects.toThrow('BACKUP_COLD_FILES_CHECKSUM_MISMATCH');
+  const dst = await town(), before = await dst.t.run(ctx => ctx.db.query('worlds').collect());
+  const mutation = makeFunctionReference<'mutation'>('federation/backup:applyImport');
+  await expect(dst.t.mutation(mutation,{adminToken,bundle,mode:'merge',targetWorldId:dst.worldId})).rejects.toThrow('BACKUP_COLD_FILES_STORAGE_REQUIRED');
+  expect(await dst.t.run(ctx => ctx.db.query('worlds').collect())).toEqual(before);
+  expect(await dst.t.run(ctx => ctx.db.query('coldHistoryArchives').collect())).toHaveLength(0);
+});
+
+test('same Home resident restore republishes a missing cold archive atomically and remains idempotent', async () => {
+  const src = await town(), owner = await nativeColdOwner(src.t,src.worldId);
+  await src.t.action(action('federation/coldHistory:archive'),owner);
+  const bundle: BackupBundle = await src.t.action(action('federation/backup:exportResident'),{adminToken,worldId:owner.worldId,playerId:owner.playerId});
+  await src.t.run(async ctx => { for (const row of await ctx.db.query('coldHistoryArchives').collect()) await ctx.db.delete(row._id); });
+  const args = await residentRestoreArgs(src.t,bundle,owner.worldId);
+  expect((await src.t.action(action('federation/backup:importBackup'),args)).coldFilesRestored).toBe(1);
+  const file = await src.t.action(action('federation/coldHistoryFiles:exportFile'),owner);
+  expect(file).toEqual(bundle.coldHistoryFiles![0].file);
+  const before = await src.t.run(ctx => ctx.db.query('coldHistoryArchives').collect());
+  await src.t.action(action('federation/backup:importBackup'),await residentRestoreArgs(src.t,bundle,owner.worldId));
+  expect(await src.t.run(ctx => ctx.db.query('coldHistoryArchives').collect())).toEqual(before);
+});
+
+test('a publication acknowledgement failure preserves the uploaded cold object even before any later reference read', async () => {
+  const src = await town(), owner = await nativeColdOwner(src.t,src.worldId);
+  await src.t.action(action('federation/coldHistory:archive'),owner);
+  const bundle: BackupBundle = await src.t.action(action('federation/backup:exportResident'),{adminToken,worldId:owner.worldId,playerId:owner.playerId});
+  const archive = await src.t.run(ctx => ctx.db.query('coldHistoryArchives').first());
+  const file = bundle.coldHistoryFiles![0].file;
+  let deletes = 0, queries = 0;
+  const handler = (importBackup as unknown as {_handler:(ctx:ActionCtx,args:any)=>Promise<unknown>})._handler;
+  const ctx = {
+    runQuery:async () => { queries++; return queries === 1 ? {} : false; },
+    runMutation:async () => { throw new Error('PUBLICATION_ACKNOWLEDGEMENT_LOST'); },
+    storage:{store:async()=>archive!.storageId!,get:async()=>new Blob([JSON.stringify(file.payload)]),delete:async()=>{deletes++;}},
+  } as unknown as ActionCtx;
+  await expect(handler(ctx,{adminToken,bundle,mode:'merge',targetWorldId:src.worldId})).rejects.toThrow('PUBLICATION_ACKNOWLEDGEMENT_LOST');
+  expect(queries).toBe(1);
+  expect(deletes).toBe(0);
 });

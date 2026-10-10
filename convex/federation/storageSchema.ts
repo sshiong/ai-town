@@ -30,14 +30,27 @@ export const storagePolicyFields = {
 };
 export const storagePolicyTables = {
   coldHistoryArchives: defineTable({
-    sourceKey: v.string(), lookupKey: v.optional(v.string()), worldId: v.id('worlds'), kind: v.union(v.literal('conversation'), v.literal('travel')),
-    sourceId: v.string(), ownerGlobalId: v.optional(v.string()),
+    sourceKey: v.string(),
+    lookupKey: v.optional(v.string()),
+    worldId: v.id('worlds'),
+    kind: v.union(v.literal('conversation'), v.literal('travel')),
+    sourceId: v.string(),
+    ownerGlobalId: v.optional(v.string()),
     state: v.union(v.literal('PENDING'), v.literal('VERIFIED')),
-    manifest: v.any(), signature: v.string(), publicKey: v.string(),
-    storageId: v.optional(v.id('_storage')), verifiedAt: v.optional(v.number()),
-    createdAt: v.number(), importedAt: v.optional(v.number()),
-    authorAliases: v.optional(v.array(v.object({sourceAuthor:v.string(),targetAuthor:v.string()}))),
-  }).index('source', ['sourceKey']).index('lookup', ['lookupKey']),
+    manifest: v.any(),
+    signature: v.string(),
+    publicKey: v.string(),
+    storageId: v.optional(v.id('_storage')),
+    verifiedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    importedAt: v.optional(v.number()),
+    authorAliases: v.optional(
+      v.array(v.object({ sourceAuthor: v.string(), targetAuthor: v.string() })),
+    ),
+  })
+    .index('source', ['sourceKey'])
+    .index('lookup', ['lookupKey'])
+    .index('storage', ['storageId']),
 
   storagePolicies: defineTable({
     key: v.string(),
