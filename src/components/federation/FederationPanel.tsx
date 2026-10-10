@@ -339,6 +339,29 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     Save source quota
                   </AdminButton>
                 </form>
+                <form
+                  className="admin-inline-form"
+                  key={`event-rate-${data.resources.maxRemoteEventsPerSecond}`}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const raw = String(new FormData(event.currentTarget).get('eventRate')).trim();
+                    void task.run('Saving remote event rate', async () => {
+                      await convex.mutation(api.federation.resourceMonitoring.configureRemoteEventRate, {
+                        adminToken, maxRemoteEventsPerSecond: raw === '' ? null : Number(raw),
+                      });
+                      await refresh();
+                    });
+                  }}
+                >
+                  <Field
+                    label="Remote work events per second"
+                    hint="Leave blank for unlimited. A shared token bucket permits a burst of up to this limit and refills each second. Zero pauses new visit requests and immediate runtime events. Retries reuse their receipts; lease renewals, return, cleanup, history and stream recovery remain available."
+                  >
+                    <input name="eventRate" type="number" min={0} max={1000} step={1}
+                      defaultValue={data.resources.maxRemoteEventsPerSecond ?? ''} />
+                  </Field>
+                  <AdminButton type="submit" disabled={!!task.pending}>Save event rate</AdminButton>
+                </form>
                 {data.resources.sourceOccupancy.length > 0 && (
                   <ul className="admin-list">
                     {data.resources.sourceOccupancy.map((source) => (

@@ -4,6 +4,12 @@ import { api } from '../../../convex/_generated/api';
 import type { Id } from '../../../convex/_generated/dataModel';
 import type { FunctionReturnType } from 'convex/server';
 import {
+  encryptBackupText,
+  readBackupText,
+  validBackupPassphrase,
+  type BackupFilePurpose,
+} from './backupEncryption';
+import {
   AdminButton,
   EmptyState,
   Field,
@@ -12,13 +18,7 @@ import {
   useAdminTask,
   formatTime,
 } from './AdminShared';
-import {
-  readArchiveJson,
-  selectArchiveDirectory,
-  supportsArchiveDirectory,
-  writeArchivePart,
-  writeArchiveText,
-} from './archiveFiles';
+import { selectArchiveDirectory, supportsArchiveDirectory, writeArchiveText } from './archiveFiles';
 
 type ArchiveManifest = FunctionReturnType<typeof api.federation.backupLarge.getManifest>;
 export default function ArchivePanel({ adminToken }: { adminToken: string }) {
@@ -40,6 +40,43 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
   const [chunkIndex, setChunkIndex] = useState(0);
   const pauseRequested = useRef(false);
   const [advancing, setAdvancing] = useState(false);
+  const [encryptDownloads, setEncryptDownloads] = useState(false);
+  const [exportPassphrase, setExportPassphrase] = useState('');
+  const [exportConfirmation, setExportConfirmation] = useState('');
+  const [importPassphrase, setImportPassphrase] = useState('');
+  const [manifestFile, setManifestFile] = useState<File>();
+  const canDownload =
+    !encryptDownloads ||
+    (validBackupPassphrase(exportPassphrase) && exportPassphrase === exportConfirmation);
+  function takeExportPassphrase() {
+    if (!encryptDownloads) return undefined;
+    if (!canDownload) throw new Error('Enter and confirm a strong archive passphrase.');
+    const secret = exportPassphrase;
+    setExportPassphrase('');
+    setExportConfirmation('');
+    return secret;
+  }
+  async function protectedPart(text: string, purpose: BackupFilePurpose, secret?: string) {
+    return secret === undefined
+      ? text
+      : encryptBackupText(text, secret, purpose, purpose === 'manifest' ? 5_000_000 : 1024 * 1024);
+  }
+  async function loadManifest(file: File) {
+    const secret = importPassphrase;
+    setImportPassphrase('');
+    const value = JSON.parse(
+      await readBackupText(file, 5_000_000, 'manifest', secret),
+    ) as ArchiveManifest;
+    if (
+      !value?.manifest ||
+      !Array.isArray(value.manifest.chunks) ||
+      typeof value.signature !== 'string'
+    )
+      throw new Error('Choose the signed manifest file, not an individual data chunk.');
+    setManifest(value);
+    setManifestName(file.name);
+    setManifestFile(undefined);
+  }
   useEffect(
     () => () => {
       pauseRequested.current = true;
@@ -77,6 +114,52 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
         federation admission and pause the target before starting maintenance.
       </p>
       <TaskFeedback task={task} />
+      <label className="admin-check">
+        <input
+          type="checkbox"
+          checked={encryptDownloads}
+          disabled={!!task.pending}
+          onChange={(event) => {
+            setEncryptDownloads(event.target.checked);
+            setExportPassphrase('');
+            setExportConfirmation('');
+          }}
+        />{' '}
+        Encrypt downloaded manifest and each chunk in this browser
+      </label>
+      {encryptDownloads && (
+        <div className="admin-form">
+          <Field
+            label="Archive passphrase"
+            hint="Use the same strong passphrase for the manifest and every chunk; enter it again for separate downloads. At least 12 characters, up to 1024 UTF-8 bytes."
+          >
+            <input
+              type="password"
+              autoComplete="new-password"
+              maxLength={1024}
+              value={exportPassphrase}
+              disabled={!!task.pending}
+              onChange={(event) => setExportPassphrase(event.target.value)}
+            />
+          </Field>
+          <Field label="Confirm archive passphrase">
+            <input
+              type="password"
+              autoComplete="new-password"
+              maxLength={1024}
+              value={exportConfirmation}
+              disabled={!!task.pending}
+              onChange={(event) => setExportConfirmation(event.target.value)}
+            />
+          </Field>
+        </div>
+      )}
+      <p className="admin-muted">
+        Each file is independently encrypted with AES-256-GCM while preserving its signed inner
+        archive. Folder saving encrypts one part at a time. Passphrases stay in browser memory and
+        are cleared after each operation. Keep them separately; lost passphrases cannot be
+        recovered.
+      </p>
       {progress && (
         <p role="status" className="admin-muted">
           {progress}
@@ -272,20 +355,26 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
             <>
               <div className="admin-toolbar">
                 <AdminButton
-                  disabled={!!task.pending}
+                  disabled={!!task.pending || !canDownload}
                   onClick={() =>
                     void task.run(
                       'Downloading signed manifest',
-                      async () =>
+                      async () => {
+                        const secret = takeExportPassphrase();
                         downloadJsonText(
-                          JSON.stringify(
-                            await convex.action(api.federation.backupLarge.getManifest, {
-                              adminToken,
-                              jobId: job.jobId,
-                            }),
+                          await protectedPart(
+                            JSON.stringify(
+                              await convex.action(api.federation.backupLarge.getManifest, {
+                                adminToken,
+                                jobId: job.jobId,
+                              }),
+                            ),
+                            'manifest',
+                            secret,
                           ),
                           `ai-town-manifest-${job.jobId}.json`,
-                        ),
+                        );
+                      },
                       'Signed manifest downloaded; also save every referenced chunk.',
                     )
                   }
@@ -293,28 +382,37 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
                   Download manifest
                 </AdminButton>
                 <AdminButton
-                  disabled={!!task.pending || !supportsArchiveDirectory()}
+                  disabled={!!task.pending || !canDownload || !supportsArchiveDirectory()}
                   onClick={() => {
                     void selectArchiveDirectory()
                       .then((directory) =>
                         task.run(
                           'Saving archive folder',
                           async () => {
+                            const secret = takeExportPassphrase();
                             const header = await convex.action(
                               api.federation.backupLarge.getManifest,
                               { adminToken, jobId: job.jobId },
                             );
-                            await writeArchivePart(directory, 'manifest.json', header);
+                            await writeArchiveText(
+                              directory,
+                              'manifest.json',
+                              await protectedPart(JSON.stringify(header), 'manifest', secret),
+                            );
                             for (let index = 0; index < job.chunkCount; index++) {
                               setProgress(`Saving chunk ${index + 1} / ${job.chunkCount}`);
                               await writeArchiveText(
                                 directory,
                                 `chunk-${String(index).padStart(6, '0')}.json`,
-                                await convex.action(api.federation.backupLarge.getChunk, {
-                                  adminToken,
-                                  jobId: job.jobId,
-                                  index,
-                                }),
+                                await protectedPart(
+                                  await convex.action(api.federation.backupLarge.getChunk, {
+                                    adminToken,
+                                    jobId: job.jobId,
+                                    index,
+                                  }),
+                                  'chunk',
+                                  secret,
+                                ),
                               );
                             }
                           },
@@ -346,6 +444,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
                 <AdminButton
                   disabled={
                     !!task.pending ||
+                    !canDownload ||
                     chunkIndex < 0 ||
                     chunkIndex >= job.chunkCount ||
                     !Number.isSafeInteger(chunkIndex)
@@ -353,15 +452,21 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
                   onClick={() =>
                     void task.run(
                       'Downloading archive chunk',
-                      async () =>
+                      async () => {
+                        const secret = takeExportPassphrase();
                         downloadJsonText(
-                          await convex.action(api.federation.backupLarge.getChunk, {
-                            adminToken,
-                            jobId: job.jobId,
-                            index: chunkIndex,
-                          }),
+                          await protectedPart(
+                            await convex.action(api.federation.backupLarge.getChunk, {
+                              adminToken,
+                              jobId: job.jobId,
+                              index: chunkIndex,
+                            }),
+                            'chunk',
+                            secret,
+                          ),
                           `chunk-${String(chunkIndex).padStart(6, '0')}.json`,
-                        ),
+                        );
+                      },
                       'Chunk downloaded. Preserve its filename and signed manifest.',
                     )
                   }
@@ -377,7 +482,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
         <summary>Stage a chunked archive for import</summary>
         <Field
           label="Signed archive manifest"
-          hint="Choose the signed manifest JSON, up to 5 MB. Keep every referenced chunk alongside it."
+          hint="Choose a plain or browser-encrypted signed manifest (up to 5 MB before encryption). For encrypted files, enter the passphrase below and retry loading. Keep every referenced chunk."
         >
           <input
             type="file"
@@ -389,27 +494,45 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
               setManifestName('');
               setSourceStopped(false);
               setReviewed(false);
+              setManifestFile(file);
               if (!file) return;
               void task.run(
                 'Reading signed manifest',
-                async () => {
-                  const value = (await readArchiveJson(file, 5_000_000)) as ArchiveManifest;
-                  if (
-                    !value.manifest ||
-                    !Array.isArray(value.manifest.chunks) ||
-                    typeof value.signature !== 'string'
-                  )
-                    throw new Error(
-                      'Choose the signed manifest file, not an individual data chunk.',
-                    );
-                  setManifest(value);
-                  setManifestName(file.name);
-                },
+                () => loadManifest(file),
                 'Manifest loaded but unverified. The server verifies its signature and archive structure when creating the import task.',
               );
             }}
           />
         </Field>
+        <Field
+          label="Encrypted archive passphrase"
+          hint="Decryption happens in this browser. Enter the passphrase separately for loading the manifest and staging a batch of encrypted chunks; it is never sent to the server."
+        >
+          <input
+            type="password"
+            autoComplete="off"
+            maxLength={1024}
+            value={importPassphrase}
+            disabled={!!task.pending}
+            onChange={(event) => setImportPassphrase(event.target.value)}
+          />
+        </Field>
+        {manifestFile && (
+          <div className="admin-toolbar">
+            <AdminButton
+              disabled={!!task.pending}
+              onClick={() =>
+                void task.run(
+                  'Reading signed manifest',
+                  () => loadManifest(manifestFile),
+                  'Manifest loaded but unverified. Create a staging task to verify its signature on the server.',
+                )
+              }
+            >
+              Load selected manifest
+            </AdminButton>
+          </div>
+        )}
         <div className="admin-form">
           <Field label="Chunked import mode">
             <select
@@ -489,7 +612,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
         </div>
         <Field
           label="Archive data chunks"
-          hint="Select chunk JSON files only, up to 1 MiB each. Parts are read and staged one at a time; the server verifies each digest against the signed manifest."
+          hint="Select plain or encrypted chunk JSON files (up to 1 MiB each before encryption). Parts are decrypted and staged one at a time; the server verifies each digest against the signed manifest."
         >
           <input
             type="file"
@@ -513,13 +636,15 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
                 'Staging archive chunks',
                 async () => {
                   if (!jobId) return;
+                  const secret = importPassphrase;
+                  setImportPassphrase('');
                   for (let index = 0; index < files.length; index++) {
                     setProgress(`Staging ${index + 1} / ${files.length}: ${files[index].name}`);
-                    const chunk = await readArchiveJson(files[index], 1024 * 1024);
+                    const chunk = await readBackupText(files[index], 1024 * 1024, 'chunk', secret);
                     await convex.action(api.federation.backupLarge.stageChunk, {
                       adminToken,
                       jobId,
-                      chunk: JSON.stringify(chunk),
+                      chunk,
                     });
                   }
                   setFiles([]);

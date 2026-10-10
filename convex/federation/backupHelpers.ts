@@ -103,6 +103,9 @@ export function validateResourcePolicy(row: BackupRow) {
   const value = row.maxVisitorsPerSourceTown;
   if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > 1000))
     throw new Error('INVALID_SOURCE_VISITOR_QUOTA');
+  const rate = row.maxRemoteEventsPerSecond;
+  if (rate !== undefined && rate !== null && (!Number.isSafeInteger(rate) || rate < 0 || rate > 1000))
+    throw new Error('INVALID_REMOTE_EVENT_RATE');
 }
 export function assertNoSecrets(value: unknown): void {
   if (Array.isArray(value)) {

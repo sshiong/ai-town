@@ -105,6 +105,24 @@ manifests and separate JSON chunks, a durable maintenance lock and resumable che
 is at most 900,000 bytes, with a 1 GiB archive and 20,000 chunk cap. Individual documents larger than
 the chunk limit are rejected. Derived vectors are omitted and rebuilt from canonical memories.
 
+Ordinary snapshot, manifest and chunk downloads can now be encrypted in the browser with
+AES-256-GCM and PBKDF2-SHA256 (600,000 iterations). Choose a passphrase of at least 12 characters
+and confirm it before downloading. Each file has a fresh salt and nonce; keep the passphrase
+separately. Import decrypts each file in the browser, preserves its original signed inner text,
+and sends the ordinary archive to the authenticated server for validation. This protects saved
+files; it does not encrypt the backend's database or replace the separate identity recovery package.
+Password fields clear after each operation, so separate downloads and upload batches require
+reentry. Folder downloads process one chunk at a time.
+
+**Selective data archives** offer one resident, selected residents, configuration, raw memories,
+or conversation/social/travel history with category and half-open time bounds. They scan bounded
+pages without a 500-record ceiling, preserve selected residents' source profile bindings, and keep
+same-owner evidence dependencies with an explicit dependency role. Excluded private or missing
+references are represented without their text. Operator, reason, selection and chunk digests are
+covered by the signed manifest. These are read-only archives: ordinary restore and merge APIs
+explicitly reject this distinct format. Use the existing snapshot or full-town archive recovery
+workflows until selective import is available.
+
 Disable federation and explicitly pause the simulation before starting a large archive. Download
 the manifest and every chunk, either into a selected folder when the browser supports it or as
 individual files. Import uploads and validates every chunk, schema and cross-document reference
@@ -170,3 +188,16 @@ not Convex physical billing measurements or a single atomic snapshot.
 
 Host decision wait is configurable from 5 to 120 seconds (default 25). Set it to match the Home
 model SLA. Every reply remains bounded by the visit lease; expired replies cannot execute.
+
+### Social evidence and remote event admission
+
+**Travel & visitors** now includes paginated resident social history, relationships, memory
+evidence and original conversation sources. Access is checked against the selected resident's
+current world and fixed binding. Foreign private evidence and legacy memories without proven
+world ownership are reported as unavailable rather than assigned by a matching local player ID.
+
+**Federation** can limit authenticated remote work events per second. An empty value is unlimited;
+zero pauses new work. The persistent token bucket counts reservations, observations, decisions and
+action results after duplicate detection, before committing their inbox or nonce. A rejected
+request receives HTTP 429 and can retry the same signed message. Lease renewal, return and durable
+conversation delivery remain available. Saving an unchanged limit does not refill the bucket.

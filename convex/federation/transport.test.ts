@@ -151,6 +151,38 @@ test('reservation capacity is atomic, retries are idempotent, and trust without 
   expect(await b.t.run(ctx => ctx.db.query('federationInbox').collect())).toHaveLength(3);
 });
 
+test('rate refusal writes no nonce, Inbox or stream cursor; identical signed message retries succeed after refill', async () => {
+  const { a, b, credentialEncrypted } = await setup();
+  await b.t.run(ctx => ctx.db.insert('federationResourcePolicy', {
+    maxVisitorsPerSourceTown: null, maxRemoteEventsPerSecond: 1,
+  }));
+  const reserve = (id: string) => visitMessage(a, b, 'VISIT_RESERVE', 1, 'lease-control', {
+    visitId: id, agentGlobalId: `town-a/agent:${id}`, payload: {
+      fencingToken: 'test-fencing-token-32bytes', leaseExpiry: Date.now() + 250000,
+      profile: { name: 'Alice', character: 'f1', description: 'Resident', homeTownName: 'Town A' },
+    },
+  });
+  const first = await signPacket(reserve('first-rate'), a.keys.privateKeyEncrypted, credentialEncrypted);
+  const pending = await signPacket(reserve('pending-rate'), a.keys.privateKeyEncrypted, credentialEncrypted);
+  expect((await b.t.action(actionRef('transport/receiveMessage'), { packet: first })).body.status).toBe('COMMITTED');
+  expect((await b.t.action(actionRef('transport/receiveMessage'), { packet: first })).body.status).toBe('COMMITTED');
+  await expect(b.t.action(actionRef('transport/receiveMessage'), { packet: pending })).rejects.toThrow('REMOTE_EVENT_RATE_EXCEEDED');
+  const httpRefusal = await b.t.fetch('/federation/v1/messages', {
+    method: 'POST', body: JSON.stringify(pending),
+  });
+  expect(httpRefusal.status).toBe(429);
+  expect(httpRefusal.headers.get('Retry-After')).toBe('1');
+  expect(await httpRefusal.json()).toEqual({ error: 'REMOTE_EVENT_RATE_EXCEEDED' });
+  expect(await b.t.run(ctx => ctx.db.query('federationInbox').collect())).toHaveLength(1);
+  expect(await b.t.run(ctx => ctx.db.query('federationReplayNonces').collect())).toHaveLength(1);
+  const cursors = await b.t.run(ctx => ctx.db.query('messageStreamCursors').collect());
+  expect(cursors).toHaveLength(2); // Inbound request and its outbound rejection receipt.
+  expect(cursors.every(cursor => cursor.visitIdOrPairSessionId === 'first-rate')).toBe(true);
+  jest.setSystemTime(Date.now() + 1000);
+  expect((await b.t.action(actionRef('transport/receiveMessage'), { packet: pending })).body.status).toBe('COMMITTED');
+  expect((await b.t.run(ctx => resourceMeasurements(ctx.db))).inboundEvents).toBe(2);
+});
+
 test('visit saga reserves, freezes Home, confirms Host exactly once, then cleans before return', async () => {
   const { a, b } = await setup(); await markReady(b, a);
   await seedVisit(a, b, 'home', 'REQUESTED');

@@ -1,7 +1,7 @@
 import { jest } from '@jest/globals';
 import { convexTest } from 'convex-test';
 import schema from '../schema';
-import { recordResourceMetric, resourceMeasurements } from './resourceMonitoring';
+import { consumeRemoteEventBudget, recordResourceMetric, resourceMeasurements } from './resourceMonitoring';
 import { mutationRef } from './refs';
 import { residentChatCompletion } from './resources';
 import { webcrypto } from 'node:crypto';
@@ -12,9 +12,41 @@ const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/resources.ts': () => import('./resources'),
   '../federation/decision.ts': () => import('./decision'),
+  '../federation/resourceMonitoring.ts': () => import('./resourceMonitoring'),
 };
 beforeEach(() => { jest.useFakeTimers(); jest.setSystemTime(1_000_000); });
 afterEach(() => { jest.useRealTimers(); jest.restoreAllMocks(); });
+
+test('shared remote-event token bucket is bounded, refills with actual time and retains state across calls', async () => {
+  const t = convexTest(schema, modules);
+  await t.run(ctx => ctx.db.insert('federationResourcePolicy', {
+    maxVisitorsPerSourceTown: 3, maxRemoteEventsPerSecond: 2,
+  }));
+  for (const type of ['VISIT_RESERVE', 'OBSERVATION'])
+    await t.run(ctx => consumeRemoteEventBudget(ctx, type));
+  await expect(t.run(ctx => consumeRemoteEventBudget(ctx, 'DECISION'))).rejects.toThrow('REMOTE_EVENT_RATE_EXCEEDED');
+  jest.setSystemTime(Date.now() + 499);
+  await expect(t.run(ctx => consumeRemoteEventBudget(ctx, 'ACTION_RESULT'))).rejects.toThrow('REMOTE_EVENT_RATE_EXCEEDED');
+  jest.setSystemTime(Date.now() + 1);
+  await t.run(ctx => consumeRemoteEventBudget(ctx, 'ACTION_RESULT'));
+  jest.setSystemTime(Date.now() + 100_000);
+  for (let count = 0; count < 2; count++) await t.run(ctx => consumeRemoteEventBudget(ctx, 'OBSERVATION'));
+  await expect(t.run(ctx => consumeRemoteEventBudget(ctx, 'OBSERVATION'))).rejects.toThrow('REMOTE_EVENT_RATE_EXCEEDED');
+  expect(await t.run(ctx => ctx.db.query('federationInboundBudget').collect())).toHaveLength(1);
+});
+
+test('zero event budget preserves lease, history and cleanup traffic; absent legacy policy remains unlimited', async () => {
+  const t = convexTest(schema, modules);
+  await t.run(ctx => consumeRemoteEventBudget(ctx, 'OBSERVATION'));
+  await t.run(ctx => ctx.db.insert('federationResourcePolicy', {
+    maxVisitorsPerSourceTown: null, maxRemoteEventsPerSecond: 0,
+  }));
+  await expect(t.run(ctx => consumeRemoteEventBudget(ctx, 'VISIT_RESERVE'))).rejects.toThrow('REMOTE_EVENT_RATE_EXCEEDED');
+  for (const type of ['VISIT_RENEW', 'VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_REJECT', 'VISIT_CONFIRM',
+    'VISIT_ACTIVE', 'VISIT_RESERVED', 'CONVERSATION_ENDED', 'SESSION_RESYNC', 'STREAM_NACK'])
+    await t.run(ctx => consumeRemoteEventBudget(ctx, type));
+  expect(await t.run(ctx => ctx.db.query('federationInboundBudget').collect())).toEqual([]);
+});
 
 test('measured queue and provider duration use actual clock deltas and completion releases remain idempotent', async () => {
   const t = convexTest(schema, modules);

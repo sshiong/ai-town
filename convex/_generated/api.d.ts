@@ -13,6 +13,7 @@
 import type * as agent_embeddingsCache from "../agent/embeddingsCache.js";
 import type * as agent_memory from "../agent/memory.js";
 import type * as agent_schema from "../agent/schema.js";
+import type * as agent_social from "../agent/social.js";
 import type * as agent_travelMemory from "../agent/travelMemory.js";
 import type * as agent_travelTranscript from "../agent/travelTranscript.js";
 import type * as aiTown_agent from "../aiTown/agent.js";
@@ -51,6 +52,8 @@ import type * as federation_backupLargeHelpers from "../federation/backupLargeHe
 import type * as federation_backupLargeSchema from "../federation/backupLargeSchema.js";
 import type * as federation_backupResident from "../federation/backupResident.js";
 import type * as federation_backupSchema from "../federation/backupSchema.js";
+import type * as federation_backupSelective from "../federation/backupSelective.js";
+import type * as federation_backupSelectiveHelpers from "../federation/backupSelectiveHelpers.js";
 import type * as federation_decision from "../federation/decision.js";
 import type * as federation_direct from "../federation/direct.js";
 import type * as federation_endpoints from "../federation/endpoints.js";
@@ -119,6 +122,7 @@ import type * as world from "../world.js";
 "agent/embeddingsCache": typeof agent_embeddingsCache,
 "agent/memory": typeof agent_memory,
 "agent/schema": typeof agent_schema,
+"agent/social": typeof agent_social,
 "agent/travelMemory": typeof agent_travelMemory,
 "agent/travelTranscript": typeof agent_travelTranscript,
 "aiTown/agent": typeof aiTown_agent,
@@ -157,6 +161,8 @@ import type * as world from "../world.js";
 "federation/backupLargeSchema": typeof federation_backupLargeSchema,
 "federation/backupResident": typeof federation_backupResident,
 "federation/backupSchema": typeof federation_backupSchema,
+"federation/backupSelective": typeof federation_backupSelective,
+"federation/backupSelectiveHelpers": typeof federation_backupSelectiveHelpers,
 "federation/decision": typeof federation_decision,
 "federation/direct": typeof federation_direct,
 "federation/endpoints": typeof federation_endpoints,

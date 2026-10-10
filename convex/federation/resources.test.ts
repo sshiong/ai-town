@@ -10,6 +10,7 @@ import { mutationRef, queryRef } from './refs';
 import { dispatchLedgerMessage } from './ledger';
 import { dispatchRuntimeMessage } from './runtime';
 import { FederationMessage, PROTOCOL } from './protocol';
+import { consumeRemoteEventBudget } from './resourceMonitoring';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
@@ -716,6 +717,27 @@ test('source policy is administrator-only, audited, defaults unlimited and reduc
   await t.mutation(mutationRef('resourceMonitoring/configureSourceQuota'), { adminToken, maxVisitorsPerSourceTown: null });
   await t.run(ctx => dispatchLedgerMessage(ctx, reserveMessage(4)));
   expect((await t.run(ctx => ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', 'visit-4')).unique()))?.state).toBe('RESERVED');
+});
+
+test('remote event policy validates administrator input, preserves source quota and does not reset on identical saves', async () => {
+  const { t } = await setup();
+  expect((await t.query(queryRef('admin/status'), { adminToken })).resources.maxRemoteEventsPerSecond).toBeNull();
+  for (const rate of [-1, 0.5, 1001]) await expect(t.mutation(
+    mutationRef('resourceMonitoring/configureRemoteEventRate'), { adminToken, maxRemoteEventsPerSecond: rate },
+  )).rejects.toThrow('INVALID_REMOTE_EVENT_RATE');
+  await expect(t.mutation(mutationRef('resourceMonitoring/configureRemoteEventRate'), {
+    adminToken: 'invalid', maxRemoteEventsPerSecond: 2,
+  })).rejects.toThrow();
+  await t.mutation(mutationRef('resourceMonitoring/configureSourceQuota'), { adminToken, maxVisitorsPerSourceTown: 3 });
+  await t.mutation(mutationRef('resourceMonitoring/configureRemoteEventRate'), { adminToken, maxRemoteEventsPerSecond: 1 });
+  await t.run(ctx => consumeRemoteEventBudget(ctx, 'OBSERVATION'));
+  await t.mutation(mutationRef('resourceMonitoring/configureRemoteEventRate'), { adminToken, maxRemoteEventsPerSecond: 1 });
+  await expect(t.run(ctx => consumeRemoteEventBudget(ctx, 'OBSERVATION'))).rejects.toThrow('REMOTE_EVENT_RATE_EXCEEDED');
+  const status = await t.query(queryRef('admin/status'), { adminToken });
+  expect(status.resources).toMatchObject({ maxVisitorsPerSourceTown: 3, maxRemoteEventsPerSecond: 1 });
+  expect(status.resources.audit[0]).toMatchObject({ operation: 'REMOTE_EVENT_RATE_CHANGED', previous: 1, next: 1 });
+  await t.mutation(mutationRef('resourceMonitoring/configureRemoteEventRate'), { adminToken, maxRemoteEventsPerSecond: null });
+  await t.run(ctx => consumeRemoteEventBudget(ctx, 'OBSERVATION'));
 });
 
 test('only unique durably accepted inbound events are measured and failed transactions cannot inflate the rate', async () => {

@@ -406,7 +406,7 @@ test('legacy signed large manifests without optional autonomy and resource secti
 test.each(['restore', 'clone', 'rollback'] as const)('large %s preserves capacity policy and audit without backing up transient measurements', async mode => {
   const { t, keys } = await town();
   await t.run(async ctx => {
-    await ctx.db.insert('federationResourcePolicy', { maxVisitorsPerSourceTown: 3 });
+    await ctx.db.insert('federationResourcePolicy', { maxVisitorsPerSourceTown: 3, maxRemoteEventsPerSecond: 5 });
     await ctx.db.insert('federationResourceAudit', { operation: 'SOURCE_QUOTA_CHANGED', previous: null, next: 3, createdAt: 1 });
     await ctx.db.insert('federationResourceMetrics', { kind: 'INBOUND_EVENT', bucketStart: Date.now(), count: 1, durationCount: 0, durationSumMs: 0, samples: [] });
   });
@@ -414,6 +414,7 @@ test.each(['restore', 'clone', 'rollback'] as const)('large %s preserves capacit
   expect(oldTables.slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
   const archive = await exported(t);
   expect(archive.manifest.chunks.some(c => c.table === 'federationResourceMetrics')).toBe(false);
+  expect(archive.manifest.chunks.some(c => c.table === 'federationInboundBudget')).toBe(false);
   expect(archive.manifest.chunks.filter(c => c.table === 'federationResourcePolicy').reduce((sum, c) => sum + c.count, 0)).toBe(1);
   const invalid = structuredClone(archive.manifest);
   invalid.chunks.find(c => c.table === 'federationResourcePolicy')!.count = 2;
@@ -438,12 +439,17 @@ test.each(['restore', 'clone', 'rollback'] as const)('large %s preserves capacit
     metrics: await ctx.db.query('federationResourceMetrics').collect(),
   }));
   expect(result.policy!.maxVisitorsPerSourceTown).toBe(mode === 'rollback' ? 7 : 3);
+  expect(result.policy!.maxRemoteEventsPerSecond).toBe(5);
   expect(result.audit).toHaveLength(mode === 'rollback' ? 2 : 1);
   expect(result.audit.some(row => row.createdAt === 1 && row.next === 3)).toBe(true);
   expect(result.metrics).toHaveLength(mode === 'clone' ? 0 : 1);
 });
 
 test('backup preflight rejects invalid quota and identity capacity limits before applying data', async () => {
+  for (const maxRemoteEventsPerSecond of [-1, 0.5, 1001])
+    expect(() => validateSourceRow('federationResourcePolicy', {
+      _id: 'invalid-rate', _creationTime: 1, maxVisitorsPerSourceTown: null, maxRemoteEventsPerSecond,
+    })).toThrow('INVALID_REMOTE_EVENT_RATE');
   for (const maxVisitorsPerSourceTown of [-1, 0.5, 1001])
     expect(() => validateSourceRow('federationResourcePolicy', {
       _id: 'invalid-policy', _creationTime: 1, maxVisitorsPerSourceTown,

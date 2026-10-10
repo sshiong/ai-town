@@ -84,6 +84,7 @@ function publicJob(job: Job) {
 async function owned(ctx: { db: DatabaseReader }, jobId: Id<'backupLargeJobs'>) {
   const job = await ctx.db.get(jobId);
   if (!job) throw new Error('BACKUP_JOB_NOT_FOUND');
+  if (job.mode === 'selective-archive') throw new Error('SELECTIVE_ARCHIVE_USE_SELECTIVE_API');
   const lock = await ctx.db
     .query('backupMaintenanceLocks')
     .withIndex('key', (q) => q.eq('key', 'town'))
@@ -118,7 +119,13 @@ export const listJobs = query({
   args: { adminToken: v.string() },
   handler: async (ctx, a) => {
     requireAdmin(a.adminToken);
-    return (await ctx.db.query('backupLargeJobs').order('desc').take(30)).map(publicJob);
+    return (
+      await ctx.db
+        .query('backupLargeJobs')
+        .filter((q) => q.neq(q.field('mode'), 'selective-archive'))
+        .order('desc')
+        .take(30)
+    ).map(publicJob);
   },
 });
 export const startExport = mutation({

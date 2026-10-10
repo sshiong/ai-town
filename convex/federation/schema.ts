@@ -4,7 +4,12 @@ import { resourceLimits } from './resources';
 import { resourceMetricKind } from './resourceMonitoring';
 
 export const federationTables = {
-  federationResourcePolicy: defineTable({ maxVisitorsPerSourceTown: v.union(v.number(), v.null()) }),
+  federationResourcePolicy: defineTable({
+    maxVisitorsPerSourceTown: v.union(v.number(), v.null()),
+    maxRemoteEventsPerSecond: v.optional(v.union(v.number(), v.null())),
+  }),
+  // Ephemeral aggregate admission state, excluded from backups and migration.
+  federationInboundBudget: defineTable({ tokens: v.number(), measuredAt: v.number(), limit: v.number() }),
   federationResourceAudit: defineTable({ operation: v.string(), previous: v.any(), next: v.any(), createdAt: v.number() }).index('created', ['createdAt']),
   federationResourceMetrics: defineTable({
     kind: resourceMetricKind, bucketStart: v.number(), count: v.number(),

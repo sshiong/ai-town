@@ -65,6 +65,53 @@ export async function recordResourceMetric(
 export async function sourceVisitorQuota(db: DatabaseReader) {
   return (await db.query('federationResourcePolicy').unique())?.maxVisitorsPerSourceTown ?? null;
 }
+export async function remoteEventRate(db: DatabaseReader) {
+  return (await db.query('federationResourcePolicy').unique())?.maxRemoteEventsPerSecond ?? null;
+}
+
+const WORK_EVENT_TYPES = new Set(['VISIT_RESERVE', 'OBSERVATION', 'DECISION', 'ACTION_RESULT']);
+export async function consumeRemoteEventBudget(ctx: MutationCtx, type: string) {
+  // Lease renewals, return/cleanup, stream recovery and durable history remain
+  // available under pressure. Retries hit Inbox deduplication before this guard.
+  if (!WORK_EVENT_TYPES.has(type)) return;
+  const limit = await remoteEventRate(ctx.db);
+  if (limit === null) return;
+  if (limit === 0) throw new Error('REMOTE_EVENT_RATE_EXCEEDED');
+  const previous = await ctx.db.query('federationInboundBudget').unique();
+  const now = Date.now();
+  const tokens = previous?.limit === limit
+    ? Math.min(limit, previous.tokens + Math.max(0, now - previous.measuredAt) * limit / 1000)
+    : limit;
+  if (tokens < 1) throw new Error('REMOTE_EVENT_RATE_EXCEEDED');
+  const next = { tokens: tokens - 1, measuredAt: Math.max(now, previous?.measuredAt ?? now), limit };
+  if (previous) await ctx.db.patch(previous._id, next);
+  else await ctx.db.insert('federationInboundBudget', next);
+}
+
+export const configureRemoteEventRate = mutation({
+  args: { adminToken: v.string(), maxRemoteEventsPerSecond: v.union(v.number(), v.null()) },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    const value = args.maxRemoteEventsPerSecond;
+    if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > 1000))
+      throw new Error('INVALID_REMOTE_EVENT_RATE');
+    if (!(await identity(ctx))) throw new Error('INITIALIZE_IDENTITY_FIRST');
+    const previous = await ctx.db.query('federationResourcePolicy').unique();
+    if (previous) await ctx.db.patch(previous._id, { maxRemoteEventsPerSecond: value });
+    else await ctx.db.insert('federationResourcePolicy', {
+      maxVisitorsPerSourceTown: null, maxRemoteEventsPerSecond: value,
+    });
+    // Repeated saves of the same policy cannot replenish the admission bucket.
+    if ((previous?.maxRemoteEventsPerSecond ?? null) !== value) {
+      const budget = await ctx.db.query('federationInboundBudget').unique();
+      if (budget) await ctx.db.delete(budget._id);
+    }
+    await ctx.db.insert('federationResourceAudit', {
+      operation: 'REMOTE_EVENT_RATE_CHANGED', previous: previous?.maxRemoteEventsPerSecond ?? null,
+      next: value, createdAt: Date.now(),
+    });
+  },
+});
 export const configureSourceQuota = mutation({
   args: { adminToken: v.string(), maxVisitorsPerSourceTown: v.union(v.number(), v.null()) },
   handler: async (ctx, args) => {

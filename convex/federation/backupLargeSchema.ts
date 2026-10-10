@@ -55,6 +55,7 @@ export const backupLargeTables = {
     metadata: v.any(),
   })
     .index('job_source', ['jobId', 'sourceId'])
+    .index('job_state', ['jobId', 'state'])
     .index('job_new', ['jobId', 'role', 'newId'])
     .index('job_role_source', ['jobId', 'role', 'sourceId'])
     .index('job_relation', ['jobId', 'role', 'table', 'relationKey'])

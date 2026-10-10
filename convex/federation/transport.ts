@@ -11,7 +11,7 @@ import { assertVisitAuthority, beginReturn, dispatchLedgerMessage } from './ledg
 import { dispatchRuntimeMessage } from './runtime';
 import { Doc } from '../_generated/dataModel';
 import { observeSignedIdentity } from './identityConflict';
-import { recordResourceMetric } from './resourceMonitoring';
+import { consumeRemoteEventBudget, recordResourceMetric } from './resourceMonitoring';
 
 const CLEANUP_TYPES = new Set(['VISIT_RETURN', 'VISIT_CLEANED', 'SESSION_RESYNC', 'STREAM_NACK']);
 const VISIT_TYPES = new Set(['VISIT_RESERVE', 'VISIT_RESERVED', 'VISIT_CONFIRM', 'VISIT_ACTIVE', 'VISIT_REJECT', 'VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_RENEW']);
@@ -204,6 +204,7 @@ export const acceptMessage = internalMutation({ args: { message: v.any(), payloa
     return existing.ack ?? ackFor(message, existing.status);
   }
   if (message.type !== 'VISIT_RESERVE') await assertVisitAuthority(ctx, message);
+  await consumeRemoteEventBudget(ctx, message.type);
   await rememberNonce(ctx, message);
   const pending = await ctx.db.query('federationInbox').withIndex('status', q => q.eq('status', 'BUFFERED')).take(257);
   if (pending.length >= 256) throw new Error('INBOX_CAPACITY_EXCEEDED');
@@ -360,8 +361,11 @@ export function registerFederationRoutes(http: HttpRouter) {
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'FEDERATION_REJECTED';
       // Return protocol error codes only; never expose credentials or stack traces.
-      const code = /^[A-Z][A-Z0-9_]+$/.test(reason) ? reason : 'FEDERATION_REJECTED';
-      return new Response(JSON.stringify({ error: code }), { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+      const rateLimited = reason.includes('REMOTE_EVENT_RATE_EXCEEDED');
+      const code = rateLimited ? 'REMOTE_EVENT_RATE_EXCEEDED' : /^[A-Z][A-Z0-9_]+$/.test(reason) ? reason : 'FEDERATION_REJECTED';
+      return new Response(JSON.stringify({ error: code }), { status: rateLimited ? 429 : 400, headers: {
+        'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...(rateLimited ? { 'Retry-After': '1' } : {}),
+      } });
     }
   }) });
 }

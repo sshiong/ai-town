@@ -1,16 +1,19 @@
 import { useEffect, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import type { FunctionReturnType } from 'convex/server';
-import { readBackupFile, requiresStoppedSource } from './uiPolicy';
+import { requiresStoppedSource } from './uiPolicy';
+import { encryptBackupText, readBackupText, validBackupPassphrase } from './backupEncryption';
 import { api } from '../../../convex/_generated/api';
 import RecoveryPanel from './RecoveryPanel';
 import ArchivePanel from './ArchivePanel';
 import IdentityRecoveryPanel from './IdentityRecoveryPanel';
 import StoragePolicyPanel from './StoragePolicyPanel';
 import MigrationPanel from './MigrationPanel';
+import SelectiveExportPanel from './SelectiveExportPanel';
 import {
   AdminButton,
   downloadBundle,
+  downloadJsonText,
   EmptyState,
   Field,
   TaskFeedback,
@@ -68,6 +71,41 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
     useState<FunctionReturnType<typeof api.federation.backup.preflight>>();
   const [result, setResult] =
     useState<FunctionReturnType<typeof api.federation.backup.importBackup>>();
+  const [encryptDownloads, setEncryptDownloads] = useState(false);
+  const [exportPassphrase, setExportPassphrase] = useState('');
+  const [exportConfirmation, setExportConfirmation] = useState('');
+  const [importPassphrase, setImportPassphrase] = useState('');
+  const [importFile, setImportFile] = useState<File>();
+  const canDownload =
+    !encryptDownloads ||
+    (validBackupPassphrase(exportPassphrase) && exportPassphrase === exportConfirmation);
+  function takeDownloadPassphrase() {
+    if (!encryptDownloads) return undefined;
+    if (!canDownload) throw new Error('Enter and confirm a strong backup passphrase.');
+    const secret = exportPassphrase;
+    setExportPassphrase('');
+    setExportConfirmation('');
+    return secret;
+  }
+  async function saveSnapshot(value: unknown, name: string, secret?: string) {
+    if (secret === undefined) return downloadBundle(value, name);
+    downloadJsonText(
+      await encryptBackupText(JSON.stringify(value), secret, 'snapshot', 5 * 1024 * 1024),
+      name.replace(/\.json$/, '-encrypted.json'),
+    );
+  }
+  async function loadBackup(file: File) {
+    const secret = importPassphrase;
+    setImportPassphrase('');
+    const parsed: unknown = JSON.parse(
+      await readBackupText(file, 5 * 1024 * 1024, 'snapshot', secret),
+    );
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+      throw new Error('Choose an exported AI Town JSON object.');
+    setBundle(parsed);
+    setFilename(file.name);
+    setImportFile(undefined);
+  }
   useEffect(() => {
     setReport(undefined);
     setAcknowledged(false);
@@ -104,17 +142,65 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
       </p>
       <TaskFeedback task={task} />
       <h3>Export</h3>
+      <label className="admin-check">
+        <input
+          type="checkbox"
+          checked={encryptDownloads}
+          disabled={!!task.pending}
+          onChange={(event) => {
+            setEncryptDownloads(event.target.checked);
+            setExportPassphrase('');
+            setExportConfirmation('');
+          }}
+        />{' '}
+        Encrypt downloaded town and resident snapshots in this browser
+      </label>
+      {encryptDownloads && (
+        <div className="admin-form">
+          <Field
+            label="Snapshot passphrase"
+            hint="Use a unique strong passphrase (at least 12 characters, up to 1024 UTF-8 bytes). Keep it separately; lost passphrases cannot be recovered."
+          >
+            <input
+              type="password"
+              autoComplete="new-password"
+              maxLength={1024}
+              value={exportPassphrase}
+              disabled={!!task.pending}
+              onChange={(event) => setExportPassphrase(event.target.value)}
+            />
+          </Field>
+          <Field label="Confirm snapshot passphrase">
+            <input
+              type="password"
+              autoComplete="new-password"
+              maxLength={1024}
+              value={exportConfirmation}
+              disabled={!!task.pending}
+              onChange={(event) => setExportConfirmation(event.target.value)}
+            />
+          </Field>
+        </div>
+      )}
+      <p className="admin-muted">
+        Optional AES-256-GCM encryption protects downloaded private memories. The passphrase stays
+        in browser memory and is cleared after each operation. The server still receives ordinary
+        archive data for export and import validation; this option protects saved files.
+      </p>
       <div className="admin-toolbar">
         <AdminButton
-          disabled={!!task.pending}
+          disabled={!!task.pending || !canDownload}
           onClick={() =>
             void task.run(
               'Exporting town snapshot',
-              async () =>
-                downloadBundle(
+              async () => {
+                const secret = takeDownloadPassphrase();
+                await saveSnapshot(
                   await convex.action(api.federation.backup.exportTown, { adminToken }),
                   `ai-town-${Date.now()}.json`,
-                ),
+                  secret,
+                );
+              },
               'Town snapshot downloaded. Store it securely; resident memories may contain private information.',
             )
           }
@@ -136,15 +222,18 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
             if (!resident) return;
             void task.run(
               'Exporting resident',
-              async () =>
-                downloadBundle(
+              async () => {
+                const secret = takeDownloadPassphrase();
+                await saveSnapshot(
                   await convex.action(api.federation.backup.exportResident, {
                     adminToken,
                     worldId: resident.worldId,
                     playerId: resident.playerId,
                   }),
                   `ai-town-resident-${Date.now()}.json`,
-                ),
+                  secret,
+                );
+              },
               'Resident snapshot downloaded.',
             );
           }}
@@ -158,7 +247,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               ))}
             </select>
           </Field>
-          <AdminButton type="submit" disabled={!!task.pending}>
+          <AdminButton type="submit" disabled={!!task.pending || !canDownload}>
             Download resident
           </AdminButton>
         </form>
@@ -167,6 +256,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
         The single-file export has a 5 MiB / 500-record limit. For larger towns, use chunked
         archives below. Private identity recovery uses a separate encrypted package.
       </p>
+      <SelectiveExportPanel adminToken={adminToken} />
       <h3>Import &amp; recovery</h3>
       {mode !== 'clone' && (
         <>
@@ -217,7 +307,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
       <div className="admin-form">
         <Field
           label="Backup JSON file"
-          hint="Choose an exported AI Town package, up to 5 MiB and the server transaction limit of 500 records. The server validates its digest and structure before import."
+          hint="Choose a plain or browser-encrypted snapshot (up to 5 MiB before encryption, 500 records). For encrypted files, enter the passphrase below and retry loading. The server validates the decrypted archive."
         >
           <input
             type="file"
@@ -229,17 +319,27 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               setSourceStopped(false);
               setBundle(undefined);
               setFilename('');
+              setImportFile(file);
               if (!file) return;
               void task.run(
                 'Reading backup',
-                async () => {
-                  const parsed = await readBackupFile(file);
-                  setBundle(parsed);
-                  setFilename(file.name);
-                },
+                () => loadBackup(file),
                 'File loaded. Run preflight to review its scope and conflicts.',
               );
             }}
+          />
+        </Field>
+        <Field
+          label="Encrypted snapshot passphrase"
+          hint="Only needed for encrypted files. Decryption happens in this browser before server preflight."
+        >
+          <input
+            type="password"
+            autoComplete="off"
+            maxLength={1024}
+            value={importPassphrase}
+            disabled={!!task.pending}
+            onChange={(event) => setImportPassphrase(event.target.value)}
           />
         </Field>
         <Field label="Import mode">
@@ -260,6 +360,22 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
           </select>
         </Field>
       </div>
+      {importFile && (
+        <div className="admin-toolbar">
+          <AdminButton
+            disabled={!!task.pending}
+            onClick={() =>
+              void task.run(
+                'Reading backup',
+                () => loadBackup(importFile),
+                'File loaded. Run preflight to review its scope and conflicts.',
+              )
+            }
+          >
+            Load selected backup
+          </AdminButton>
+        </div>
+      )}
       <p className="admin-muted">{modes.find((item) => item.value === mode)?.description}</p>
       {(mode === 'merge' || mode === 'restore') && (
         <p>
@@ -270,6 +386,8 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
         <p className="admin-warning">
           The active target is backed up before import. Restore and migration require matching
           long-term identity. Do not activate two deployments with the same private key.
+          {encryptDownloads &&
+            ' Enter the snapshot passphrase again above to encrypt the before-import safety download.'}
         </p>
       )}
       {requiresStoppedSource(mode) && (
@@ -421,6 +539,9 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                 !acknowledged ||
                 (!!report.residentRestorePlan && (!operator.trim() || !reason.trim())) ||
                 !!result ||
+                ((mode === 'restore' || mode === 'migrate') &&
+                  !report.residentRestorePlan &&
+                  !canDownload) ||
                 (mode !== 'clone' && !targetPaused) ||
                 (requiresStoppedSource(mode) && !sourceStopped)
               }
@@ -428,11 +549,14 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                 void task.run(
                   'Importing validated backup',
                   async () => {
-                    if ((mode === 'restore' || mode === 'migrate') && !report.residentRestorePlan)
-                      downloadBundle(
+                    if ((mode === 'restore' || mode === 'migrate') && !report.residentRestorePlan) {
+                      const secret = takeDownloadPassphrase();
+                      await saveSnapshot(
                         await convex.action(api.federation.backup.exportTown, { adminToken }),
                         `ai-town-before-import-${Date.now()}.json`,
+                        secret,
                       );
+                    }
                     setResult(await convex.action(api.federation.backup.importBackup, args));
                   },
                   'Data import completed. Review the mapping and rebuild memory vectors before activation.',

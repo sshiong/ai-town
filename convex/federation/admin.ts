@@ -6,7 +6,7 @@ import { identity } from './store';
 import { normalizeEndpoint } from './protocol';
 import { actionRef, mutationRef } from './refs';
 import { resourceLimits, validateResourceLimits, configuredResourceLimits, pendingDecisionCount } from './resources';
-import { resourceMeasurements, sourceVisitorQuota } from './resourceMonitoring';
+import { remoteEventRate, resourceMeasurements, sourceVisitorQuota } from './resourceMonitoring';
 import { commitLocalEndpoint } from './endpoints';
 export const configureResources = mutation({
   args: { adminToken: v.string(), limits: resourceLimits },
@@ -170,6 +170,7 @@ export const status = query({
         cpu: null, memory: null,
         measurements: await resourceMeasurements(ctx.db, now),
         maxVisitorsPerSourceTown: await sourceVisitorQuota(ctx.db),
+        maxRemoteEventsPerSecond: await remoteEventRate(ctx.db),
         sourceOccupancy: [...sourceOccupancy].map(([townId, occupied]) => ({ townId, occupied })),
         audit: await ctx.db.query('federationResourceAudit').withIndex('created').order('desc').take(25),
       },

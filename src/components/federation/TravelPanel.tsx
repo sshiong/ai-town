@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import AutonomyPanel from './AutonomyPanel';
+import SocialHistoryPanel from './SocialHistoryPanel';
 import { useConvex, useQuery } from 'convex/react';
 import { isOpenVisit, isReadyDestination } from './uiPolicy';
 import { api } from '../../../convex/_generated/api';
@@ -288,6 +289,7 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
         </>
       )}
       <AutonomyPanel adminToken={adminToken} />
+      <SocialHistoryPanel adminToken={adminToken} />
       <details className="admin-disclosure">
         <summary>Delivery &amp; recovery diagnostics</summary>
         <p className="admin-muted">
