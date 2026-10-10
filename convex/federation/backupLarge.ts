@@ -348,6 +348,7 @@ export const advanceExport = action({
     if (terminal.has(job.state)) return publicJob(job);
     if (job.state === 'FAILED') throw new Error('RESUME_BACKUP_JOB_FIRST');
     const created: Id<'_storage'>[] = [];
+    let publicationPending = false;
     try {
       if (job.phase === 'EXPORTING') {
         const page = await ctx.runQuery(readRef('page'), { jobId: job._id });
@@ -376,6 +377,7 @@ export const advanceExport = action({
           created.push(storageId);
           chunks.push({ ...(await descriptor(chunk)), storageId });
         }
+        publicationPending = true;
         await ctx.runMutation(writeRef('saveExportPage'), {
           jobId: job._id,
           expectedCursor: job.cursor,
@@ -384,6 +386,7 @@ export const advanceExport = action({
           done: page.isDone,
           chunks,
         });
+        publicationPending = false;
       } else if (job.phase === 'SIGNING') {
         const source = await ctx.runQuery(readRef('signingIdentity'), { jobId: job._id });
         const manifest: LargeManifest = {
@@ -401,14 +404,18 @@ export const advanceExport = action({
         await validateManifest(manifest, signature);
         const manifestStorageId = await storeJSON(ctx, manifest);
         created.push(manifestStorageId);
+        publicationPending = true;
         await ctx.runMutation(writeRef('finishExport'), {
           jobId: job._id,
           manifestStorageId,
           signature,
         });
+        publicationPending = false;
       }
     } catch (error) {
-      for (const storageId of created) await ctx.storage.delete(storageId);
+      // A lost response may leave a committed or still-running publication.
+      if (!publicationPending)
+        for (const storageId of created) await ctx.storage.delete(storageId);
       if (!String(error).includes('BACKUP_CHECKPOINT_CHANGED'))
         await ctx.runMutation(writeRef('fail'), { jobId: job._id, error: String(error) });
     }
@@ -575,12 +582,8 @@ export const createImport = action({
     await validateManifest(a.manifest, a.signature);
     const keys = a.mode === 'clone' ? await createIdentityKeys() : undefined;
     const manifestStorageId = await storeJSON(ctx, a.manifest);
-    try {
-      return await ctx.runMutation(writeRef('createImportJob'), { ...a, manifestStorageId, keys });
-    } catch (error) {
-      await ctx.storage.delete(manifestStorageId);
-      throw error;
-    }
+    // Preserve the manifest if publication acknowledgement is unknown.
+    return await ctx.runMutation(writeRef('createImportJob'), { ...a, manifestStorageId, keys });
   },
 });
 export const saveImportChunk = internalMutation({
@@ -706,20 +709,16 @@ export const stageChunk = action({
     if (!expected) throw new Error('BACKUP_CHUNK_NOT_FOUND');
     await validateChunk(chunk, expected);
     const storageId = await storeJSON(ctx, chunk);
-    try {
-      if (
-        !(await ctx.runMutation(writeRef('saveImportChunk'), {
-          jobId: job._id,
-          chunkJson: a.chunk,
-          expected,
-          storageId,
-        }))
-      )
-        await ctx.storage.delete(storageId);
-    } catch (error) {
+    // Only a confirmed duplicate rejection makes this newly uploaded object disposable.
+    if (
+      !(await ctx.runMutation(writeRef('saveImportChunk'), {
+        jobId: job._id,
+        chunkJson: a.chunk,
+        expected,
+        storageId,
+      }))
+    )
       await ctx.storage.delete(storageId);
-      throw error;
-    }
     return publicJob(await ctx.runQuery(readRef('jobData'), { jobId: a.jobId }));
   },
 });
@@ -1306,6 +1305,7 @@ export const advanceImport = action({
     if (terminal.has(job.state) || job.state === 'READY') return publicJob(job);
     if (job.state === 'FAILED') throw new Error('RESUME_BACKUP_JOB_FIRST');
     const created: Id<'_storage'>[] = [];
+    let publicationPending = false;
     try {
       if (job.phase === 'STAGING')
         await ctx.runMutation(writeRef('beginValidation'), { jobId: job._id });
@@ -1340,6 +1340,7 @@ export const advanceImport = action({
           rows.push(raw);
         }
         if (rows.length) await persist();
+        publicationPending = true;
         await ctx.runMutation(writeRef('saveCapture'), {
           jobId: job._id,
           expectedCursor: job.cursor,
@@ -1348,6 +1349,7 @@ export const advanceImport = action({
           done: page.isDone,
           chunks,
         });
+        publicationPending = false;
       } else if (job.phase === 'DELETE_OLD')
         await ctx.runMutation(writeRef('deleteOldPage'), { jobId: job._id });
       else if (['ALLOCATE', 'REMAP', 'ROLLBACK_ALLOCATE', 'ROLLBACK_REMAP'].includes(job.phase)) {
@@ -1368,7 +1370,9 @@ export const advanceImport = action({
         await ctx.runMutation(writeRef('finishRollback'), { jobId: job._id });
       else throw new Error('BACKUP_CHECKPOINT_INVALID');
     } catch (error) {
-      for (const storageId of created) await ctx.storage.delete(storageId);
+      // A lost response may leave a committed or still-running publication.
+      if (!publicationPending)
+        for (const storageId of created) await ctx.storage.delete(storageId);
       if (!String(error).includes('BACKUP_CHECKPOINT_CHANGED'))
         await ctx.runMutation(writeRef('fail'), { jobId: job._id, error: String(error) });
     }

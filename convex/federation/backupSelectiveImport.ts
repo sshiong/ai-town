@@ -463,12 +463,8 @@ export const createImport = action({
     const manifestStorageId = await ctx.storage.store(
       new Blob([JSON.stringify(a.manifest)], { type: 'application/json' }),
     );
-    try {
-      return await ctx.runMutation(mref('createImportJob'), { ...a, manifestStorageId });
-    } catch (e) {
-      await ctx.storage.delete(manifestStorageId);
-      throw e;
-    }
+    // Preserve the manifest if publication acknowledgement is unknown.
+    return await ctx.runMutation(mref('createImportJob'), { ...a, manifestStorageId });
   },
 });
 export const status = query({
@@ -577,20 +573,16 @@ export const stageChunk = action({
     if (!expected) throw new Error('LARGE_BACKUP_CHUNK_MISMATCH');
     await validateSelectiveChunk(chunk, expected);
     const storageId = await ctx.storage.store(new Blob([a.chunk], { type: 'application/json' }));
-    try {
-      if (
-        !(await ctx.runMutation(mref('saveChunk'), {
-          jobId: j._id,
-          chunkJson: a.chunk,
-          expected,
-          storageId,
-        }))
-      )
-        await ctx.storage.delete(storageId);
-    } catch (e) {
+    // Only a confirmed duplicate rejection makes this newly uploaded object disposable.
+    if (
+      !(await ctx.runMutation(mref('saveChunk'), {
+        jobId: j._id,
+        chunkJson: a.chunk,
+        expected,
+        storageId,
+      }))
+    )
       await ctx.storage.delete(storageId);
-      throw e;
-    }
     return view(await ctx.runQuery(qref('jobData'), { jobId: j._id }));
   },
 });
@@ -1703,6 +1695,11 @@ export const cancel = mutation({
     requireAdmin(a.adminToken);
     const j = await owned(ctx, a.jobId);
     if (terminal.has(j.state)) return;
+    // Retried cancellation must continue the saved rollback checkpoint.
+    if (j.phase.startsWith('ROLLBACK')) {
+      if (j.state === 'FAILED') await ctx.db.patch(j._id, {state:'ROLLING_BACK',resumeState:undefined,error:undefined,updatedAt:Date.now()});
+      return;
+    }
     if (!metadata(j).destructive) await release(ctx, j, 'CANCELLED');
     else
       await ctx.db.patch(j._id, {
@@ -1777,6 +1774,7 @@ export const advanceImport = action({
     if (terminal.has(j.state) || j.state === 'READY') return view(j);
     if (j.state === 'FAILED') throw new Error('RESUME_BACKUP_JOB_FIRST');
     const stored: Id<'_storage'>[] = [];
+    let publicationPending = false;
     try {
       if (['STAGING', 'VALIDATING', 'REACHABILITY'].includes(j.phase))
         await ctx.runMutation(mref('validatePage'), { jobId: j._id });
@@ -1809,6 +1807,7 @@ export const advanceImport = action({
           stored.push(storageId);
           chunks.push({ ...(await descriptor(chunk)), storageId, json });
         }
+        publicationPending = true;
         await ctx.runMutation(mref('saveCapture'), {
           jobId: j._id,
           expectedCursor: j.cursor,
@@ -1817,6 +1816,7 @@ export const advanceImport = action({
           done: page.isDone,
           chunks,
         });
+        publicationPending = false;
       } else if (j.phase === 'PROFILES')
         await ctx.runMutation(mref('profilePage'), { jobId: j._id });
       else if (j.phase === 'PREPARE') await ctx.runMutation(mref('prepare'), { jobId: j._id });
@@ -1841,7 +1841,9 @@ export const advanceImport = action({
         });
       } else throw new Error('BACKUP_CHECKPOINT_CHANGED');
     } catch (e) {
-      for (const id of stored) await ctx.storage.delete(id);
+      // A lost response may leave a committed or still-running publication.
+      if (!publicationPending)
+        for (const id of stored) await ctx.storage.delete(id);
       if (!String(e).includes('BACKUP_CHECKPOINT_CHANGED'))
         await ctx.runMutation(mref('fail'), { jobId: j._id, error: String(e) });
     }

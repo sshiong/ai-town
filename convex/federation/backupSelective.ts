@@ -770,6 +770,7 @@ export const advanceExport = action({
     if (terminal.has(job.state)) return view(job);
     if (job.state === 'FAILED') throw new Error('RESUME_BACKUP_JOB_FIRST');
     const created: Id<'_storage'>[] = [];
+    let publicationPending = false;
     try {
       if (job.phase === 'SIGNING') {
         const chunks: ChunkDescriptor[] = [];
@@ -815,7 +816,9 @@ export const advanceExport = action({
           new Blob([JSON.stringify(manifest)], { type: 'application/json' }),
         );
         created.push(storageId);
+        publicationPending = true;
         await ctx.runMutation(refM('finish'), { jobId: job._id, storageId, signature });
+        publicationPending = false;
       } else {
         const page = await ctx.runQuery(refQ('page'), { jobId: a.jobId });
         const groups: string[][] = [];
@@ -846,6 +849,7 @@ export const advanceExport = action({
           created.push(storageId);
           chunks.push({ ...(await descriptor(chunk)), storageId });
         }
+        publicationPending = true;
         await ctx.runMutation(refM('savePage'), {
           jobId: job._id,
           expectedPhase: job.phase,
@@ -855,9 +859,12 @@ export const advanceExport = action({
           page,
           chunks,
         });
+        publicationPending = false;
       }
     } catch (error) {
-      for (const id of created) await ctx.storage.delete(id);
+      // A lost response may leave a committed or still-running publication.
+      if (!publicationPending)
+        for (const id of created) await ctx.storage.delete(id);
       if (!String(error).includes('BACKUP_CHECKPOINT_CHANGED'))
         await ctx.runMutation(refM('fail'), { jobId: a.jobId, error: String(error) });
     }

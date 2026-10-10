@@ -1,7 +1,8 @@
+import * as selectiveFunctions from './backupSelective';
 import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
-import { makeFunctionReference } from 'convex/server';
+import { makeFunctionReference, getFunctionName } from 'convex/server';
 import schema from '../schema';
 import { Id } from '../_generated/dataModel';
 import { createIdentityKeys } from './security';
@@ -621,4 +622,28 @@ test('malformed roles, unknown reference tables and empty external references fa
       'INVALID_SELECTIVE_RECORD',
     );
   }
+});
+
+test.each(['savePage','finish'])('selective %s lost response preserves actual published files through resume', async method => {
+  const f = await fixture(), {jobId} = await f.t.mutation(m('startExport'),{adminToken,scope:'agent-one',agentGlobalIds:[f.globals[0]],categories:['conversation','travel'],operator:'test',reason:'ACK recovery'});
+  if (method === 'finish') {
+    for (let n=0;n<1000;n++) {
+      const job = await f.t.query(q('status'),{adminToken,jobId});
+      if (job.phase === 'SIGNING') break;
+      await f.t.action(a('advanceExport'),{adminToken,jobId});
+    }
+  }
+  let lost=false;
+  await f.t.action(async ctx => (selectiveFunctions.advanceExport as any)._handler({...ctx,runMutation:async (ref:any,values:any) => {
+    const result = await ctx.runMutation(ref,values);
+    if (!lost && getFunctionName(ref).endsWith(`:${method}`)) {lost=true;throw new Error('SIMULATED_PUBLICATION_ACK_LOST');}
+    return result;
+  }},{adminToken,jobId}));
+  expect(lost).toBe(true);
+  const job = await f.t.query(q('status'),{adminToken,jobId});
+  if (job.state === 'FAILED') await f.t.mutation(m('resume'),{adminToken,jobId});
+  await drive(f.t,jobId);
+  const result = await f.t.action(a('getManifest'),{adminToken,jobId});
+  for (const d of result.manifest.chunks)
+    expect(JSON.parse(await f.t.action(a('getChunk'),{adminToken,jobId,index:d.index})).index).toBe(d.index);
 });

@@ -1,7 +1,8 @@
+import * as selectiveImportFunctions from './backupSelectiveImport';
 import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
-import { makeFunctionReference } from 'convex/server';
+import { makeFunctionReference, getFunctionName } from 'convex/server';
 import { v } from 'convex/values';
 import schema from '../schema';
 import { internalAction } from '../_generated/server';
@@ -856,4 +857,72 @@ test('failed application resumes the saved remap checkpoint and retains allocate
   const restored = await target.t.run((ctx) => ctx.db.get(allocated!._id));
   expect(restored?.description).toBe('source memory 0');
   expect(restored?.data.type === 'reflection' && restored.data.relatedMemoryIds).toHaveLength(1);
+});
+
+async function selectiveLostAck(f: Fixture, fn:any, method:string, args:any) {
+  let lost=false;
+  try { return await f.t.action(async ctx => fn._handler({...ctx,runMutation:async (ref:any,values:any) => {
+    const result = await ctx.runMutation(ref,values);
+    if (!lost && getFunctionName(ref).endsWith(`:${method}`)) {lost=true;throw new Error('SIMULATED_PUBLICATION_ACK_LOST');}
+    return result;
+  }},args)); } finally { expect(lost).toBe(true); }
+}
+test('selective import-job and staged-chunk lost responses preserve referenced entities for duplicate retry', async () => {
+  const src=await fixture(), source=await archive(src), dst=await fixture('target');
+  await expect(selectiveLostAck(dst,selectiveImportFunctions.createImport,'createImportJob',{adminToken,manifest:source.manifest,signature:source.signature,...options(dst,source)})).rejects.toThrow('SIMULATED_PUBLICATION_ACK_LOST');
+  const job=await dst.t.run(ctx=>ctx.db.query('backupLargeJobs').filter(q=>q.eq(q.field('kind'),'import')).first());
+  expect(await dst.t.run(async ctx => !!(await ctx.storage.get(job!.manifestStorageId!)))).toBe(true);
+  const chunk=source.chunks[0];
+  await expect(selectiveLostAck(dst,selectiveImportFunctions.stageChunk,'saveChunk',{adminToken,jobId:job!._id,chunk:JSON.stringify(chunk)})).rejects.toThrow('SIMULATED_PUBLICATION_ACK_LOST');
+  const accepted=await dst.t.run(ctx=>ctx.db.query('backupLargeChunks').withIndex('job_index',q=>q.eq('jobId',job!._id).eq('index',0)).unique());
+  expect(await dst.t.run(async ctx => !!(await ctx.storage.get(accepted!.storageId)))).toBe(true);
+  await dst.t.action(aa('stageChunk'),{adminToken,jobId:job!._id,chunk:JSON.stringify(chunk)});
+  expect(await dst.t.run(async ctx => !!(await ctx.storage.get(accepted!.storageId)))).toBe(true);
+  expect(await dst.t.run(ctx=>ctx.db.query('backupLargeChunks').withIndex('job_index',q=>q.eq('jobId',job!._id)).collect())).toHaveLength(1);
+  await dst.t.mutation(am('cancel'),{adminToken,jobId:job!._id});
+});
+
+test('lost target-snapshot response preserves private rollback data through resumed partial application and cancellation', async () => {
+  const src=await fixture(), source=await archive(src), dst=await fixture('target');
+  const before=await dst.t.run(async ctx=>({memories:await ctx.db.query('memories').collect(),worlds:await ctx.db.query('worlds').collect(),bindings:await ctx.db.query('residentModelBindings').collect()}));
+  const jobId=await start(dst,source);
+  await drive(dst,jobId,'CAPTURE_TARGET');
+  await selectiveLostAck(dst,selectiveImportFunctions.advanceImport,'saveCapture',{adminToken,jobId});
+  const saved=await dst.t.run(ctx=>ctx.db.query('backupLargeChunks').withIndex('job_index',q=>q.eq('jobId',jobId).gte('index',source.manifest.chunks.length)).collect());
+  expect(saved.length).toBeGreaterThan(0);
+  for (const chunk of saved) expect(await dst.t.run(async ctx => !!(await ctx.storage.get(chunk.storageId)))).toBe(true);
+  await dst.t.mutation(am('resume'),{adminToken,jobId});
+  const ready=await drive(dst,jobId,'READY');
+  await dst.t.mutation(am('startApply'),{adminToken,jobId,expectedPlanDigest:ready.planDigest,expectedTargetDigest:ready.targetDigest,confirmChanges:true});
+  await drive(dst,jobId,'ALLOCATE');
+  await dst.t.action(aa('advanceImport'),{adminToken,jobId});
+  await dst.t.mutation(am('cancel'),{adminToken,jobId});
+  await drive(dst,jobId,'CANCELLED');
+  expect(await dst.t.run(async ctx=>({memories:await ctx.db.query('memories').collect(),worlds:await ctx.db.query('worlds').collect(),bindings:await ctx.db.query('residentModelBindings').collect()}))).toEqual(before);
+});
+
+test('repeated cancellation and failed rollback cancellation preserve the current restore checkpoint', async () => {
+  const src=await fixture(), source=await archive(src), dst=await fixture('target');
+  const before=await dst.t.run(async ctx=>({memories:await ctx.db.query('memories').collect(),worlds:await ctx.db.query('worlds').collect(),bindings:await ctx.db.query('residentModelBindings').collect()}));
+  const jobId=await start(dst,source),ready=await drive(dst,jobId,'READY');
+  await dst.t.mutation(am('startApply'),{adminToken,jobId,expectedPlanDigest:ready.planDigest,expectedTargetDigest:ready.targetDigest,confirmChanges:true});
+  await drive(dst,jobId,'REMAP');
+  await dst.t.mutation(am('cancel'),{adminToken,jobId});
+  await drive(dst,jobId,'ROLLBACK_RESTORE');
+  await dst.t.action(aa('advanceImport'),{adminToken,jobId});
+  const checkpoint=await dst.t.run(ctx=>ctx.db.get(jobId));
+  expect(checkpoint!.state).toBe('ROLLING_BACK');
+  expect(checkpoint!.processedChunks).toBeGreaterThan(0);
+  await dst.t.mutation(am('cancel'),{adminToken,jobId});
+  const repeated=await dst.t.run(ctx=>ctx.db.get(jobId));
+  expect(repeated!.phase).toBe(checkpoint!.phase);
+  expect(repeated!.processedChunks).toBe(checkpoint!.processedChunks);
+  await dst.t.mutation(ref('backupSelectiveImport','fail','mutation'),{jobId,error:'Simulated rollback request failure'});
+  await dst.t.mutation(am('cancel'),{adminToken,jobId});
+  const recovered=await dst.t.run(ctx=>ctx.db.get(jobId));
+  expect(recovered!.state).toBe('ROLLING_BACK');
+  expect(recovered!.phase).toBe(checkpoint!.phase);
+  expect(recovered!.processedChunks).toBe(checkpoint!.processedChunks);
+  await drive(dst,jobId,'CANCELLED');
+  expect(await dst.t.run(async ctx=>({memories:await ctx.db.query('memories').collect(),worlds:await ctx.db.query('worlds').collect(),bindings:await ctx.db.query('residentModelBindings').collect()}))).toEqual(before);
 });

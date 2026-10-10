@@ -1,7 +1,8 @@
+import * as largeFunctions from './backupLarge';
 import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
-import { makeFunctionReference } from 'convex/server';
+import { makeFunctionReference, getFunctionName } from 'convex/server';
 import schema from '../schema';
 import { DEFAULT_RESOURCE_LIMITS } from './resources';
 import { Id } from '../_generated/dataModel';
@@ -707,4 +708,62 @@ test('same-town large recovery retains lease evidence and resumes travelers only
   } finally {
     jest.useRealTimers();
   }
+});
+
+async function lostPublicationAck(t: Town['t'], fn: any, method: string, args: any) {
+  let lost = false;
+  try {
+    return await t.action(async ctx => fn._handler({...ctx,runMutation:async (ref:any,values:any) => {
+      const result = await ctx.runMutation(ref,values);
+      if (!lost && getFunctionName(ref).endsWith(`:${method}`)) { lost=true; throw new Error('SIMULATED_PUBLICATION_ACK_LOST'); }
+      return result;
+    }},args));
+  } finally { expect(lost).toBe(true); }
+}
+test.each(['saveExportPage','finishExport'])('lost %s response retains actual published export objects and a readable resumable archive', async method => {
+  const {t} = await town(), {jobId} = await t.mutation(mutation('startExport'),{adminToken});
+  if (method === 'finishExport') await drive(t,jobId,'export','SIGNING');
+  await lostPublicationAck(t,largeFunctions.advanceExport,method,{adminToken,jobId});
+  const status = await t.query(query('status'),{adminToken,jobId});
+  if (status.state === 'FAILED') await t.mutation(mutation('resume'),{adminToken,jobId});
+  await drive(t,jobId,'export','COMPLETE');
+  const result = await t.action(action('getManifest'),{adminToken,jobId});
+  await validateManifest(result.manifest,result.signature);
+  for (const descriptor of result.manifest.chunks)
+    expect(JSON.parse(await t.action(action('getChunk'),{adminToken,jobId,index:descriptor.index})).index).toBe(descriptor.index);
+});
+test('lost import-job and staged-chunk acknowledgements retain manifest and first accepted entity; duplicate retry removes only its own object', async () => {
+  const {t} = await town(), source = await exported(t);
+  await expect(lostPublicationAck(t,largeFunctions.createImport,'createImportJob',{adminToken,manifest:source.manifest,signature:source.signature,mode:'restore',sourceStopped:true})).rejects.toThrow('SIMULATED_PUBLICATION_ACK_LOST');
+  const job = await t.run(ctx => ctx.db.query('backupLargeJobs').filter(q=>q.eq(q.field('kind'),'import')).first());
+  expect(await t.run(async ctx => !!(await ctx.storage.get(job!.manifestStorageId!)))).toBe(true);
+  const chunk = source.chunks[0];
+  await expect(lostPublicationAck(t,largeFunctions.stageChunk,'saveImportChunk',{adminToken,jobId:job!._id,chunk:JSON.stringify(chunk)})).rejects.toThrow('SIMULATED_PUBLICATION_ACK_LOST');
+  const accepted = await t.run(ctx => ctx.db.query('backupLargeChunks').withIndex('job_index',q=>q.eq('jobId',job!._id).eq('index',0)).unique());
+  expect(await t.run(async ctx => !!(await ctx.storage.get(accepted!.storageId)))).toBe(true);
+  await t.action(action('stageChunk'),{adminToken,jobId:job!._id,chunk:JSON.stringify(chunk)});
+  expect(await t.run(async ctx => !!(await ctx.storage.get(accepted!.storageId)))).toBe(true);
+  expect(await t.run(ctx => ctx.db.query('backupLargeChunks').withIndex('job_index',q=>q.eq('jobId',job!._id)).collect())).toHaveLength(1);
+  await t.mutation(mutation('cancel'),{adminToken,jobId:job!._id});
+});
+
+test('lost private rollback-snapshot publication response survives resume and destructive cancellation', async () => {
+  const {t} = await town(), source = await exported(t);
+  await t.run(async ctx => {
+    const {_id,_creationTime,...fields} = (await ctx.db.query('memories').first())!;
+    await ctx.db.insert('memories',{...fields,description:'New original memory beyond the source archive'});
+  });
+  const before = await t.run(ctx => ctx.db.query('memories').collect());
+  const jobId = await staged(t,source);
+  await drive(t,jobId,'import','READY');
+  await t.mutation(mutation('startApply'),{adminToken,jobId});
+  await lostPublicationAck(t,largeFunctions.advanceImport,'saveCapture',{adminToken,jobId});
+  const saved = await t.run(ctx=>ctx.db.query('backupLargeChunks').withIndex('job_index',q=>q.eq('jobId',jobId).gte('index',source.manifest.chunks.length)).collect());
+  expect(saved.length).toBeGreaterThan(0);
+  for (const chunk of saved) expect(await t.run(async ctx => !!(await ctx.storage.get(chunk.storageId)))).toBe(true);
+  await t.mutation(mutation('resume'),{adminToken,jobId});
+  await drive(t,jobId,'import','ALLOCATE');
+  await t.mutation(mutation('cancel'),{adminToken,jobId});
+  await drive(t,jobId,'import','CANCELLED');
+  expect((await t.run(ctx=>ctx.db.query('memories').collect())).map(m=>m.description).sort()).toEqual(before.map(m=>m.description).sort());
 });
