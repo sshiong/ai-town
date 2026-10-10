@@ -61,6 +61,8 @@ export const backupLargeTables = {
     chunkIndex: v.number(),
     rowIndex: v.number(),
     relationKey: v.optional(v.string()),
+    worldId: v.optional(v.string()),
+    sourceScope: v.optional(v.string()),
     ownerGlobalId: v.optional(v.string()),
     newId: v.optional(v.string()),
     state: v.string(),
@@ -74,7 +76,8 @@ export const backupLargeTables = {
     .index('job_relation', ['jobId', 'role', 'table', 'relationKey'])
     .index('job_owner', ['jobId', 'role', 'table', 'ownerGlobalId'])
     .index('job_role', ['jobId', 'role'])
-    .index('job_table', ['jobId', 'role', 'table']),
+    .index('job_table', ['jobId', 'role', 'table'])
+    .index('job_scope', ['jobId','role','table','worldId','sourceScope']),
   backupLargeVisitEvidence: defineTable({
     jobId: v.id('backupLargeJobs'),
     visitId: v.string(),

@@ -28,12 +28,14 @@ export const largeTables = [
   'autonomousTravelDecisions',
   'federationResourcePolicy',
   'federationResourceAudit',
+  'coldHistoryFiles',
 ] as const;
 export const oldTables = [
-  ...largeTables.filter((t) => !['federationIdentity', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t)),
+  ...largeTables.filter((t) => !['coldHistoryFiles', 'federationIdentity', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t)),
   'modelMemoryVectors',
   'memoryEmbeddings',
   'embeddingsCache',
+  'coldHistoryArchives',
   'pairRequests',
   'migrationPeerExchanges',
   'federationReplayNonces',
@@ -129,6 +131,8 @@ export async function validateManifest(manifest: LargeManifest, signature: strin
       typeof entry.digest !== 'string'
     )
       throw new Error('INVALID_LARGE_BACKUP_DESCRIPTOR');
+    if (entry.table === 'coldHistoryFiles' && entry.count > 1)
+      throw new Error('BACKUP_COLD_FILES_CHUNK_BOUND_REQUIRED');
     const tableIndex = (largeTables as readonly string[]).indexOf(entry.table);
     if (tableIndex < previousTable) throw new Error('LARGE_BACKUP_TABLE_ORDER');
     previousTable = tableIndex;
@@ -136,7 +140,7 @@ export async function validateManifest(manifest: LargeManifest, signature: strin
     bytes += entry.bytes;
   }
   if (bytes > MAX_ARCHIVE_BYTES) throw new Error('LARGE_BACKUP_ARCHIVE_BUDGET');
-  if (largeTables.some((table) => !['federationIdentityKeyHistory', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(table) && !tables.has(table)))
+  if (largeTables.some((table) => !['coldHistoryFiles', 'federationIdentityKeyHistory', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(table) && !tables.has(table)))
     throw new Error('INCOMPLETE_LARGE_BACKUP_MANIFEST');
   validateSourceRow('federationIdentity', manifest.source);
   if (manifest.source.fingerprint !== `sha256:${await digest(manifest.source.publicKey)}`)
@@ -160,6 +164,8 @@ export async function validateChunk(chunk: LargeChunk, expected: ChunkDescriptor
     chunk.table !== expected.table
   )
     throw new Error('LARGE_BACKUP_CHUNK_MISMATCH');
+  if (chunk.table === 'coldHistoryFiles' && chunk.rows.length > 1)
+    throw new Error('BACKUP_COLD_FILES_CHUNK_BOUND_REQUIRED');
   assertNoSecrets(chunk);
   const actual = await descriptor(chunk);
   if (
@@ -197,6 +203,7 @@ export function referencesFor(value: any, validator: any): { id: string; table: 
   return [];
 }
 export function validateSourceRow(table: string, row: BackupRow) {
+  if (table === 'coldHistoryFiles') return [{id:row.owner.worldId,table:'worlds'},{id:row.owner.memoryId,table:'memories'}];
   if (typeof row._id !== 'string' || !row._id || !Number.isFinite(row._creationTime))
     throw new Error('INVALID_BACKUP_DOCUMENT_ID');
   let fields = stripSystem(row);
@@ -223,6 +230,7 @@ export function validateSourceRow(table: string, row: BackupRow) {
 
 /** Only metadata required for cross-chunk preflight; payloads remain in private storage. */
 export function rowMetadata(table: string, row: BackupRow): BackupRow {
+  if (table === 'coldHistoryFiles') return {owner:row.owner,kind:row.file.manifest.kind,digest:row.file.manifest.digest};
   const keys = [
     'worldId',
     'playerId',
@@ -240,6 +248,9 @@ export function rowMetadata(table: string, row: BackupRow): BackupRow {
     'homePlayerId',
     'role',
     'policyId',
+    'data',
+    'conversationId',
+    'transcriptId',
   ];
   const metadata: BackupRow = {};
   for (const key of keys) if (row[key] !== undefined) metadata[key] = row[key];

@@ -6,25 +6,32 @@ import { makeFunctionReference, getFunctionName } from 'convex/server';
 import schema from '../schema';
 import { DEFAULT_RESOURCE_LIMITS } from './resources';
 import { Id } from '../_generated/dataModel';
-import { createIdentityKeys, sign } from './security';
+import { createIdentityKeys, digest, sign } from './security';
 import { decodeRow, encodeRow } from './backupHelpers';
 import { Game } from '../aiTown/game';
 import { engineInsertInput } from '../engine/abstractGame';
 import type { ActionCtx } from '../_generated/server';
+import { EMBEDDING_DIMENSION } from '../util/llm';
+import type { PortableHistory } from './coldHistoryFiles';
 import {
   descriptor,
   LargeChunk,
   LargeManifest,
+  MAX_CHUNK_BYTES,
   largeTables,
   oldTables,
   validateManifest,
+  validateChunk,
   validateSourceRow,
+  size,
 } from './backupLargeHelpers';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/backupLarge.ts': () => import('./backupLarge'),
   '../federation/backup.ts': () => import('./backup'),
+  '../federation/coldHistory.ts': () => import('./coldHistory'),
+  '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../models/embeddings.ts': () => import('../models/embeddings'),
   '../engine/abstractGame.ts': () => import('../engine/abstractGame'),
   '../aiTown/game.ts': () => import('../aiTown/game'),
@@ -152,6 +159,89 @@ async function town(memoryCount = 2) {
   return { t, keys, ...ids };
 }
 type Town = Awaited<ReturnType<typeof town>>;
+const historyAction = (name: string) => makeFunctionReference<'action'>(`federation/${name}`);
+const historyQuery = (name: string) => makeFunctionReference<'query'>(`federation/${name}`);
+async function coldConversation(source: Town, firstMessage?: string) {
+  const memoryId = await source.t.run(async ctx => {
+    const embeddingId = await ctx.db.insert('memoryEmbeddings', {
+      playerId: 'p:0', embedding: Array.from({ length: EMBEDDING_DIMENSION }, () => 0.25),
+    });
+    const memoryId = await ctx.db.insert('memories', {
+      worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId,
+      embeddingId, description: 'Retained closed conversation', importance: 8, lastAccess: 1,
+      data: { type: 'conversation', conversationId: 'c:4', playerIds: ['p:1'] },
+    });
+    await ctx.db.insert('archivedConversations', {
+      worldId: source.worldId, id: 'c:4', creator: 'p:0', created: 10, ended: 20,
+      numMessages: 3, participants: ['p:0', 'p:1'],
+    });
+    await ctx.db.insert('participatedTogether', {
+      worldId: source.worldId, conversationId: 'c:4', player1: 'p:0', player2: 'p:1', ended: 20,
+    });
+    for (let index = 0; index < 3; index++)
+      await ctx.db.insert('messages', {
+        worldId: source.worldId, conversationId: 'c:4', author: index % 2 ? 'p:1' : 'p:0',
+        text: index === 0 && firstMessage !== undefined ? firstMessage : `Retained original message ${index}`,
+        messageUuid: `large-cold-message-${index}`,
+      });
+    return memoryId;
+  });
+  const owner = {
+    adminToken, worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId, memoryId,
+  };
+  const { archiveId } = await source.t.action(historyAction('coldHistory:archive'), owner);
+  const file: PortableHistory = await source.t.action(historyAction('coldHistoryFiles:exportFile'), owner);
+  const original = await source.t.run(ctx => ctx.db.get(archiveId as Id<'coldHistoryArchives'>));
+  return { owner, file, original: original! };
+}
+async function coldTravel(source: Town) {
+  const transcriptId = 'large-travel-conversation/completed-visit';
+  const memoryId = await source.t.run(async ctx => {
+    const memoryId = await ctx.db.insert('memories', {
+      worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId,
+      description: 'Completed journey with retained original dialogue', importance: 8, lastAccess: 1,
+      data: {
+        type: 'travel', eventId: 'large-travel-ended', visitId: 'completed-visit', hostTownId: 'town:friend',
+        federationConversationId: 'large-travel-conversation', transcriptId, participants: [], occurredAt: 20,
+      },
+    });
+    await ctx.db.insert('homeTravelTranscripts', {
+      worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId, transcriptId,
+      visitId: 'completed-visit', hostTownId: 'town:friend', federationConversationId: 'large-travel-conversation',
+      endedAt: 20, participants: [], finalPageNumber: 0, receivedPageCount: 1, highestPageNumber: 0,
+      totalMessageCount: 3, state: 'COMPLETE', summaryState: 'DONE', endMemoryId: memoryId,
+    });
+    await ctx.db.insert('homeTravelTranscriptPages', {
+      agentGlobalId: source.agentGlobalId, transcriptId, pageNumber: 0, eventId: 'large-travel-page',
+      finalPage: true, memoryIds: [memoryId],
+      messages: Array.from({ length: 3 }, (_, index) => ({
+        messageId: `large-travel-message-${index}`, text: `Retained journey message ${index}`,
+        author: index % 2 ? 'town:friend/visitor:bob' : source.agentGlobalId, occurredAt: index + 10,
+      })),
+    });
+    return memoryId;
+  });
+  const owner = { adminToken, worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId, memoryId };
+  await source.t.action(historyAction('coldHistory:archive'), owner);
+  const file: PortableHistory = await source.t.action(historyAction('coldHistoryFiles:exportFile'), owner);
+  return { owner, file };
+}
+async function retainedState(t: Town['t']) {
+  return t.run(async ctx => ({
+    identity: await ctx.db.query('federationIdentity').collect(),
+    worlds: await ctx.db.query('worlds').collect(),
+    memories: await ctx.db.query('memories').collect(),
+    embeddings: await ctx.db.query('memoryEmbeddings').collect(),
+    bindings: await ctx.db.query('residentModelBindings').collect(),
+    profiles: await ctx.db.query('chatProfiles').collect(),
+    conversations: await ctx.db.query('archivedConversations').collect(),
+    history: await ctx.db.query('participatedTogether').collect(),
+    messages: await ctx.db.query('messages').collect(),
+    travelTranscripts: await ctx.db.query('homeTravelTranscripts').collect(),
+    travelPages: await ctx.db.query('homeTravelTranscriptPages').collect(),
+    coldArchives: await ctx.db.query('coldHistoryArchives').collect(),
+  }));
+}
 async function drive(
   t: Town['t'],
   jobId: Id<'backupLargeJobs'>,
@@ -390,10 +480,10 @@ test.each(['restore', 'clone'] as const)('large %s preserves autonomous policy a
   expect(result.local!.enabled).toBe(false);
 });
 
-test('legacy signed large manifests without optional autonomy and resource sections still restore', async () => {
+test('legacy signed large manifests without optional autonomy, resource and cold file sections still restore', async () => {
   const { t, keys } = await town();
   const archive = await exported(t);
-  archive.chunks = archive.chunks.filter(c => !c.table.startsWith('autonomousTravel') && !c.table.startsWith('federationResource'))
+  archive.chunks = archive.chunks.filter(c => !c.table.startsWith('autonomousTravel') && !c.table.startsWith('federationResource') && c.table !== 'coldHistoryFiles')
     .map((c, index) => ({ ...c, index }));
   archive.manifest.chunks = await Promise.all(archive.chunks.map(descriptor));
   archive.signature = await sign(archive.manifest, keys.privateKeyEncrypted);
@@ -411,7 +501,7 @@ test.each(['restore', 'clone', 'rollback'] as const)('large %s preserves capacit
     await ctx.db.insert('federationResourceAudit', { operation: 'SOURCE_QUOTA_CHANGED', previous: null, next: 3, createdAt: 1 });
     await ctx.db.insert('federationResourceMetrics', { kind: 'INBOUND_EVENT', bucketStart: Date.now(), count: 1, durationCount: 0, durationSumMs: 0, samples: [] });
   });
-  expect(largeTables.slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
+  expect(largeTables.filter(t => t !== 'coldHistoryFiles').slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
   expect(oldTables.slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
   const archive = await exported(t);
   expect(archive.manifest.chunks.some(c => c.table === 'federationResourceMetrics')).toBe(false);
@@ -570,6 +660,296 @@ test('clone creates a new identity and local global ownership while retaining pr
   expect(result.binding!.agentGlobalId).toContain(result.local!.townId);
   expect(result.memories[0].agentGlobalId).toBe(result.binding!.agentGlobalId);
   expect(result.memories[0].description).toBe('Canonical memory 0');
+});
+
+test('large clone carries verified cold files into an independent database with immutable source proof and mapped local ownership', async () => {
+  const source = await town();
+  const cold = await coldConversation(source);
+  const before = await retainedState(source.t);
+  const archive = await exported(source.t);
+  const attachments = archive.chunks.filter(c => c.table === 'coldHistoryFiles').flatMap(c => c.rows.map(decodeRow));
+  expect(attachments).toHaveLength(1);
+  expect(attachments[0]).toEqual({
+    _id: cold.original._id, _creationTime: cold.original._creationTime,
+    owner: { worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId, memoryId: cold.owner.memoryId },
+    file: cold.file, authorAliases: [],
+  });
+  expect(JSON.stringify(attachments)).not.toMatch(/storageId|privateKeyEncrypted/);
+  const destination = convexTest(schema, modules);
+  const jobId = await staged(destination, archive, 'clone');
+  await drive(destination, jobId, 'import', 'READY');
+  await destination.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(destination, jobId, 'import', 'COMPLETE');
+  const restored = await retainedState(destination);
+  const binding = restored.bindings[0];
+  const memory = restored.memories.find(m => m.description === 'Retained closed conversation')!;
+  const owner = { adminToken, worldId: binding.worldId, playerId: binding.playerId, agentGlobalId: binding.agentGlobalId, memoryId: memory._id };
+  expect(binding.worldId).not.toBe(source.worldId);
+  expect(binding.agentGlobalId).not.toBe(source.agentGlobalId);
+  expect(memory.worldId).toBe(binding.worldId);
+  expect(memory.agentGlobalId).toBe(binding.agentGlobalId);
+  expect(memory.embeddingId).toBeUndefined();
+  expect(restored.embeddings).toEqual([]);
+  expect(binding.chatProfileId).toBe(restored.profiles[0]._id);
+  expect(restored.profiles[0].model).toBe('fixed');
+  expect(restored.conversations[0].worldId).toBe(binding.worldId);
+  expect(restored.history[0].worldId).toBe(binding.worldId);
+  expect(restored.messages.every(m => m.worldId === binding.worldId)).toBe(true);
+  const discovered = await destination.query(historyQuery('coldHistory:discover'), owner);
+  expect(discovered).toMatchObject({ state: 'VERIFIED', count: 3 });
+  const metadata = restored.coldArchives[0];
+  expect(discovered.archiveId).toBe(metadata._id);
+  expect(metadata.worldId).toBe(binding.worldId);
+  expect(metadata.lookupKey).not.toBe(metadata.sourceKey);
+  expect(JSON.parse(metadata.lookupKey!)[1]).toBe(binding.worldId);
+  expect(metadata.manifest).toEqual(cold.file.manifest);
+  expect(metadata.signature).toBe(cold.file.signature);
+  expect(metadata.publicKey).toBe(cold.file.publicKey);
+  expect(metadata.publicKey).not.toBe(restored.identity[0].publicKey);
+  const read = await destination.action(historyAction('coldHistory:read'), { ...owner, offset: 0, numItems: 25 });
+  expect(read.page).toEqual(cold.file.payload.messages);
+  expect(await destination.action(historyAction('coldHistoryFiles:exportFile'), owner)).toEqual(cold.file);
+  expect(await retainedState(source.t)).toEqual(before);
+});
+
+test('large clone preserves travel cold files while mapping their local owner and global authors on worldless transcript pages', async () => {
+  const source = await town();
+  const { owner, file: original } = await coldTravel(source);
+  const before = await retainedState(source.t);
+  const archive = await exported(source.t);
+  expect(archive.chunks.filter(c => c.table === 'coldHistoryFiles').flatMap(c => c.rows)).toHaveLength(1);
+  const destination = convexTest(schema, modules);
+  const jobId = await staged(destination, archive, 'clone');
+  await drive(destination, jobId, 'import', 'READY');
+  await destination.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(destination, jobId, 'import', 'COMPLETE');
+  const restored = await retainedState(destination);
+  const binding = restored.bindings[0];
+  const memory = restored.memories.find(m => m.description === 'Completed journey with retained original dialogue')!;
+  const targetOwner = { ...owner, worldId: binding.worldId, agentGlobalId: binding.agentGlobalId, memoryId: memory._id };
+  expect(binding.agentGlobalId).not.toBe(source.agentGlobalId);
+  expect(memory).toMatchObject({ worldId: binding.worldId, agentGlobalId: binding.agentGlobalId });
+  expect(restored.travelTranscripts[0]).toMatchObject({
+    worldId: binding.worldId, agentGlobalId: binding.agentGlobalId, endMemoryId: memory._id,
+    state: 'COMPLETE', summaryState: 'DONE',
+  });
+  expect(restored.travelPages[0].agentGlobalId).toBe(binding.agentGlobalId);
+  expect(restored.travelPages[0].memoryIds).toEqual([memory._id]);
+  expect(restored.travelPages[0]).not.toHaveProperty('worldId');
+  expect(restored.travelPages[0].messages.map(m => m.author)).toEqual([
+    binding.agentGlobalId, 'town:friend/visitor:bob', binding.agentGlobalId,
+  ]);
+  const read = await destination.action(historyAction('coldHistory:read'), { ...targetOwner, offset: 0, numItems: 25 });
+  expect(read.page.map((m: any) => { const { targetAuthor, ...originalMessage } = m; return originalMessage; })).toEqual(original.payload.messages);
+  expect(read.page[0].targetAuthor).toBe(binding.agentGlobalId);
+  expect(read.page[1].authorGlobalId).toBe('town:friend/visitor:bob');
+  expect(restored.coldArchives[0]).toMatchObject({
+    worldId: binding.worldId, ownerGlobalId: binding.agentGlobalId,
+    manifest: original.manifest, publicKey: original.publicKey, signature: original.signature,
+    authorAliases: [{ sourceAuthor: source.agentGlobalId, targetAuthor: binding.agentGlobalId }],
+  });
+  expect(await destination.action(historyAction('coldHistoryFiles:exportFile'), targetOwner)).toEqual(original);
+  expect(await retainedState(source.t)).toEqual(before);
+});
+
+test('an oversized encoded cold file fails large export explicitly without truncating its retained original', async () => {
+  const source = await town();
+  const cold = await coldConversation(source, 'x'.repeat(898900));
+  expect(cold.file.manifest.bytes).toBeLessThan(MAX_CHUNK_BYTES);
+  const attachment = {
+    _id: cold.original._id, _creationTime: cold.original._creationTime,
+    owner: { worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId, memoryId: cold.owner.memoryId },
+    file: cold.file, authorAliases: [],
+  };
+  expect(size({ index: 0, table: 'coldHistoryFiles', rows: [encodeRow(attachment)] })).toBeGreaterThan(MAX_CHUNK_BYTES);
+  const before = await retainedState(source.t);
+  const { jobId } = await source.t.mutation(mutation('startExport'), { adminToken });
+  let failed;
+  for (let index = 0; index < 1000; index++) {
+    failed = await source.t.action(action('advanceExport'), { adminToken, jobId });
+    if (failed.state === 'FAILED') break;
+    expect(failed.state).not.toBe('COMPLETE');
+  }
+  expect(failed).toMatchObject({ state: 'FAILED', table: 'coldHistoryFiles' });
+  expect(failed!.error).toContain('BACKUP_SINGLE_DOCUMENT_BUDGET');
+  expect(await retainedState(source.t)).toEqual(before);
+  expect(await source.t.action(historyAction('coldHistoryFiles:exportFile'), cold.owner)).toEqual(cold.file);
+  await expect(source.t.action(action('getManifest'), { adminToken, jobId })).rejects.toThrow('BACKUP_MANIFEST_NOT_READY');
+  await source.t.mutation(mutation('cancel'), { adminToken, jobId });
+});
+
+test('a forged cold file signature is rejected while staging even when every outer checksum and signature is valid', async () => {
+  const source = await town();
+  await coldConversation(source);
+  const archive = await exported(source.t);
+  const chunk = archive.chunks.find(c => c.table === 'coldHistoryFiles' && c.rows.length)!;
+  const attachment = decodeRow(chunk.rows[0]);
+  attachment.file.signature = 'forged-inner-signature';
+  chunk.rows[0] = encodeRow(attachment);
+  archive.manifest.chunks[chunk.index] = await descriptor(chunk);
+  archive.signature = await sign(archive.manifest, source.keys.privateKeyEncrypted);
+  await validateManifest(archive.manifest, archive.signature);
+  const before = await retainedState(source.t);
+  const { jobId } = await source.t.action(action('createImport'), {
+    adminToken, manifest: archive.manifest, signature: archive.signature, mode: 'restore', sourceStopped: true,
+  });
+  for (const row of archive.chunks.filter(c => c.index !== chunk.index))
+    await source.t.action(action('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(row) });
+  await expect(source.t.action(action('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(chunk) }))
+    .rejects.toThrow('COLD_FILE_INTEGRITY_FAILED');
+  expect(await retainedState(source.t)).toEqual(before);
+  const state = await source.t.query(query('status'), { adminToken, jobId });
+  expect(state.state).toBe('STAGING');
+  expect(state.uploadedChunks).toBe(archive.chunks.length - 1);
+  await source.t.mutation(mutation('cancel'), { adminToken, jobId });
+  expect(await source.t.query(ctx => ctx.db.query('backupMaintenanceLocks').first())).toBeNull();
+});
+
+test('signed multi-file cold chunks are rejected before staging or creating an import job', async () => {
+  const source = await town();
+  await coldConversation(source);
+  const archive = await exported(source.t);
+  const chunk = archive.chunks.find(c => c.table === 'coldHistoryFiles' && c.rows.length)!;
+  const duplicate = decodeRow(chunk.rows[0]);
+  duplicate._id += ':duplicate';
+  chunk.rows.push(encodeRow(duplicate));
+  const expected = await descriptor(chunk);
+  archive.manifest.chunks[chunk.index] = expected;
+  archive.signature = await sign(archive.manifest, source.keys.privateKeyEncrypted);
+  await expect(validateManifest(archive.manifest, archive.signature))
+    .rejects.toThrow('BACKUP_COLD_FILES_CHUNK_BOUND_REQUIRED');
+  await expect(validateChunk(chunk, expected))
+    .rejects.toThrow('BACKUP_COLD_FILES_CHUNK_BOUND_REQUIRED');
+  await expect(source.t.action(action('createImport'), {
+    adminToken, manifest: archive.manifest, signature: archive.signature, mode: 'restore', sourceStopped: true,
+  })).rejects.toThrow('BACKUP_COLD_FILES_CHUNK_BOUND_REQUIRED');
+  expect(await source.t.run(ctx => ctx.db.query('backupLargeJobs').filter(q => q.eq(q.field('kind'), 'import')).collect())).toEqual([]);
+  expect(await source.t.query(ctx => ctx.db.query('backupMaintenanceLocks').first())).toBeNull();
+});
+
+test.each(['same conversation owner', 'different conversation memory', 'different travel memory'])(
+  'cold preflight claims local ranges across checkpoints and rejects %s before READY', async variant => {
+    const source = await town();
+    const cold = variant === 'different travel memory'
+      ? await coldTravel(source) : await coldConversation(source);
+    let duplicateMemoryId = cold.owner.memoryId;
+    if (variant !== 'same conversation owner')
+      duplicateMemoryId = await source.t.run(async ctx => {
+        const { _id, _creationTime, ...memory } = (await ctx.db.get(cold.owner.memoryId))!;
+        return ctx.db.insert('memories', { ...memory, description: 'Another memory of the same retained range' });
+      });
+    const before = await retainedState(source.t);
+    const archive = await exported(source.t);
+    const original = archive.chunks.find(c => c.table === 'coldHistoryFiles' && c.rows.length)!;
+    const duplicate = decodeRow(original.rows[0]);
+    duplicate._id += ':different-source-id';
+    duplicate.owner.memoryId = duplicateMemoryId;
+    // An independently signed original can describe the same local range. Its
+    // foreign provenance key must not be used as the local deduplication key.
+    const foreignKey = JSON.parse(duplicate.file.manifest.sourceKey);
+    foreignKey[1] = 'foreign-original-world';
+    duplicate.file.payload.sourceKey = JSON.stringify(foreignKey);
+    duplicate.file.manifest.sourceKey = duplicate.file.payload.sourceKey;
+    duplicate.file.manifest.bytes = size(duplicate.file.payload);
+    duplicate.file.manifest.digest = await digest(duplicate.file.payload);
+    duplicate.file.signature = await sign(duplicate.file.manifest, source.keys.privateKeyEncrypted);
+    const extra: LargeChunk = { index: archive.chunks.length, table: 'coldHistoryFiles', rows: [encodeRow(duplicate)] };
+    archive.chunks.push(extra);
+    archive.manifest.chunks.push(await descriptor(extra));
+    archive.signature = await sign(archive.manifest, source.keys.privateKeyEncrypted);
+    const jobId = await staged(source.t, archive);
+    await drive(source.t, jobId, 'import', 'VALIDATE_COLD');
+    if (variant === 'same conversation owner') {
+      await lostPublicationAck(source.t, largeFunctions.advanceImport, 'saveColdValidation', { adminToken, jobId });
+      expect((await source.t.query(query('status'), { adminToken, jobId })).state).toBe('FAILED');
+      await source.t.mutation(mutation('resume'), { adminToken, jobId });
+    } else await source.t.action(action('advanceImport'), { adminToken, jobId });
+    const checkpoint = (await source.t.run(ctx => ctx.db.get(jobId)))!;
+    const claimed = await source.t.run(ctx => ctx.db.query('backupLargeRows')
+      .withIndex('job_table', q => q.eq('jobId', jobId).eq('role', 'SOURCE').eq('table', 'coldHistoryFiles')).collect());
+    expect(checkpoint.phase).toBe('VALIDATE_COLD');
+    expect(claimed.filter(r => r.relationKey !== undefined)).toHaveLength(1);
+    await expect(source.t.mutation(mutation('saveColdValidation'), {
+      jobId, expectedCursor: null, cursor: checkpoint.cursor!, done: false,
+      sourceIds: [decodeRow(original.rows[0])._id],
+    })).rejects.toThrow('BACKUP_CHECKPOINT_CHANGED');
+    const failed = await source.t.action(action('advanceImport'), { adminToken, jobId });
+    expect(failed).toMatchObject({ state: 'FAILED', phase: 'VALIDATE_COLD' });
+    expect(failed.error).toContain('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+    expect((await source.t.run(ctx => ctx.db.get(jobId)))!.cursor).toBe(checkpoint.cursor);
+    expect((await source.t.run(ctx => ctx.db.query('backupLargeRows')
+      .withIndex('job_table', q => q.eq('jobId', jobId).eq('role', 'SOURCE').eq('table', 'coldHistoryFiles')).collect()))
+      .filter(r => r.relationKey !== undefined)).toHaveLength(1);
+    expect(await retainedState(source.t)).toEqual(before);
+    expect(await source.t.run(ctx => ctx.db.query('backupLargeChunks')
+      .withIndex('job_index', q => q.eq('jobId', jobId).gte('index', archive.chunks.length)).collect())).toEqual([]);
+    await source.t.mutation(mutation('resume'), { adminToken, jobId });
+    expect((await source.t.action(action('advanceImport'), { adminToken, jobId })).error)
+      .toContain('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+    await source.t.mutation(mutation('cancel'), { adminToken, jobId });
+    expect(await source.t.query(ctx => ctx.db.query('backupMaintenanceLocks').first())).toBeNull();
+  },
+);
+
+test('cold source closure preflight fails before live writes when signed outer history disagrees with an authentic cold file', async () => {
+  const source = await town();
+  await coldConversation(source);
+  const archive = await exported(source.t);
+  const chunk = archive.chunks.find(c => c.table === 'messages' && c.rows.length)!;
+  const message = decodeRow(chunk.rows[0]);
+  message.text = 'Outer source history contradicts the immutable original';
+  chunk.rows[0] = encodeRow(message);
+  archive.manifest.chunks[chunk.index] = await descriptor(chunk);
+  archive.signature = await sign(archive.manifest, source.keys.privateKeyEncrypted);
+  const before = await retainedState(source.t);
+  const jobId = await staged(source.t, archive);
+  let failed;
+  for (let index = 0; index < 1000; index++) {
+    failed = await source.t.action(action('advanceImport'), { adminToken, jobId });
+    if (failed.state === 'FAILED') break;
+    expect(failed.state).not.toBe('READY');
+  }
+  expect(failed).toMatchObject({ state: 'FAILED', phase: 'VALIDATE_COLD' });
+  expect(failed!.error).toContain('BACKUP_COLD_FILES_MESSAGES_MISMATCH');
+  expect(await retainedState(source.t)).toEqual(before);
+  expect(await source.t.run(ctx => ctx.db.query('backupLargeChunks').withIndex('job_index', q => q.eq('jobId', jobId).gte('index', archive.chunks.length)).collect())).toEqual([]);
+  await source.t.mutation(mutation('cancel'), { adminToken, jobId });
+  expect(await source.t.query(ctx => ctx.db.query('backupMaintenanceLocks').first())).toBeNull();
+});
+
+test('cancelling after cold files were applied restores the original private file entity and readable remapped owner', async () => {
+  const source = await town();
+  const cold = await coldConversation(source);
+  const archive = await exported(source.t);
+  await source.t.run(ctx => ctx.db.patch(cold.owner.memoryId, { description: 'Target closed conversation newer than backup' }));
+  const identity = await source.t.run(ctx => ctx.db.query('federationIdentity').unique());
+  const jobId = await staged(source.t, archive);
+  await drive(source.t, jobId, 'import', 'READY');
+  await source.t.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(source.t, jobId, 'import', 'FINALIZE');
+  const applied = await source.t.run(ctx => ctx.db.query('coldHistoryArchives').unique());
+  expect(applied!.storageId).not.toBe(cold.original.storageId);
+  expect(await source.t.run(async ctx => !!await ctx.storage.get(cold.original.storageId!))).toBe(true);
+  await source.t.mutation(mutation('cancel'), { adminToken, jobId });
+  await drive(source.t, jobId, 'import', 'CANCELLED');
+  const restored = await retainedState(source.t);
+  const binding = restored.bindings[0];
+  const memory = restored.memories.find(m => m.description === 'Target closed conversation newer than backup')!;
+  const owner = { adminToken, worldId: binding.worldId, playerId: binding.playerId, agentGlobalId: binding.agentGlobalId, memoryId: memory._id };
+  expect(memory.worldId).toBe(binding.worldId);
+  expect(memory.embeddingId).toBe(restored.embeddings[0]._id);
+  expect(restored.embeddings[0].embedding).toEqual(Array.from({ length: EMBEDDING_DIMENSION }, () => 0.25));
+  expect(restored.identity[0]).toEqual(identity);
+  expect(restored.coldArchives).toHaveLength(1);
+  expect(restored.coldArchives[0]).toMatchObject({
+    storageId: cold.original.storageId, manifest: cold.file.manifest,
+    signature: cold.file.signature, publicKey: cold.file.publicKey, sourceKey: cold.original.sourceKey,
+    worldId: binding.worldId,
+  });
+  expect(await source.t.run(async ctx => !!await ctx.storage.get(cold.original.storageId!))).toBe(true);
+  expect(await source.t.action(historyAction('coldHistoryFiles:exportFile'), owner)).toEqual(cold.file);
+  expect((await source.t.action(historyAction('coldHistory:read'), { ...owner, offset: 0, numItems: 25 })).page).toEqual(cold.file.payload.messages);
+  expect(await source.t.query(ctx => ctx.db.query('backupMaintenanceLocks').first())).toBeNull();
 });
 
 test('manifest must be signed, complete and ordered; exporting cancellation releases the lock', async () => {
