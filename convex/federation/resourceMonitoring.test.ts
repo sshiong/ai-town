@@ -1,7 +1,9 @@
 import { jest } from '@jest/globals';
 import { convexTest } from 'convex-test';
 import schema from '../schema';
-import { consumeRemoteEventBudget, recordResourceMetric, resourceMeasurements } from './resourceMonitoring';
+import { consumeRemoteEventBudget, hostResourceHealth, recordResourceMetric, resourceMeasurements } from './resourceMonitoring';
+import { validateResourcePolicy } from './backupHelpers';
+import { visitorAdmissionSnapshot } from './visitorQueue';
 import { mutationRef } from './refs';
 import { residentChatCompletion } from './resources';
 import { webcrypto } from 'node:crypto';
@@ -110,6 +112,108 @@ test('negative or non-finite timings are rejected without emitting fake metrics'
   const t = convexTest(schema, modules);
   for (const value of [-1, Infinity, NaN]) await expect(t.run(ctx => recordResourceMetric(ctx, 'CHAT_PROVIDER', value))).rejects.toThrow('INVALID_RESOURCE_MEASUREMENT');
   expect(await t.run(ctx => ctx.db.query('federationResourceMetrics').collect())).toEqual([]);
+});
+
+const hostAdminToken = 'host-resource-test-admin-token';
+const reportToken = 'host-resource-test-reporter-token-distinct';
+const thresholds = { maxCpuPercent: 85, maxMemoryPercent: 90, maxSampleAgeMs: 15000 };
+async function hostSetup() {
+  process.env.FEDERATION_ADMIN_TOKEN = hostAdminToken;
+  process.env.FEDERATION_RESOURCE_REPORT_TOKEN = reportToken;
+  const t = convexTest(schema, modules);
+  await t.run(ctx => ctx.db.insert('federationIdentity', {
+    townId: 'host', townName: 'Host', endpoint: 'https://host.example/federation/v1', publicKey: 'fixture',
+    privateKeyEncrypted: 'fixture', fingerprint: 'fixture', deploymentInstanceId: 'host-instance', deploymentEpoch: 1,
+    enabled: true, allowIncomingPairRequests: false, allowUnencryptedHttp: false, allowPublicHttp: false,
+    maxVisitors: 8, maxVisitDurationMs: 300000, mode: 'ACTIVE', createdAt: Date.now(),
+  }));
+  return t;
+}
+// Deterministic input fixtures validate the reporting contract; they are not real host measurements.
+const hostSample = () => ({
+  reportToken, townId: 'host', deploymentInstanceId: 'host-instance', deploymentEpoch: 1,
+  scope: 'OS_HOST' as const, sampleStartedAt: Date.now() - 5000, measuredAt: Date.now(),
+  cpuPercent: 40, memoryUsedBytes: 60, memoryTotalBytes: 100,
+});
+test('only the dedicated reporter credential can persist readings and credentials never enter records', async () => {
+  const t = await hostSetup();
+  for (const token of ['invalid', hostAdminToken])
+    await expect(t.mutation(mutationRef('resourceMonitoring/reportHostResources'),
+      { ...hostSample(), reportToken: token })).rejects.toThrow('RESOURCE_REPORT_UNAUTHORIZED');
+  await t.mutation(mutationRef('resourceMonitoring/reportHostResources'), hostSample());
+  const health = await t.run(ctx => hostResourceHealth(ctx.db));
+  expect(health).toMatchObject({ cpu: 40, memory: { usedPercent: 60 }, status: 'AVAILABLE',
+    scope: 'OS_HOST', sampleIntervalMs: 5000, reasons: [], thresholds: null });
+  expect(JSON.stringify(await t.run(ctx => ctx.db.query('federationHostResources').collect())))
+    .not.toMatch(/reportToken|host-resource-test-reporter-token|adminToken/);
+  process.env.FEDERATION_RESOURCE_REPORT_TOKEN = hostAdminToken;
+  await expect(t.mutation(mutationRef('resourceMonitoring/reportHostResources'),
+    { ...hostSample(), reportToken: hostAdminToken })).rejects.toThrow('RESOURCE_REPORT_UNAUTHORIZED');
+});
+test('replay, out-of-order, future, stale, impossible values and wrong deployment reports are rejected', async () => {
+  const t = await hostSetup();
+  for (const patch of [{ cpuPercent: -1 }, { cpuPercent: 101 }, { cpuPercent: Infinity },
+    { memoryUsedBytes: -1 }, { memoryUsedBytes: 101 }, { memoryTotalBytes: 0 }, { memoryTotalBytes: 1.5 },
+    { sampleStartedAt: Date.now() - 999 }, { sampleStartedAt: Date.now() - 60001 },
+    { measuredAt: Date.now() + 1 }, { measuredAt: Date.now() - 30001, sampleStartedAt: Date.now() - 35001 }])
+    await expect(t.mutation(mutationRef('resourceMonitoring/reportHostResources'),
+      { ...hostSample(), ...patch })).rejects.toThrow('INVALID_HOST_RESOURCE_MEASUREMENT');
+  for (const patch of [{ townId: 'other' }, { deploymentInstanceId: 'other' }, { deploymentEpoch: 2 }])
+    await expect(t.mutation(mutationRef('resourceMonitoring/reportHostResources'),
+      { ...hostSample(), ...patch })).rejects.toThrow('RESOURCE_REPORT_DEPLOYMENT_MISMATCH');
+  expect(await t.run(ctx => ctx.db.query('federationHostResources').collect())).toEqual([]);
+  await t.mutation(mutationRef('resourceMonitoring/reportHostResources'), hostSample());
+  await expect(t.mutation(mutationRef('resourceMonitoring/reportHostResources'), hostSample()))
+    .rejects.toThrow('STALE_HOST_RESOURCE_REPORT');
+  await expect(t.mutation(mutationRef('resourceMonitoring/reportHostResources'),
+    { ...hostSample(), sampleStartedAt: Date.now() - 5001, measuredAt: Date.now() - 1 }))
+    .rejects.toThrow('STALE_HOST_RESOURCE_REPORT');
+});
+test('enabled thresholds require fresh actual readings and the shared admission transaction rechecks hardware', async () => {
+  const t = await hostSetup();
+  await t.mutation(mutationRef('resourceMonitoring/configureHostResources'), { adminToken: hostAdminToken, thresholds });
+  expect(await t.run(async ctx => (await visitorAdmissionSnapshot(ctx)).reason ?? null)).toBe('HOST_RESOURCE_DEGRADED');
+  await t.mutation(mutationRef('resourceMonitoring/reportHostResources'), { ...hostSample(), cpuPercent: 85, memoryUsedBytes: 90 });
+  expect((await t.run(ctx => hostResourceHealth(ctx.db))).reasons).toEqual(['HOST_CPU_THRESHOLD', 'HOST_MEMORY_THRESHOLD']);
+  expect(await t.run(async ctx => (await visitorAdmissionSnapshot(ctx)).reason ?? null)).toBe('HOST_RESOURCE_DEGRADED');
+  jest.setSystemTime(Date.now() + 5000);
+  await t.mutation(mutationRef('resourceMonitoring/reportHostResources'), hostSample());
+  expect(await t.run(async ctx => (await visitorAdmissionSnapshot(ctx)).reason ?? null)).toBeNull();
+  jest.setSystemTime(Date.now() + 15001);
+  expect(await t.run(ctx => hostResourceHealth(ctx.db))).toMatchObject({ cpu: null, memory: null,
+    status: 'STALE', reasons: ['HOST_RESOURCE_MEASUREMENTS_STALE'] });
+  expect(await t.run(async ctx => (await visitorAdmissionSnapshot(ctx)).reason ?? null)).toBe('HOST_RESOURCE_DEGRADED');
+  await t.mutation(mutationRef('resourceMonitoring/configureHostResources'), { adminToken: hostAdminToken, thresholds: null });
+  expect(await t.run(async ctx => (await visitorAdmissionSnapshot(ctx)).reason ?? null)).toBeNull();
+  expect((await t.run(ctx => ctx.db.query('federationResourceAudit').collect()))).toHaveLength(2);
+});
+test('failover and restored deployment cannot reuse a previous deployment sample', async () => {
+  const t = await hostSetup();
+  await t.mutation(mutationRef('resourceMonitoring/configureHostResources'), { adminToken: hostAdminToken, thresholds });
+  await t.mutation(mutationRef('resourceMonitoring/reportHostResources'), hostSample());
+  await t.run(async ctx => {
+    const row = (await ctx.db.query('federationIdentity').unique())!;
+    await ctx.db.patch(row._id, { deploymentInstanceId: 'replacement-instance', deploymentEpoch: 2 });
+  });
+  expect(await t.run(ctx => hostResourceHealth(ctx.db))).toMatchObject({ cpu: null, memory: null,
+    status: 'DEPLOYMENT_MISMATCH', reasons: ['HOST_RESOURCE_MEASUREMENTS_DEPLOYMENT_MISMATCH'] });
+  await expect(t.mutation(mutationRef('resourceMonitoring/reportHostResources'), hostSample()))
+    .rejects.toThrow('RESOURCE_REPORT_DEPLOYMENT_MISMATCH');
+  await t.mutation(mutationRef('resourceMonitoring/reportHostResources'),
+    { ...hostSample(), deploymentInstanceId: 'replacement-instance', deploymentEpoch: 2 });
+  expect((await t.run(ctx => hostResourceHealth(ctx.db))).status).toBe('AVAILABLE');
+});
+test('threshold policy validation also applies to restored backups', async () => {
+  const t = await hostSetup();
+  for (const patch of [{ maxCpuPercent: 0 }, { maxCpuPercent: 101 }, { maxCpuPercent: NaN },
+    { maxMemoryPercent: -1 }, { maxMemoryPercent: 101 }, { maxSampleAgeMs: 4999 }, { maxSampleAgeMs: 120001 }]) {
+    const invalid = { ...thresholds, ...patch };
+    expect(() => validateResourcePolicy({ maxVisitorsPerSourceTown: null, hostResourceThresholds: invalid }))
+      .toThrow('INVALID_HOST_RESOURCE_THRESHOLDS');
+    await expect(t.mutation(mutationRef('resourceMonitoring/configureHostResources'),
+      { adminToken: hostAdminToken, thresholds: invalid })).rejects.toThrow('INVALID_HOST_RESOURCE_THRESHOLDS');
+  }
+  expect(() => validateResourcePolicy({ maxVisitorsPerSourceTown: null, hostResourceThresholds: thresholds })).not.toThrow();
 });
 
 test.each(['COMMITTED', 'FAILED', 'EXPIRED'] as const)(

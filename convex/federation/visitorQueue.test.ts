@@ -25,6 +25,7 @@ const modules = {
   '../federation/ledger.ts': () => import('./ledger'),
   '../federation/transport.ts': () => import('./transport'),
   '../federation/runtime.ts': () => import('./runtime'),
+  '../federation/resourceMonitoring.ts': () => import('./resourceMonitoring'),
 };
 const adminToken = 'visitor-queue-test-admin-token';
 const token = 'visitor-queue-fencing-token-32bytes';
@@ -1041,3 +1042,40 @@ test('private worker allowance is clamped to the same hard maximum', async () =>
   expect((await t.run((ctx) => drainVisitorQueue(ctx, 1000))).promoted).toHaveLength(20);
   expect((await t.run((ctx) => drainVisitorQueue(ctx, 1))).promoted).toEqual(['clamped-20']);
 });
+
+test.each(['MISSING', 'CPU', 'MEMORY', 'STALE', 'DEPLOYMENT']) (
+  'hardware %s blocks immediate admissions and queue promotions, retaining existing visitors', async pressure => {
+    const t = await setup({ maxVisitors: 10, policy: {
+      hostResourceThresholds: { maxCpuPercent: 85, maxMemoryPercent: 90, maxSampleAgeMs: 10000 },
+    } });
+    const reportToken = 'queue-resource-test-reporter-token';
+    process.env.FEDERATION_RESOURCE_REPORT_TOKEN = reportToken;
+    if (pressure !== 'MISSING') {
+      await t.run(ctx => ctx.db.insert('federationHostResources', {
+        townId: 'b', deploymentInstanceId: pressure === 'DEPLOYMENT' ? 'old-instance' : 'b-instance',
+        deploymentEpoch: 1, scope: 'OS_HOST', sampleStartedAt: Date.now() - 5000,
+        measuredAt: Date.now(), receivedAt: Date.now(),
+        cpuPercent: pressure === 'CPU' ? 85 : 10,
+        memoryUsedBytes: pressure === 'MEMORY' ? 90 : 50, memoryTotalBytes: 100,
+      }));
+      if (pressure === 'STALE') jest.setSystemTime(Date.now() + 10001);
+    }
+    await seed(t, 'existing', { state: 'ACTIVE' });
+    await accept(t, reserve('waiting'));
+    expect(await ledger(t, 'waiting')).toMatchObject({ state: 'QUEUED', queueReason: 'HOST_RESOURCE_DEGRADED' });
+    expect((await drain(t)).promoted).toEqual([]);
+    await assertNoVisitorWork(t);
+    await accept(t, reserve('rejected', 'c', { allowQueue: false }));
+    expect(await ledger(t, 'rejected')).toMatchObject({ state: 'REJECTED', lastError: 'HOST_RESOURCE_DEGRADED' });
+    expect(await ledger(t, 'existing')).toMatchObject({ state: 'ACTIVE' });
+    jest.setSystemTime(Date.now() + 5000);
+    await t.mutation(mutationRef('resourceMonitoring/reportHostResources'), {
+      reportToken, townId: 'b', deploymentInstanceId: 'b-instance', deploymentEpoch: 1,
+      scope: 'OS_HOST', sampleStartedAt: Date.now() - 5000, measuredAt: Date.now(),
+      cpuPercent: 10, memoryUsedBytes: 50, memoryTotalBytes: 100,
+    });
+    expect((await drain(t)).promoted).toEqual(['waiting']);
+    expect(await ledger(t, 'waiting')).toMatchObject({ state: 'RESERVED' });
+    expect(await ledger(t, 'existing')).toMatchObject({ state: 'ACTIVE' });
+  },
+);

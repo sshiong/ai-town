@@ -7,6 +7,7 @@ import EndpointHistory from './EndpointHistory';
 import CredentialRotationPanel from './CredentialRotationPanel';
 import IdentityKeyRotationPanel from './IdentityKeyRotationPanel';
 import VisitorQueuePanel from './VisitorQueuePanel';
+import HostResourcePanel from './HostResourcePanel';
 import {
   AdminButton,
   EmptyState,
@@ -305,7 +306,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                 </form>
                 <p className="admin-muted">
                   Reducing limits preserves existing residents and work. Zero pauses new admissions
-                  or requests for that budget. CPU and memory measurements are unavailable.
+                  or requests for that budget.
                 </p>
                 <form
                   className="admin-inline-form"
@@ -375,11 +376,13 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     ))}
                   </ul>
                 )}
+                <HostResourcePanel adminToken={adminToken} resources={data.resources.hostResources}
+                  key={JSON.stringify(data.resources.hostResources.thresholds)} />
                 <h3>Measured workload</h3>
                 <p className="admin-muted">
                   Window: {formatTime(data.resources.measurements.windowStartedAt)} to{' '}
                   {formatTime(data.resources.measurements.measuredAt)}. Values update when server
-                  state changes or you refresh. CPU and memory: unavailable.
+                  state changes or you refresh.
                 </p>
                 <dl className="admin-facts">
                   <dt>Authenticated inbound events</dt>

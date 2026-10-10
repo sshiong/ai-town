@@ -4,12 +4,13 @@ import { convexTest } from 'convex-test';
 import schema from '../schema';
 import { createIdentityKeys, randomSecret, verifySignature } from './security';
 import { DEFAULT_RESOURCE_LIMITS } from './resources';
-import { queryRef } from './refs';
+import { mutationRef, queryRef } from './refs';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/capacity.ts': () => import('./capacity'),
+  '../federation/resourceMonitoring.ts': () => import('./resourceMonitoring'),
   '../http.ts': async () => {
     const { httpRouter } = await import('convex/server');
     const { registerCapacityRoutes } = await import('./capacity');
@@ -249,4 +250,32 @@ test('public queue capability exposes signed aggregate counts without waiting id
   const text = JSON.stringify(signed);
   for (const secret of ['secret-source', 'private-agent', 'private-fencing-token', 'Private waiting name'])
     expect(text).not.toContain(secret);
+});
+
+test('signed capacity reports authenticated host readings and explains threshold or stale degradation', async () => {
+  const { t, keys } = await setup();
+  const adminToken = 'capacity-test-admin-token', reportToken = 'capacity-test-resource-reporter-token';
+  process.env.FEDERATION_ADMIN_TOKEN = adminToken;
+  process.env.FEDERATION_RESOURCE_REPORT_TOKEN = reportToken;
+  await t.mutation(mutationRef('resourceMonitoring/configureHostResources'), {
+    adminToken, thresholds: { maxCpuPercent: 85, maxMemoryPercent: 90, maxSampleAgeMs: 10000 },
+  });
+  let packet = await (await t.fetch('/federation/v1/capabilities')).json();
+  expect(packet.body.admission).toMatchObject({ state: 'DEGRADED', reasons: ['HOST_RESOURCE_MEASUREMENTS_UNAVAILABLE'] });
+  // A deterministic reporter input fixture exercises signing; it is not a host pressure run.
+  await t.mutation(mutationRef('resourceMonitoring/reportHostResources'), {
+    reportToken, townId: 'host', deploymentInstanceId: 'host:instance', deploymentEpoch: 7,
+    sampleStartedAt: Date.now() - 5000, measuredAt: Date.now(), scope: 'OS_HOST',
+    cpuPercent: 85, memoryUsedBytes: 50, memoryTotalBytes: 100,
+  });
+  packet = await (await t.fetch('/federation/v1/capabilities')).json();
+  expect(await verifySignature(packet.body, packet.signature, keys.publicKey)).toBe(true);
+  expect(packet.body.admission).toMatchObject({ state: 'DEGRADED', reasons: ['HOST_CPU_THRESHOLD'] });
+  expect(packet.body.capacity).toMatchObject({ cpu: 85, memory: { usedPercent: 50 },
+    hostMeasurements: 'AVAILABLE', hostMeasurementScope: 'OS_HOST', hostSampleIntervalMs: 5000 });
+  expect(JSON.stringify(packet)).not.toContain(reportToken);
+  jest.setSystemTime(Date.now() + 10001);
+  packet = await (await t.fetch('/federation/v1/capabilities')).json();
+  expect(packet.body.admission).toMatchObject({ state: 'DEGRADED', reasons: ['HOST_RESOURCE_MEASUREMENTS_STALE'] });
+  expect(packet.body.capacity).toMatchObject({ cpu: null, memory: null, hostMeasurements: 'STALE' });
 });

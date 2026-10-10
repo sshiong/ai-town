@@ -2,6 +2,7 @@ import { validateColdAttachments, type ColdBackupAttachment } from './coldBackup
 import { convexToJson, jsonToConvex, Value } from 'convex/values';
 import { digest, verifySignature } from './security';
 import { validateResourceLimits } from './resources';
+import { validateHostResourceThresholds } from './resourceValidators';
 
 export const dataTables = [
   'engines',
@@ -106,6 +107,8 @@ export function stripSystem(row: BackupRow) {
   return fields;
 }
 export function validateResourcePolicy(row: BackupRow) {
+  if (row.hostResourceThresholds !== undefined && row.hostResourceThresholds !== null)
+    validateHostResourceThresholds(row.hostResourceThresholds);
   const value = row.maxVisitorsPerSourceTown;
   if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > 1000))
     throw new Error('INVALID_SOURCE_VISITOR_QUOTA');

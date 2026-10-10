@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { DatabaseReader, MutationCtx, internalMutation, mutation } from '../maintenanceFunctions';
-import { requireAdmin } from './security';
+import { constantTimeEqual, requireAdmin } from './security';
+import { hostResourceThresholds, validateHostResourceThresholds } from './resourceValidators';
 import { identity } from './store';
 import { configuredVisitorQueue, drainVisitorQueue } from './visitorQueue';
 import { beginReturn } from './ledger';
@@ -10,6 +11,87 @@ const BUCKET_MS = 10_000;
 const WINDOW_MS = 300_000;
 const RETENTION_MS = 24 * 60 * 60_000;
 const MAX_SAMPLES_PER_BUCKET = 256;
+
+export const configureHostResources = mutation({
+  args: { adminToken: v.string(), thresholds: v.union(hostResourceThresholds, v.null()) },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    if (args.thresholds !== null) validateHostResourceThresholds(args.thresholds);
+    if (!(await identity(ctx))) throw new Error('INITIALIZE_IDENTITY_FIRST');
+    const previous = await ctx.db.query('federationResourcePolicy').unique();
+    if (previous) await ctx.db.patch(previous._id, { hostResourceThresholds: args.thresholds });
+    else await ctx.db.insert('federationResourcePolicy', {
+      maxVisitorsPerSourceTown: null, hostResourceThresholds: args.thresholds,
+    });
+    await ctx.db.insert('federationResourceAudit', {
+      operation: 'HOST_RESOURCE_THRESHOLDS_CHANGED', previous: previous?.hostResourceThresholds ?? null,
+      next: args.thresholds, createdAt: Date.now(),
+    });
+  },
+});
+
+// This credential authorizes only readings from an administrator's co-located
+// collector. Peers and browser clients cannot attest host CPU or memory health.
+export const reportHostResources = mutation({
+  args: {
+    reportToken: v.string(), townId: v.string(), deploymentInstanceId: v.string(), deploymentEpoch: v.number(),
+    sampleStartedAt: v.number(), measuredAt: v.number(), cpuPercent: v.number(),
+    memoryUsedBytes: v.number(), memoryTotalBytes: v.number(), scope: v.literal('OS_HOST'),
+  },
+  handler: async (ctx, args) => {
+    const expected = process.env.FEDERATION_RESOURCE_REPORT_TOKEN;
+    if (!expected || expected.length < 32 || expected === process.env.FEDERATION_ADMIN_TOKEN ||
+        !constantTimeEqual(args.reportToken, expected)) throw new Error('RESOURCE_REPORT_UNAUTHORIZED');
+    const local = await identity(ctx);
+    if (!local || args.townId !== local.townId || args.deploymentInstanceId !== local.deploymentInstanceId ||
+        args.deploymentEpoch !== local.deploymentEpoch) throw new Error('RESOURCE_REPORT_DEPLOYMENT_MISMATCH');
+    const now = Date.now(), duration = args.measuredAt - args.sampleStartedAt;
+    if (!Number.isSafeInteger(args.measuredAt) || !Number.isSafeInteger(args.sampleStartedAt) ||
+        duration < 1000 || duration > 60000 || args.measuredAt > now || now - args.measuredAt > 30000 ||
+        !Number.isFinite(args.cpuPercent) || args.cpuPercent < 0 || args.cpuPercent > 100 ||
+        !Number.isSafeInteger(args.memoryTotalBytes) || args.memoryTotalBytes <= 0 ||
+        !Number.isSafeInteger(args.memoryUsedBytes) || args.memoryUsedBytes < 0 ||
+        args.memoryUsedBytes > args.memoryTotalBytes) throw new Error('INVALID_HOST_RESOURCE_MEASUREMENT');
+    const previous = await ctx.db.query('federationHostResources').unique();
+    if (previous?.townId === local.townId && previous.deploymentInstanceId === local.deploymentInstanceId &&
+        previous.deploymentEpoch === local.deploymentEpoch && args.measuredAt <= previous.measuredAt)
+      throw new Error('STALE_HOST_RESOURCE_REPORT');
+    const { reportToken: _reportToken, ...readings } = args;
+    const fields = { ...readings, receivedAt: now };
+    if (previous) await ctx.db.replace(previous._id, fields);
+    else await ctx.db.insert('federationHostResources', fields);
+  },
+});
+
+export async function hostResourceHealth(db: DatabaseReader, now = Date.now()) {
+  const thresholds = (await db.query('federationResourcePolicy').unique())?.hostResourceThresholds ?? null;
+  const local = await db.query('federationIdentity').unique();
+  const sample = await db.query('federationHostResources').unique();
+  const sameDeployment = !!sample && !!local && sample.townId === local.townId &&
+    sample.deploymentInstanceId === local.deploymentInstanceId && sample.deploymentEpoch === local.deploymentEpoch;
+  const fresh = sameDeployment && sample.measuredAt <= now && sample.receivedAt <= now &&
+    now - sample.measuredAt <= (thresholds?.maxSampleAgeMs ?? 30000);
+  const status = !sample ? 'UNAVAILABLE' : !sameDeployment ? 'DEPLOYMENT_MISMATCH' : !fresh ? 'STALE' : 'AVAILABLE';
+  const cpu = fresh ? sample.cpuPercent : null;
+  const memory = fresh ? {
+    usedBytes: sample.memoryUsedBytes, totalBytes: sample.memoryTotalBytes,
+    usedPercent: 100 * sample.memoryUsedBytes / sample.memoryTotalBytes,
+  } : null;
+  const reasons: string[] = [];
+  if (thresholds) {
+    if (!fresh) reasons.push(`HOST_RESOURCE_MEASUREMENTS_${status}`);
+    else {
+      if (cpu! >= thresholds.maxCpuPercent) reasons.push('HOST_CPU_THRESHOLD');
+      if (memory!.usedPercent >= thresholds.maxMemoryPercent) reasons.push('HOST_MEMORY_THRESHOLD');
+    }
+  }
+  return {
+    cpu, memory, status, thresholds, reasons,
+    scope: sample?.scope ?? null, measuredAt: sample?.measuredAt ?? null,
+    receivedAt: sample?.receivedAt ?? null,
+    sampleIntervalMs: sample ? sample.measuredAt - sample.sampleStartedAt : null,
+  };
+}
 export { resourceMetricKind } from './resourceValidators';
 type MetricKind =
   | 'CHAT_QUEUE'

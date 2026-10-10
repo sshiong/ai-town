@@ -2,7 +2,7 @@ import type { HttpRouter } from 'convex/server';
 import { internalQuery, httpAction } from '../_generated/server';
 import { identity } from './store';
 import { configuredResourceLimits, pendingDecisionCount } from './resources';
-import { remoteEventRate, sourceVisitorQuota } from './resourceMonitoring';
+import { hostResourceHealth, remoteEventRate, sourceVisitorQuota } from './resourceMonitoring';
 import { visitorQueueSummary } from './visitorQueue';
 import { PROTOCOL } from './protocol';
 import { queryRef } from './refs';
@@ -48,6 +48,7 @@ export const signingSnapshot = internalQuery({
       .withIndex('key', (q) => q.eq('key', 'town'))
       .unique());
     const sourceQuota = await sourceVisitorQuota(ctx.db);
+    const hardware = await hostResourceHealth(ctx.db, now);
     const waiting = await visitorQueueSummary(ctx.db);
     const countsAreLowerBounds =
       slots.length === MAX_COUNT ||
@@ -68,6 +69,7 @@ export const signingSnapshot = internalQuery({
     if (chatQueueFull) reasons.push('CHAT_BACKLOG');
     if (!limits.maxConcurrentLocalLLM) reasons.push('LOCAL_LLM_PAUSED');
     if (countsAreLowerBounds) reasons.push('CAPACITY_SAMPLE_LIMIT');
+    reasons.push(...hardware.reasons);
     const state =
       !local.enabled || local.mode !== 'ACTIVE' || maintenance
         ? 'CLOSED'
@@ -78,7 +80,7 @@ export const signingSnapshot = internalQuery({
           : pending >= limits.maxPendingDecisions ||
               chatQueueFull ||
               !limits.maxConcurrentLocalLLM ||
-              countsAreLowerBounds
+              countsAreLowerBounds || hardware.reasons.length > 0
             ? 'DEGRADED'
             : 'OPEN';
     // Whitelist the public fields. Admin status, peers, per-source occupancy,
@@ -138,9 +140,12 @@ export const signingSnapshot = internalQuery({
         maxConcurrentLocalLLM: limits.maxConcurrentLocalLLM,
         maxRemoteEventsPerSecond: await remoteEventRate(ctx.db),
         countsAreLowerBounds,
-        cpu: null,
-        memory: null,
-        hostMeasurements: 'UNAVAILABLE',
+        cpu: hardware.cpu,
+        memory: hardware.memory,
+        hostMeasurements: hardware.status,
+        hostMeasurementScope: hardware.scope,
+        hostMeasuredAt: hardware.measuredAt,
+        hostSampleIntervalMs: hardware.sampleIntervalMs,
       },
     };
     return { body, privateKeyEncrypted: local.privateKeyEncrypted };

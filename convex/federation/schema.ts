@@ -1,14 +1,17 @@
 import { defineTable } from 'convex/server';
 import { v } from 'convex/values';
-import { resourceLimits, resourceMetricKind } from './resourceValidators';
+import { resourceLimits, resourceMetricKind, hostResourceThresholds } from './resourceValidators';
+import { hostResourceTables } from './hostResourceSchema';
 import { credentialRotationTables } from './credentialRotationSchema';
 import { identityKeyRotationTables } from './identityKeyRotationSchema';
 
 export const federationTables = {
+  ...hostResourceTables,
   ...credentialRotationTables,
   ...identityKeyRotationTables,
   federationResourcePolicy: defineTable({
     maxVisitorsPerSourceTown: v.union(v.number(), v.null()),
+    hostResourceThresholds: v.optional(v.union(hostResourceThresholds, v.null())),
     maxRemoteEventsPerSecond: v.optional(v.union(v.number(), v.null())),
     visitorQueueEnabled: v.optional(v.boolean()),
     maxQueuedVisits: v.optional(v.number()),

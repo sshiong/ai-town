@@ -6,7 +6,7 @@ import { identity } from './store';
 import { normalizeEndpoint } from './protocol';
 import { actionRef, mutationRef } from './refs';
 import { resourceLimits, validateResourceLimits, configuredResourceLimits, pendingDecisionCount } from './resources';
-import { remoteEventRate, resourceMeasurements, sourceVisitorQuota } from './resourceMonitoring';
+import { hostResourceHealth, remoteEventRate, resourceMeasurements, sourceVisitorQuota } from './resourceMonitoring';
 import { visitorQueueSummary } from './visitorQueue';
 import { commitLocalEndpoint } from './endpoints';
 export const configureResources = mutation({
@@ -154,9 +154,10 @@ export const status = query({
     const reservations = slots.filter((slot, index) => slot.expiresAt > now && slotLedgers[index]?.state === 'RESERVED').length;
     const chatQueueFull = pendingChat.length >= limits.maxPendingLocalLLM &&
       (pendingChat.length > 0 || runningChat.length >= limits.maxConcurrentLocalLLM);
+    const hardware = await hostResourceHealth(ctx.db, now);
     const admissionState = !local?.enabled || local.mode !== 'ACTIVE' ? 'CLOSED'
       : activeSlots.length >= local.maxVisitors || reservations >= limits.maxVisitReservations ? 'FULL'
-      : pendingDecisions >= limits.maxPendingDecisions || chatQueueFull || !limits.maxConcurrentLocalLLM ? 'DEGRADED' : 'OPEN';
+      : pendingDecisions >= limits.maxPendingDecisions || chatQueueFull || !limits.maxConcurrentLocalLLM || hardware.reasons.length > 0 ? 'DEGRADED' : 'OPEN';
     const sourceOccupancy = new Map<string, number>();
     for (const slot of activeSlots) {
       const ledger = slotLedgers[slots.indexOf(slot)];
@@ -169,7 +170,7 @@ export const status = query({
         residents: worlds.reduce((count, world) => count + world.agents.length, 0),
         humans: worlds.reduce((count, world) => count + world.players.filter(p => p.human).length, 0),
         reservations, pendingDecisions, pendingLocalLLM: pendingChat.length, runningLocalLLM: runningChat.length,
-        cpu: null, memory: null,
+        cpu: hardware.cpu, memory: hardware.memory, hostResources: hardware,
         measurements: await resourceMeasurements(ctx.db, now),
         maxVisitorsPerSourceTown: await sourceVisitorQuota(ctx.db),
         maxRemoteEventsPerSecond: await remoteEventRate(ctx.db),

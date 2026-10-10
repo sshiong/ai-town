@@ -1,7 +1,7 @@
 import type { DatabaseReader, MutationCtx } from '../_generated/server';
 import type { Doc } from '../_generated/dataModel';
 import { configuredResourceLimits, pendingDecisionCount } from './resources';
-import { remoteEventRate, sourceVisitorQuota } from './resourceMonitoring';
+import { hostResourceHealth, remoteEventRate, sourceVisitorQuota } from './resourceMonitoring';
 import { enqueueMessage } from './queue';
 import { identity, peer, ready, session, visit } from './store';
 
@@ -85,6 +85,7 @@ export async function visitorAdmissionSnapshot(ctx: MutationCtx) {
     .withIndex('state', q => q.eq('state', 'OPEN')).first();
   const eventRate = await remoteEventRate(ctx.db);
   const sourceQuota = await sourceVisitorQuota(ctx.db);
+  const hardware = await hostResourceHealth(ctx.db, now);
   let reason: string | undefined;
   if (!local?.enabled || local.mode !== 'ACTIVE') reason = 'VISITS_NOT_ALLOWED';
   else if (maintenance) reason = 'HOST_MAINTENANCE';
@@ -92,6 +93,7 @@ export async function visitorAdmissionSnapshot(ctx: MutationCtx) {
   else if (slots.length > MAX_VISITOR_QUEUE || pendingChat.length > MAX_VISITOR_QUEUE || runningChat.length > 32) reason = 'HOST_CAPACITY_SAMPLE_LIMIT';
   else if (occupied >= local.maxVisitors) reason = 'HOST_CAPACITY_EXCEEDED';
   else if (reservations >= limits.maxVisitReservations) reason = 'HOST_RESERVATION_CAPACITY_EXCEEDED';
+  else if (hardware.reasons.length) reason = 'HOST_RESOURCE_DEGRADED';
   else if (pending >= limits.maxPendingDecisions || chatQueueFull || !limits.maxConcurrentLocalLLM || eventRate === 0) reason = 'HOST_RESOURCE_DEGRADED';
   return { local, limits, occupied, reservations, sources, sourceQuota, reason };
 }

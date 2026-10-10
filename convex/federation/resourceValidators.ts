@@ -1,4 +1,17 @@
-import { v } from 'convex/values';
+import { Infer, v } from 'convex/values';
+
+export const hostResourceThresholds = v.object({
+  maxCpuPercent: v.number(),
+  maxMemoryPercent: v.number(),
+  maxSampleAgeMs: v.number(),
+});
+export function validateHostResourceThresholds(value: Infer<typeof hostResourceThresholds>) {
+  if (!value || typeof value !== 'object' || Object.keys(value).length !== 3 ||
+      !Number.isFinite(value.maxCpuPercent) || value.maxCpuPercent <= 0 || value.maxCpuPercent > 100 ||
+      !Number.isFinite(value.maxMemoryPercent) || value.maxMemoryPercent <= 0 || value.maxMemoryPercent > 100 ||
+      !Number.isSafeInteger(value.maxSampleAgeMs) || value.maxSampleAgeMs < 5000 || value.maxSampleAgeMs > 120000)
+    throw new Error('INVALID_HOST_RESOURCE_THRESHOLDS');
+}
 
 // Schema evaluation must not load runtime functions or scheduler dependencies.
 export const resourceLimits = v.object({
