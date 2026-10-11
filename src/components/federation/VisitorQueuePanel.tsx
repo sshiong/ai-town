@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useEffect, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import { makeFunctionReference } from 'convex/server';
@@ -39,6 +40,7 @@ export default function VisitorQueuePanel({ adminToken, configurationOnly = fals
   adminToken: string;
   configurationOnly?: boolean;
 }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const status = useQuery(api.federation.admin.status, adminToken ? { adminToken } : 'skip');
@@ -55,39 +57,38 @@ export default function VisitorQueuePanel({ adminToken, configurationOnly = fals
   const admissionEnabled = status?.settings.enabled && status.identity?.mode === 'ACTIVE';
   function manage(visit: WaitingVisit, operation: QueuedVisitOperation) {
     const feedback: Record<QueuedVisitOperation, string> = {
-      PAUSE: 'Waiting request paused. Its original expiry still applies.',
-      RESUME: 'Waiting request resumed. Fairness and admission checks still apply.',
-      REJECT: 'Waiting request rejected. Home will reconcile the cancelled request.',
-      PROMOTE: 'Admission check completed. Review the latest queue and visit ledger for the result.',
+      PAUSE: t("Waiting request paused. Its original expiry still applies."),
+      RESUME: t("Waiting request resumed. Fairness and admission checks still apply."),
+      REJECT: t("Waiting request rejected. Home will reconcile the cancelled request."),
+      PROMOTE: t("Admission check completed. Review the latest queue and visit ledger for the result."),
     };
     void task.run(
-      operation === 'PROMOTE' ? 'Checking waiting admission' : 'Updating waiting request',
+      operation === 'PROMOTE' ? t("Checking waiting admission") : t("Updating waiting request"),
       () => convex.mutation(manageRef, { adminToken, visitId: visit.visitId, operation }),
       feedback[operation],
     );
   }
   return (
-    <section aria-label={configurationOnly ? 'Visitor waiting policy' : 'Incoming visitor waiting queue'}>
-      <h3>{configurationOnly ? 'Visitor waiting policy' : 'Incoming visitor waiting queue'}</h3>
+    <section aria-label={configurationOnly ? t("Visitor waiting policy") : t("Incoming visitor waiting queue")}>
+      <h3>{configurationOnly ? t("Visitor waiting policy") : t("Incoming visitor waiting queue")}</h3>
       <p className="admin-muted">
-        Waiting visitors stay at home until admission is confirmed. Waiting uses their existing
-        travel authorization time; it creates no map visitor or reservation.
+        {t("Waiting visitors stay at home until admission is confirmed. Waiting uses their existing travel authorization time; it creates no map visitor or reservation.")}
       </p>
       <TaskFeedback task={task} />
       {!adminToken ? (
-        <EmptyState>Administrator access is required to view or manage waiting requests.</EmptyState>
+        <EmptyState>{t("Administrator access is required to view or manage waiting requests.")}</EmptyState>
       ) : !summary ? (
-        <p role="status">Loading visitor waiting policy…</p>
+        <p role="status">{t("Loading visitor waiting policy…")}</p>
       ) : (
         <>
           <p>
-            <strong>{summary.enabled ? 'Waiting enabled' : 'Waiting disabled'}</strong>{' '}
-            · {summary.waiting} / {summary.maxQueuedVisits} waiting · {summary.paused} paused
+            <strong>{summary.enabled ? t("Waiting enabled") : t("Waiting disabled")}</strong>{' '}
+            · {summary.waiting} / {summary.maxQueuedVisits} {t("waiting ·")} {summary.paused} {t("paused")}
           </p>
           <p className="admin-muted">
-            {summary.visitorQueueMode === 'FIFO' ? 'Oldest eligible request first' : 'Source towns take turns; oldest eligible request within each source'}
-            {' '}· waiting limit {summary.visitQueueTtlMs / 1000}s
-            {' '}· source waiting cap {summary.maxQueuedVisitsPerSourceTown ?? 'No separate cap'}
+            {summary.visitorQueueMode === 'FIFO' ? t("Oldest eligible request first") : t("Source towns take turns; oldest eligible request within each source")}
+            {' '}{t("· waiting limit")} {summary.visitQueueTtlMs / 1000}{t("s")}
+            {' '}{t("· source waiting cap")} {summary.maxQueuedVisitsPerSourceTown ?? t("No separate cap")}
           </p>
           {configurationOnly && (
             <form
@@ -100,45 +101,43 @@ export default function VisitorQueuePanel({ adminToken, configurationOnly = fals
                 const sourceCap = String(fields.get('sourceCap')).trim();
                 const mode = fields.get('mode');
                 if (mode !== 'FIFO' && mode !== 'SOURCE_ROUND_ROBIN') return;
-                void task.run('Saving visitor waiting policy', () => convex.mutation(configureRef, {
+                void task.run(t("Saving visitor waiting policy"), () => convex.mutation(configureRef, {
                   adminToken, enabled: fields.get('enabled') === 'on',
                   maxQueuedVisits: Number(fields.get('maximum')),
                   visitQueueTtlMs: Number(fields.get('seconds')) * 1000,
                   mode, maxQueuedVisitsPerSourceTown: sourceCap === '' ? null : Number(sourceCap),
-                }), 'Visitor waiting policy saved. Existing waiting deadlines do not restart.');
+                }), t("Visitor waiting policy saved. Existing waiting deadlines do not restart."));
               }}
             >
               <label className="admin-check admin-form-actions">
                 <input name="enabled" type="checkbox" defaultChecked={summary.enabled} disabled={busy} />
-                Accept requests that explicitly allow waiting
+                {t("Accept requests that explicitly allow waiting")}
               </label>
-              <Field label="Maximum waiting requests (1–1000)">
+              <Field label={t("Maximum waiting requests (1–1000)")}>
                 <input name="maximum" type="number" min={1} max={1000} step={1}
                   defaultValue={summary.maxQueuedVisits} required disabled={busy} />
               </Field>
-              <Field label="Maximum queue wait (seconds, 1–3600)"
-                hint="The earlier of this deadline and the travel authorization expiry applies. Pausing does not extend either deadline.">
+              <Field label={t("Maximum queue wait (seconds, 1–3600)")}
+                hint={t("The earlier of this deadline and the travel authorization expiry applies. Pausing does not extend either deadline.")}>
                 <input name="seconds" type="number" min={1} max={3600} step={0.001}
                   defaultValue={summary.visitQueueTtlMs / 1000} required disabled={busy} />
               </Field>
-              <Field label="Waiting order">
+              <Field label={t("Waiting order")}>
                 <select name="mode" defaultValue={summary.visitorQueueMode} disabled={busy}>
-                  <option value="SOURCE_ROUND_ROBIN">Source towns take turns</option>
-                  <option value="FIFO">Oldest eligible request first</option>
+                  <option value="SOURCE_ROUND_ROBIN">{t("Source towns take turns")}</option>
+                  <option value="FIFO">{t("Oldest eligible request first")}</option>
                 </select>
               </Field>
-              <Field label="Waiting requests per source town (0–1000)"
-                hint="Leave blank for no separate source waiting cap. Zero blocks new waiting requests from every source; this is separate from visitor slots.">
+              <Field label={t("Waiting requests per source town (0–1000)")}
+                hint={t("Leave blank for no separate source waiting cap. Zero blocks new waiting requests from every source; this is separate from visitor slots.")}>
                 <input name="sourceCap" type="number" min={0} max={1000} step={1}
                   defaultValue={summary.maxQueuedVisitsPerSourceTown ?? ''} disabled={busy} />
               </Field>
               <p className="admin-muted admin-form-actions">
-                Turning waiting off ends the {summary.waiting} current waiting request(s) and informs their home towns.
-                Lowering a cap preserves existing requests under their original deadlines.
-                Reserved and active visits keep their normal return path.
+                {t("Turning waiting off ends the")} {summary.waiting} {t("current waiting request(s) and informs their home towns. Lowering a cap preserves existing requests under their original deadlines. Reserved and active visits keep their normal return path.")}
               </p>
               <div className="admin-form-actions">
-                <AdminButton type="submit" disabled={busy}>Save waiting policy</AdminButton>
+                <AdminButton type="submit" disabled={busy}>{t("Save waiting policy")}</AdminButton>
               </div>
             </form>
           )}
@@ -147,34 +146,32 @@ export default function VisitorQueuePanel({ adminToken, configurationOnly = fals
       {!configurationOnly && adminToken && (
         <>
           <p className="admin-muted">
-            Pause, resume and reject apply to the selected request. Check admission advances the
-            fair queue and may admit another eligible request first. Trust and resource limits
-            still apply; admission is never guaranteed.
+            {t("Pause, resume and reject apply to the selected request. Check admission advances the fair queue and may admit another eligible request first. Trust and resource limits still apply; admission is never guaranteed.")}
           </p>
-          {waiting === undefined ? <p role="status">Loading waiting requests…</p> : !waiting.length ? (
-            <EmptyState>No incoming requests are waiting. A trusted traveler must allow waiting, and this host must enable it.</EmptyState>
+          {waiting === undefined ? <p role="status">{t("Loading waiting requests…")}</p> : !waiting.length ? (
+            <EmptyState>{t("No incoming requests are waiting. A trusted traveler must allow waiting, and this host must enable it.")}</EmptyState>
           ) : (
             <ul className="admin-list">
               {waiting.map(visit => (
                 <li key={visit.visitId}>
                   <div style={{ minWidth: 0, width: '100%' }}>
-                    <strong>{visit.profile.name ?? 'Waiting visitor'}</strong>{' '}
+                    <strong>{visit.profile.name ?? t("Waiting visitor")}</strong>{' '}
                     <span className="admin-badge">{visit.queuePaused ? 'PAUSED' : visit.state}</span>
                     <code>{visit.visitId}</code>
-                    <p>From {status?.peers.find(p => p.townId === visit.homeTownId)?.townName ?? visit.homeTownId}</p>
-                    <p className="admin-muted">Waiting since {formatTime(visit.queuedAt)}</p>
-                    <p>Queue expiry: {formatTime(visit.queueExpiresAt)} · {deadlineRemaining(visit.queueExpiresAt, now)}</p>
-                    {visit.queueReason && <p className="admin-muted">{adminErrorSummary(visit.queueReason)}</p>}
-                    {visit.queuePaused && <p className="admin-warning">Paused by the host. The waiting deadline continues.</p>}
+                    <p>{t("From")} {status?.peers.find(p => p.townId === visit.homeTownId)?.townName ?? visit.homeTownId}</p>
+                    <p className="admin-muted">{t("Waiting since")} {formatTime(visit.queuedAt)}</p>
+                    <p>{t("Queue expiry:")} {formatTime(visit.queueExpiresAt)} · {deadlineRemaining(visit.queueExpiresAt, now, t)}</p>
+                    {visit.queueReason && <p className="admin-muted">{adminErrorSummary(visit.queueReason, t)}</p>}
+                    {visit.queuePaused && <p className="admin-warning">{t("Paused by the host. The waiting deadline continues.")}</p>}
                     <div className="admin-toolbar">
                       <AdminButton disabled={busy || !summary?.enabled || !admissionEnabled || !canManageQueuedVisit(visit, 'PROMOTE', now)}
-                        onClick={() => manage(visit, 'PROMOTE')}>Check admission</AdminButton>
+                        onClick={() => manage(visit, 'PROMOTE')}>{t("Check admission")}</AdminButton>
                       <AdminButton disabled={busy || !canManageQueuedVisit(visit, visit.queuePaused ? 'RESUME' : 'PAUSE', now)}
                         onClick={() => manage(visit, visit.queuePaused ? 'RESUME' : 'PAUSE')}>
-                        {visit.queuePaused ? 'Resume waiting' : 'Pause waiting'}
+                        {visit.queuePaused ? t("Resume waiting") : t("Pause waiting")}
                       </AdminButton>
                       <AdminButton danger disabled={busy || !canManageQueuedVisit(visit, 'REJECT', now)}
-                        onClick={() => manage(visit, 'REJECT')}>Reject request</AdminButton>
+                        onClick={() => manage(visit, 'REJECT')}>{t("Reject request")}</AdminButton>
                     </div>
                   </div>
                 </li>

@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useEffect, useRef, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import { makeFunctionReference } from 'convex/server';
@@ -55,6 +56,7 @@ const scopes: { value: SelectiveScope; label: string }[] = [
   { value: 'history', label: 'Conversations, social and travel history' },
 ];
 export default function SelectiveExportPanel({ adminToken }: { adminToken: string }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const residents = useQuery(api.federation.runtime.listResidents, { adminToken });
@@ -93,7 +95,7 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
     const fromMs = from ? Date.parse(from) : undefined;
     const toMs = to ? Date.parse(to) : undefined;
     if ((from && !Number.isFinite(fromMs)) || (to && !Number.isFinite(toMs)))
-      throw new Error('Choose valid dates.');
+      throw new Error(t('Choose valid dates.'));
     const result = await convex.mutation(mutation('startExport'), {
       adminToken,
       scope,
@@ -147,7 +149,7 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
           );
       } else if (kind === 'chunk') {
         if (chunkIndex >= manifest.manifest.chunks.length)
-          throw new Error('All chunks have been downloaded.');
+          throw new Error(t('All chunks have been downloaded.'));
         await write(
           await convex.action(getChunk, { adminToken, jobId, index: chunkIndex }),
           `chunk-${chunkIndex}`,
@@ -160,27 +162,26 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
     }
   }
   return (
-    <section aria-label="Selective data archives">
-      <h3>Selective data archives</h3>
+    <section aria-label={t('Selective data archives')}>
+      <h3>{t('Selective data archives')}</h3>
       <p className="admin-muted">
-        Export one or more residents, configuration, memories or history without a 500-record cap.
-        Pause all worlds, end visits and disable federation before starting. These signed archives
-        support selective import with explicit owner and model mappings. Older read-only archives
-        remain available for audit.
+        {t(
+          'Export one or more residents, configuration, memories or history without a 500-record cap. Pause all worlds, end visits and disable federation before starting. These signed archives support selective import with explicit owner and model mappings. Older read-only archives remain available for audit.',
+        )}
       </p>
       <TaskFeedback task={task} />
-      <Field label="Export scope">
+      <Field label={t('Export scope')}>
         <select value={scope} onChange={(e) => changeScope(e.target.value as SelectiveScope)}>
           {scopes.map((s) => (
             <option value={s.value} key={s.value}>
-              {s.label}
+              {t(s.label)}
             </option>
           ))}
         </select>
       </Field>
       {scope !== 'config-only' && (
         <fieldset>
-          <legend>Resident owners</legend>
+          <legend>{t('Resident owners')}</legend>
           {residents?.map((r) => (
             <label key={r.agentGlobalId}>
               <input
@@ -203,7 +204,7 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
         </fieldset>
       )}
       <fieldset>
-        <legend>Categories</legend>
+        <legend>{t('Categories')}</legend>
         {allowedCategories(scope).map((c) => (
           <label key={c}>
             <input
@@ -215,16 +216,16 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
                 )
               }
             />{' '}
-            {c}
+            {t(c)}
           </label>
         ))}
       </fieldset>
       {scope !== 'config-only' && (
         <div className="admin-toolbar">
-          <Field label="From (inclusive, local time)">
+          <Field label={t('From (inclusive, local time)')}>
             <input type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} />
           </Field>
-          <Field label="To (exclusive, local time)">
+          <Field label={t('To (exclusive, local time)')}>
             <input type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
           </Field>
         </div>
@@ -236,22 +237,21 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
             checked={publicPeers}
             onChange={(e) => setPublicPeers(e.target.checked)}
           />{' '}
-          Include public peer addresses
+          {t('Include public peer addresses')}
         </label>
       )}
       <div className="admin-toolbar">
-        <Field label="Operator">
+        <Field label={t('Operator')}>
           <input value={operator} onChange={(e) => setOperator(e.target.value)} maxLength={200} />
         </Field>
-        <Field label="Export reason">
+        <Field label={t('Export reason')}>
           <input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} />
         </Field>
       </div>
       <p className="admin-muted">
-        The signed manifest fixes the selected owners, categories and time interval. Event
-        timestamps take precedence over creation time. Same-owner evidence and public profile
-        context may appear outside the interval as marked dependencies; other owners' private
-        memories are excluded. Vectors are omitted.
+        {t(
+          "The signed manifest fixes the selected owners, categories and time interval. Event timestamps take precedence over creation time. Same-owner evidence and public profile context may appear outside the interval as marked dependencies; other owners' private memories are excluded. Vectors are omitted.",
+        )}
       </p>
       <AdminButton
         disabled={
@@ -263,15 +263,15 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
         }
         onClick={() =>
           void task.run(
-            'Creating selective archive',
+            t('Creating selective archive'),
             create,
-            'Scope saved. Continue the export to process all pages.',
+            t('Scope saved. Continue the export to process all pages.'),
           )
         }
       >
-        Create selective archive
+        {t('Create selective archive')}
       </AdminButton>
-      <Field label="Selective archive task">
+      <Field label={t('Selective archive task')}>
         <select
           value={jobId ?? ''}
           disabled={!!task.pending}
@@ -280,10 +280,10 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
             setChunkIndex(0);
           }}
         >
-          <option value="">Select a task</option>
+          <option value="">{t('Select a task')}</option>
           {jobs?.map((j) => (
             <option value={j.jobId} key={j.jobId}>
-              {j.selection.scope} · {j.state} · {j.jobId}
+              {t(j.selection.scope)} · {t(j.state)} · {j.jobId}
             </option>
           ))}
         </select>
@@ -291,23 +291,36 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
       {job && (
         <>
           <p role="status">
-            {job.state} · {job.phase} · {job.recordCount} records · {job.chunkCount} chunks
+            {t(job.state)} · {t(job.phase)} · {job.recordCount}
+            {t(' records · ')}
+            {job.chunkCount}
+            {t(' chunks')}
           </p>
           <p className="admin-muted">
-            Saved scope: {job.selection.scope} · {job.selection.owners.length} owners ·{' '}
-            {job.selection.categories.join(', ')} ·{' '}
-            {job.selection.from === null ? 'start' : new Date(job.selection.from).toISOString()} —{' '}
-            {job.selection.to === null ? 'end' : new Date(job.selection.to).toISOString()}
+            {t('Saved scope: ')}
+            {t(job.selection.scope)} · {job.selection.owners.length}
+            {t(' owners ·')} {job.selection.categories.map((category) => t(category)).join(', ')} ·{' '}
+            {job.selection.from === null ? t('start') : new Date(job.selection.from).toISOString()}{' '}
+            — {job.selection.to === null ? t('end') : new Date(job.selection.to).toISOString()}
           </p>
           {job.coldHistoryFiles && (
             <div className="admin-hint" role="status">
-              <p>Signed cold history files: {job.coldHistoryFiles.included} included.</p>
-              {Object.values(job.coldHistoryFiles.excluded).some(count => count > 0) && (
+              <p>
+                {t('Signed cold history files: ')}
+                {job.coldHistoryFiles.included}
+                {t(' included.')}
+              </p>
+              {Object.values(job.coldHistoryFiles.excluded).some((count) => count > 0) && (
                 <p>
-                  Cold copies excluded: {job.coldHistoryFiles.excluded.SOURCE_SCOPE_NOT_SELECTED} outside
-                  the selected history categories; {job.coldHistoryFiles.excluded.CANONICAL_MEMORY_NOT_SELECTED} without
-                  a selected memory; {job.coldHistoryFiles.excluded.SOURCE_SCOPE_INCOMPLETE} with
-                  originals outside the selected range. The archive follows your chosen scope.
+                  {t('Cold copies excluded: ')}
+                  {job.coldHistoryFiles.excluded.SOURCE_SCOPE_NOT_SELECTED}
+                  {t(' outside the selected history categories; ')}
+                  {job.coldHistoryFiles.excluded.CANONICAL_MEMORY_NOT_SELECTED}
+                  {t(' without a selected memory; ')}
+                  {job.coldHistoryFiles.excluded.SOURCE_SCOPE_INCOMPLETE}
+                  {t(
+                    ' with originals outside the selected range. The archive follows your chosen scope.',
+                  )}
                 </p>
               )}
             </div>
@@ -318,13 +331,13 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
               disabled={!!task.pending || job.state !== 'RUNNING'}
               onClick={() =>
                 void task.run(
-                  'Exporting bounded pages',
+                  t('Exporting bounded pages'),
                   run,
-                  'Processing stopped at a checkpoint. Review the task state.',
+                  t('Processing stopped at a checkpoint. Review the task state.'),
                 )
               }
             >
-              Continue all pages
+              {t('Continue all pages')}
             </AdminButton>
             {task.pending && (
               <AdminButton
@@ -332,32 +345,32 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
                   stop.current = true;
                 }}
               >
-                Stop after this page
+                {t('Stop after this page')}
               </AdminButton>
             )}
             <AdminButton
               disabled={!!task.pending || job.state !== 'FAILED'}
               onClick={() =>
                 void task.run(
-                  'Resuming archive',
+                  t('Resuming archive'),
                   () => convex.mutation(mutation('resume'), { adminToken, jobId }),
-                  'Ready to continue from the saved checkpoint.',
+                  t('Ready to continue from the saved checkpoint.'),
                 )
               }
             >
-              Resume failed task
+              {t('Resume failed task')}
             </AdminButton>
             <AdminButton
               disabled={!!task.pending || ['COMPLETE', 'CANCELLED'].includes(job.state)}
               onClick={() =>
                 void task.run(
-                  'Cancelling archive',
+                  t('Cancelling archive'),
                   () => convex.mutation(mutation('cancel'), { adminToken, jobId }),
-                  'Archive cancelled; maintenance lock released.',
+                  t('Archive cancelled; maintenance lock released.'),
                 )
               }
             >
-              Cancel
+              {t('Cancel')}
             </AdminButton>
           </div>
         </>
@@ -373,11 +386,11 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
                 setPlaintextConfirmed(false);
               }}
             />{' '}
-            Encrypt downloaded files
+            {t('Encrypt downloaded files')}
           </label>
           {encrypted ? (
             <div className="admin-toolbar">
-              <Field label="Backup passphrase (12+ characters)">
+              <Field label={t('Backup passphrase (12+ characters)')}>
                 <input
                   type="password"
                   autoComplete="new-password"
@@ -385,7 +398,7 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
                   onChange={(e) => setPassphrase(e.target.value)}
                 />
               </Field>
-              <Field label="Confirm passphrase">
+              <Field label={t('Confirm passphrase')}>
                 <input
                   type="password"
                   autoComplete="new-password"
@@ -401,7 +414,7 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
                 checked={plaintextConfirmed}
                 onChange={(e) => setPlaintextConfirmed(e.target.checked)}
               />{' '}
-              I understand this archive may contain private resident text.
+              {t('I understand this archive may contain private resident text.')}
             </label>
           )}
           <div className="admin-toolbar">
@@ -409,37 +422,38 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
               disabled={!!task.pending || !downloadReady || !supportsArchiveDirectory()}
               onClick={() =>
                 void task.run(
-                  'Writing selective archive folder',
+                  t('Writing selective archive folder'),
                   () => download('folder'),
-                  'Manifest and every chunk saved.',
+                  t('Manifest and every chunk saved.'),
                 )
               }
             >
-              Save all files to folder
+              {t('Save all files to folder')}
             </AdminButton>
             <AdminButton
               disabled={!!task.pending || !downloadReady}
               onClick={() =>
                 void task.run(
-                  'Downloading signed manifest',
+                  t('Downloading signed manifest'),
                   () => download('manifest'),
-                  'Manifest downloaded.',
+                  t('Manifest downloaded.'),
                 )
               }
             >
-              Download manifest
+              {t('Download manifest')}
             </AdminButton>
             <AdminButton
               disabled={!!task.pending || !downloadReady || chunkIndex >= job.chunkCount}
               onClick={() =>
                 void task.run(
-                  'Downloading archive chunk',
+                  t('Downloading archive chunk'),
                   () => download('chunk'),
-                  'Chunk downloaded. Keep all chunks with the manifest.',
+                  t('Chunk downloaded. Keep all chunks with the manifest.'),
                 )
               }
             >
-              Download chunk {chunkIndex + 1} / {job.chunkCount}
+              {t('Download chunk ')}
+              {chunkIndex + 1} / {job.chunkCount}
             </AdminButton>
           </div>
         </>

@@ -1,3 +1,8 @@
+import { translate } from '../../locale';
+
+type MessageTranslator = (message: string, values?: Record<string, string | number>) => string;
+const englishMessage: MessageTranslator = (message, values) => translate('en', {}, message, values);
+
 export function isReadyDestination(
   peer: {
     trustState: string;
@@ -32,12 +37,12 @@ export function canManageQueuedVisit(
   return operation === 'RESUME' ? visit.queuePaused === true : !visit.queuePaused;
 }
 
-export function deadlineRemaining(expiresAt: number | undefined, now: number) {
-  if (expiresAt === undefined || !Number.isFinite(expiresAt)) return 'Not reported';
+export function deadlineRemaining(expiresAt: number | undefined, now: number, t: MessageTranslator = englishMessage) {
+  if (expiresAt === undefined || !Number.isFinite(expiresAt)) return t('Not reported');
   const seconds = Math.max(0, Math.ceil((expiresAt - now) / 1000));
-  if (seconds === 0) return 'Expired';
-  if (seconds < 60) return `${seconds}s remaining`;
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s remaining`;
+  if (seconds === 0) return t('Expired');
+  if (seconds < 60) return t('{seconds}s remaining', { seconds });
+  return t('{minutes}m {seconds}s remaining', { minutes: Math.floor(seconds / 60), seconds: seconds % 60 });
 }
 
 export function requiresStoppedSource(mode: string) {
@@ -58,7 +63,7 @@ export function canResumeRestoredResident(
   );
 }
 
-export function adminErrorSummary(message: string) {
+export function adminErrorSummary(message: string, t: MessageTranslator = englishMessage) {
   const explanations: Record<string, string> = {
     DNS_RESOLUTION_FAILED: 'The endpoint hostname could not be resolved. Check DNS and the address.',
     TLS_VERIFY_FAILED: 'The HTTPS certificate could not be verified. Check its hostname, expiry and certificate chain.',
@@ -150,7 +155,7 @@ export function adminErrorSummary(message: string) {
   };
   const code = Object.keys(explanations).find((code) => message.includes(code));
   const http = message.match(/\bFEDERATION_HTTP_(\d{3})\b/);
-  return code ? explanations[code] : http ? `The remote HTTPS service returned HTTP ${http[1]}.` : message;
+  return code ? t(explanations[code]) : http ? t('The remote HTTPS service returned HTTP {status}.', { status: http[1] }) : message;
 }
 
 export async function readBackupFile(file: Pick<File, 'size' | 'text'>): Promise<unknown> {
@@ -162,18 +167,18 @@ export async function readBackupFile(file: Pick<File, 'size' | 'text'>): Promise
 }
 
 
-export function safeReturnSummary(condition: string) {
+export function safeReturnSummary(condition: string, t: MessageTranslator = englishMessage) {
   const explanations: Record<string, string> = {
     SIGNED_CLEANUP: 'Host signed cleanup is confirmed; home resumption is authorized.',
     CLOCK_UNCERTAIN: 'Clock safety is locked. Only signed host cleanup can authorize return; waiting longer cannot unlock it.',
     LEASE_AND_MARGIN_EXPIRED: 'The last issued lease and this trip’s safety margin have expired; home resumption is authorized.',
     WAITING_FOR_LEASE_AND_MARGIN: 'Waiting for signed host cleanup or the last issued lease plus this trip’s safety margin.',
   };
-  return explanations[condition] ?? condition;
+  return explanations[condition] ? t(explanations[condition]) : condition;
 }
 
-export function eventProgressSummary(durable: number, acked: number, role: string) {
+export function eventProgressSummary(durable: number, acked: number, role: string, t: MessageTranslator = englishMessage) {
   return role === 'host'
-    ? `Host history committed through ${durable}; home acknowledged through ${acked}. ${Math.max(0, durable - acked)} event page(s) await acknowledgment.`
-    : `Home history committed through ${durable}; acknowledgment issued through ${acked}. Unreceived host events cannot be reconstructed.`;
+    ? t('Host history committed through {durable}; home acknowledged through {acked}. {pending} event page(s) await acknowledgment.', { durable, acked, pending: Math.max(0, durable - acked) })
+    : t('Home history committed through {durable}; acknowledgment issued through {acked}. Unreceived host events cannot be reconstructed.', { durable, acked });
 }

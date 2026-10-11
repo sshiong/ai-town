@@ -1,3 +1,4 @@
+import { useLocale } from '../i18n';
 import { useRef, useState } from 'react';
 import PixiGame from './PixiGame.tsx';
 
@@ -15,6 +16,7 @@ import { useServerGame } from '../hooks/serverGame.ts';
 export const SHOW_DEBUG_UI = !!import.meta.env.VITE_SHOW_DEBUG_UI;
 
 export default function Game() {
+  const { t } = useLocale();
   const convex = useConvex();
   const [selectedElement, setSelectedElement] = useState<{
     kind: 'player';
@@ -38,7 +40,7 @@ export default function Game() {
   const scrollViewRef = useRef<HTMLDivElement>(null);
 
   if (!worldId || !engineId || !game) {
-    return <div className="admin-panel font-body text-brown-100" role="status">{worldStatus === null ? 'No world exists yet. Initialize the town backend to open the map.' : 'Loading the town map…'}</div>;
+    return <div className="admin-panel font-body text-brown-100" role="status">{worldStatus === null ? t("No world exists yet. Initialize the town backend to open the map.") : t("Loading the town map…")}</div>;
   }
   return (
     <>
@@ -72,7 +74,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           className="flex flex-col overflow-y-auto shrink-0 px-4 py-6 sm:px-6 lg:w-96 xl:pr-6 border-t-8 sm:border-t-0 sm:border-l-8 border-brown-900  bg-brown-800 text-brown-100"
           ref={scrollViewRef}
         >
-          {!!presence?.travelers.length && <section className="admin-map-presence" aria-label="Traveling residents"><h3>Residents away</h3><ul>{presence.travelers.map(resident => <li key={resident.agentGlobalId}><button type="button" className="underline underline-offset-2" onClick={() => setSelectedElement({ kind: 'player', id: parseGameId('players', resident.playerId) })}><strong>{resident.name}</strong></button> · {resident.state}{resident.hostTownId && <small> · Traveling in {resident.hostTownId}</small>}</li>)}</ul></section>}
+          {!!presence?.travelers.length && <section className="admin-map-presence" aria-label={t("Traveling residents")}><h3>{t("Residents away")}</h3><ul>{presence.travelers.map(resident => <li key={resident.agentGlobalId}><button type="button" className="underline underline-offset-2" onClick={() => setSelectedElement({ kind: 'player', id: parseGameId('players', resident.playerId) })}><strong>{resident.name}</strong></button> · {t(resident.state)}{resident.hostTownId && <small> {t("· Traveling in {town}", { town: resident.hostTownId })}</small>}</li>)}</ul></section>}
           <PlayerDetails
             worldId={worldId}
             engineId={engineId}

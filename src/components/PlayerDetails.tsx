@@ -1,3 +1,4 @@
+import { useLocale } from '../i18n';
 import { useQuery } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import { Id } from '../../convex/_generated/dataModel';
@@ -27,6 +28,7 @@ export default function PlayerDetails({
   scrollViewRef: React.RefObject<HTMLDivElement>;
   awayResident?: { name: string; state: string; hostTownId?: string };
 }) {
+  const { t } = useLocale();
   const humanTokenIdentifier = useQuery(api.world.userStatus, { worldId });
 
   const players = [...game.world.players.values()];
@@ -58,24 +60,23 @@ export default function PlayerDetails({
   if (!playerId) {
     return (
       <div className="h-full text-xl flex text-center items-center p-4">
-        Click on an agent on the map to see chat history.
-      </div>
+        {t("Click on an agent on the map to see chat history.")}</div>
     );
   }
   if (!player) {
     if (!awayResident) return null;
-    return <section className="visitor-detail" aria-label="Resident traveling away">
+    return <section className="visitor-detail" aria-label={t("Resident traveling away")}>
       <h2 className="font-display text-2xl">{awayResident.name}</h2>
-      <span className="admin-badge">{awayResident.state}</span>
-      <p>{awayResident.hostTownId ? `Traveling in ${awayResident.hostTownId}` : 'Preparing or returning from a visit.'}</p>
+      <span className="admin-badge">{t(awayResident.state)}</span>
+      <p>{awayResident.hostTownId ? t("Traveling in {town}", { town: awayResident.hostTownId }) : t("Preparing or returning from a visit.")}</p>
       {playerDescription?.description && <p>{playerDescription.description}</p>}
-      <p className="admin-muted">Their home identity remains here. Local map presence resumes after safe return.</p>
+      <p className="admin-muted">{t("Their home identity remains here. Local map presence resumes after safe return.")}</p>
       {previousConversation && <>
-        <h3 className="font-display text-xl">Previous local conversation</h3>
+        <h3 className="font-display text-xl">{t("Previous local conversation")}</h3>
         <Messages worldId={worldId} engineId={engineId} inConversationWithMe={false}
           conversation={{ kind: 'archived', doc: previousConversation }} humanPlayer={humanPlayer} scrollViewRef={scrollViewRef} />
       </>}
-      <button type="button" className="admin-button" onClick={() => setSelectedElement(undefined)}>Close resident details</button>
+      <button type="button" className="admin-button" onClick={() => setSelectedElement(undefined)}>{t("Close resident details")}</button>
     </section>;
   }
   const isMe = humanPlayer && player.id === humanPlayer.id;
@@ -159,15 +160,15 @@ export default function PlayerDetails({
           onClick={() => setSelectedElement(undefined)}
         >
           <h2 className="h-full bg-clay-700">
-            <img className="w-4 h-4 sm:w-5 sm:h-5" src={closeImg} />
+            <img className="w-4 h-4 sm:w-5 sm:h-5" src={closeImg} alt={t("Close resident details")} />
           </h2>
         </a>
       </div>
       {player.remoteVisitor && <div className="visitor-detail">
-        <span className="admin-badge">Visiting</span>
-        <p>Visit: {player.remoteVisitor.visitId}</p>
-        <p>Home: {playerDescription?.originTownName ?? player.remoteVisitor.homeTownName}</p>
-        <small>Thinking runs in their home town.</small>
+        <span className="admin-badge">{t("Visiting")}</span>
+        <p>{t("Visit: {id}", { id: player.remoteVisitor.visitId })}</p>
+        <p>{t("Home: {town}", { town: playerDescription?.originTownName ?? player.remoteVisitor.homeTownName })}</p>
+        <small>{t("Thinking runs in their home town.")}</small>
       </div>}
       {canInvite && (
         <a
@@ -178,21 +179,21 @@ export default function PlayerDetails({
           onClick={onStartConversation}
         >
           <div className="h-full bg-clay-700 text-center">
-            <span>Start conversation</span>
+            <span>{t("Start conversation")}</span>
           </div>
         </a>
       )}
       {waitingForAccept && (
         <a className="mt-6 button text-white shadow-solid text-xl cursor-pointer pointer-events-auto opacity-50">
           <div className="h-full bg-clay-700 text-center">
-            <span>Waiting for accept...</span>
+            <span>{t("Waiting for accept...")}</span>
           </div>
         </a>
       )}
       {waitingForNearby && (
         <a className="mt-6 button text-white shadow-solid text-xl cursor-pointer pointer-events-auto opacity-50">
           <div className="h-full bg-clay-700 text-center">
-            <span>Walking over...</span>
+            <span>{t("Walking over...")}</span>
           </div>
         </a>
       )}
@@ -205,7 +206,7 @@ export default function PlayerDetails({
           onClick={onLeaveConversation}
         >
           <div className="h-full bg-clay-700 text-center">
-            <span>Leave conversation</span>
+            <span>{t("Leave conversation")}</span>
           </div>
         </a>
       )}
@@ -219,7 +220,7 @@ export default function PlayerDetails({
             onClick={onAcceptInvite}
           >
             <div className="h-full bg-clay-700 text-center">
-              <span>Accept</span>
+              <span>{t("Accept")}</span>
             </div>
           </a>
           <a
@@ -230,7 +231,7 @@ export default function PlayerDetails({
             onClick={onRejectInvite}
           >
             <div className="h-full bg-clay-700 text-center">
-              <span>Reject</span>
+              <span>{t("Reject")}</span>
             </div>
           </a>
         </>
@@ -245,11 +246,11 @@ export default function PlayerDetails({
       <div className="desc my-6">
         <p className="leading-tight -m-4 bg-brown-700 text-base sm:text-sm">
           {!isMe && playerDescription?.description}
-          {isMe && <i>This is you!</i>}
+          {isMe && <i>{t("This is you!")}</i>}
           {!isMe && inConversationWithMe && (
             <>
               <br />
-              <br />(<i>Conversing with you!</i>)
+              <br />(<i>{t("Conversing with you!")}</i>)
             </>
           )}
         </p>
@@ -267,7 +268,7 @@ export default function PlayerDetails({
       {!playerConversation && previousConversation && (
         <>
           <div className="box flex-grow">
-            <h2 className="bg-brown-700 text-lg text-center">Previous conversation</h2>
+            <h2 className="bg-brown-700 text-lg text-center">{t("Previous conversation")}</h2>
           </div>
           <Messages
             worldId={worldId}

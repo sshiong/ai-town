@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useCallback, useEffect, useState } from 'react';
 import volumeImg from '../../../assets/volume.svg';
 import { sound } from '@pixi/sound';
@@ -6,6 +7,7 @@ import { useQuery } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
 
 export default function MusicButton() {
+  const { t } = useLocale();
   const musicUrl = useQuery(api.music.getBackgroundMusic);
   const [isPlaying, setPlaying] = useState(false);
 
@@ -43,10 +45,10 @@ export default function MusicButton() {
       <Button
         onClick={() => void flipSwitch()}
         className="hidden lg:block"
-        title="Play AI generated music (press m to play/mute)"
+        title={t("Play AI generated music (press m to play/mute)")}
         imgUrl={volumeImg}
       >
-        {isPlaying ? 'Mute' : 'Music'}
+        {isPlaying ? t("Mute") : t("Music")}
       </Button>
     </>
   );

@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useRef, useState, type FormEvent } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import type { FunctionReturnType } from 'convex/server';
@@ -22,6 +23,7 @@ import {
 type Status = FunctionReturnType<typeof api.federation.admin.status>;
 
 export default function FederationPanel({ adminToken }: { adminToken: string }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const data: Status | undefined = useQuery(api.federation.admin.status, { adminToken });
@@ -35,7 +37,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
   async function initialize(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const fields = new FormData(event.currentTarget);
-    await task.run('Creating town identity', async () => {
+    await task.run(t("Creating town identity"), async () => {
       await convex.action(api.federation.admin.initialize, {
         adminToken,
         townName: String(fields.get('townName')).trim(),
@@ -47,29 +49,28 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
   }
   return (
     <section className="admin-panel">
-      <h2>Town federation</h2>
+      <h2>{t("Town federation")}</h2>
       <p className="admin-muted">
-        Direct HTTPS · Both towns must be able to request each other's endpoint. Pairing approval
-        proves identity; independent two-way probes enable travel.
+        {t("Direct HTTPS · Both towns must be able to request each other's endpoint. Pairing approval proves identity; independent two-way probes enable travel.")}
       </p>
       <TaskFeedback task={task} />
-      {!data && <p role="status">Loading federation state…</p>}
+      {!data && <p role="status">{t("Loading federation state…")}</p>}
       <AdminButton
         disabled={!!task.pending}
-        onClick={() => void task.run('Refreshing', refresh, '')}
+        onClick={() => void task.run(t("Refreshing"), refresh, '')}
       >
-        Refresh
+        {t("Refresh")}
       </AdminButton>
       {data &&
         (!data.identity ? (
           <form className="admin-form" onSubmit={(event) => void initialize(event)}>
-            <h3 className="admin-form-actions">Create this town's identity</h3>
-            <Field label="Town name">
+            <h3 className="admin-form-actions">{t("Create this town's identity")}</h3>
+            <Field label={t("Town name")}>
               <input name="townName" required maxLength={80} />
             </Field>
             <Field
-              label="Public HTTPS endpoint"
-              hint="Use the Convex HTTP actions site URL, accessible from the other town."
+              label={t("Public HTTPS endpoint")}
+              hint={t("Use the Convex HTTP actions site URL, accessible from the other town.")}
             >
               <input
                 name="endpoint"
@@ -79,28 +80,28 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                 placeholder="https://your-deployment.convex.site"
               />
             </Field>
-            <Field label="Maximum visitors">
+            <Field label={t("Maximum visitors")}>
               <input name="maxVisitors" type="number" min={0} max={100} defaultValue={5} required />
             </Field>
             <div className="admin-form-actions">
               <AdminButton type="submit" disabled={!!task.pending}>
-                Initialize federation
+                {t("Initialize federation")}
               </AdminButton>
             </div>
           </form>
         ) : (
           <>
             <dl className="admin-facts">
-              <dt>Town ID</dt>
+              <dt>{t("Town ID")}</dt>
               <dd>
                 <code>{data.identity.townId}</code>
               </dd>
-              <dt>Deployment</dt>
+              <dt>{t("Deployment")}</dt>
               <dd>
-                {data.identity.mode} · epoch {data.identity.deploymentEpoch}
+                {data.identity.mode} {t("· epoch")} {data.identity.deploymentEpoch}
                 <code>{data.identity.deploymentInstanceId}</code>
               </dd>
-              <dt>Verified key fingerprint</dt>
+              <dt>{t("Verified key fingerprint")}</dt>
               <dd>
                 <code>{data.identity.fingerprint}</code>
               </dd>
@@ -112,7 +113,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                 event.preventDefault();
                 const fields = new FormData(event.currentTarget);
                 void task.run(
-                  'Updating this town endpoint',
+                  t("Updating this town endpoint"),
                   async () => {
                     await convex.mutation(api.federation.admin.updateLocalEndpoint, {
                       adminToken,
@@ -129,13 +130,13 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     });
                     await refresh();
                   },
-                  'Address saved; signed updates are queued for connected towns. Travel resumes after fresh two-way probes.',
+                  t("Address saved; signed updates are queued for connected towns. Travel resumes after fresh two-way probes."),
                 );
               }}
             >
               <Field
-                label="This town's HTTPS endpoint"
-                hint="Changing the address preserves the stable Town ID and keys. Both sides must verify the new route before travel resumes."
+                label={t("This town's HTTPS endpoint")}
+                hint={t("Changing the address preserves the stable Town ID and keys. Both sides must verify the new route before travel resumes.")}
               >
                 <input
                   name="endpoint"
@@ -145,33 +146,33 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   inputMode="url"
                 />
               </Field>
-              <Field label="Primary address priority" hint="Lower numbers are tried first. The primary address must have the highest priority.">
+              <Field label={t("Primary address priority")} hint={t("Lower numbers are tried first. The primary address must have the highest priority.")}>
                 <input name="primaryPriority" type="number" min={0} max={1000} step={1} required
                   defaultValue={data.identity.endpointCandidates?.find(candidate => candidate.url === data.identity!.endpoint)?.priority ?? 10} />
               </Field>
-              <Field label="Backup HTTPS addresses" hint="Up to three backups, one per line: priority followed by HTTPS URL (for example: 20 https://backup.example.com). Each route must prove the same trusted identity; travel still requires both directions.">
+              <Field label={t("Backup HTTPS addresses")} hint={t("Up to three backups, one per line: priority followed by HTTPS URL (for example: 20 https://backup.example.com). Each route must prove the same trusted identity; travel still requires both directions.")}>
                 <textarea name="backupEndpoints" rows={3} maxLength={6000}
                   defaultValue={(data.identity.endpointCandidates ?? []).filter(candidate => candidate.url !== data.identity!.endpoint).map(candidate => `${candidate.priority} ${candidate.url}`).join('\n')} />
               </Field>
-              <Field label="Operator">
+              <Field label={t("Operator")}>
                 <input name="operator" required maxLength={100} />
               </Field>
-              <Field label="Address change reason">
+              <Field label={t("Address change reason")}>
                 <input name="reason" required maxLength={1000} />
               </Field>
               <AdminButton type="submit" disabled={!!task.pending || data.identity.mode !== 'ACTIVE'}>
-                Update town address
+                {t("Update town address")}
               </AdminButton>
             </form>
             <EndpointHistory adminToken={adminToken} />
-            <h3>Admission &amp; safety</h3>
+            <h3>{t("Admission & safety")}</h3>
             <form
               className="admin-form"
               key={JSON.stringify(data.settings)}
               onSubmit={(event) => {
                 event.preventDefault();
                 const fields = new FormData(event.currentTarget);
-                void task.run('Saving admission policy', async () => {
+                void task.run(t("Saving admission policy"), async () => {
                   await convex.mutation(api.federation.admin.configure, {
                     adminToken,
                     enabled: fields.get('enabled') === 'on',
@@ -186,7 +187,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
             >
               <label className="admin-check">
                 <input name="enabled" type="checkbox" defaultChecked={data.settings.enabled} />{' '}
-                Enable federation visits
+                {t("Enable federation visits")}
               </label>
               <label className="admin-check">
                 <input
@@ -194,9 +195,9 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   type="checkbox"
                   defaultChecked={data.settings.allowIncomingPairRequests}
                 />{' '}
-                Accept new pairing requests
+                {t("Accept new pairing requests")}
               </label>
-              <Field label="Maximum visitors">
+              <Field label={t("Maximum visitors")}>
                 <input
                   name="maxVisitors"
                   type="number"
@@ -206,7 +207,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   required
                 />
               </Field>
-              <Field label="Maximum visit (minutes)">
+              <Field label={t("Maximum visit (minutes)")}>
                 <input
                   name="duration"
                   type="number"
@@ -217,8 +218,8 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                 />
               </Field>
               <Field
-                label="Host decision wait (seconds)"
-                hint="Allow 5–120 seconds for a visiting resident's model reply. Expired decisions are discarded; visit leases still apply."
+                label={t("Host decision wait (seconds)")}
+                hint={t("Allow 5–120 seconds for a visiting resident's model reply. Expired decisions are discarded; visit leases still apply.")}
               >
                 <input
                   name="replyTimeout"
@@ -232,7 +233,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
               </Field>
               <div className="admin-form-actions">
                 <AdminButton type="submit" disabled={!!task.pending}>
-                  Save policy
+                  {t("Save policy")}
                 </AdminButton>
               </div>
             </form>
@@ -240,13 +241,13 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
               <>
                 <VisitorQueuePanel adminToken={adminToken} configurationOnly />
                 <ResidentPolicyPanel adminToken={adminToken} />
-                <h3>Town capacity</h3>
+                <h3>{t("Town capacity")}</h3>
                 <p className="admin-muted">
-                  Admission: <strong>{data.resources.admissionState}</strong> ·{' '}
-                  {data.resources.residents} residents · {data.resources.humans} people ·{' '}
-                  {data.resources.reservations} reservations. Model requests:{' '}
-                  {data.resources.runningLocalLLM} running, {data.resources.pendingLocalLLM} queued.{' '}
-                  Pending visitor decisions: {data.resources.pendingDecisions}.
+                  {t("Admission:")} <strong>{data.resources.admissionState}</strong> ·{' '}
+                  {data.resources.residents} {t("residents ·")} {data.resources.humans} {t("people ·")}{' '}
+                  {data.resources.reservations} {t("reservations. Model requests:")}{' '}
+                  {data.resources.runningLocalLLM} {t("running,")} {data.resources.pendingLocalLLM} {t("queued.")}{' '}
+                  {t("Pending visitor decisions:")} {data.resources.pendingDecisions}.
                 </p>
                 <form
                   className="admin-form"
@@ -254,7 +255,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   onSubmit={(event) => {
                     event.preventDefault();
                     const fields = new FormData(event.currentTarget);
-                    void task.run('Saving town capacity', async () => {
+                    void task.run(t("Saving town capacity"), async () => {
                       await convex.mutation(api.federation.admin.configureResources, {
                         adminToken,
                         limits: {
@@ -274,33 +275,33 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     [
                       [
                         'maxResidentAgents',
-                        'Resident limit',
-                        'Includes residents currently traveling.',
+                        t("Resident limit"),
+                        t("Includes residents currently traveling."),
                       ],
                       [
                         'maxHumanPlayers',
-                        'People limit',
-                        'Limits new human players across this town.',
+                        t("People limit"),
+                        t("Limits new human players across this town."),
                       ],
                       [
                         'maxVisitReservations',
-                        'Reservation limit',
-                        'Limits visits reserved before arrival.',
+                        t("Reservation limit"),
+                        t("Limits visits reserved before arrival."),
                       ],
                       [
                         'maxConcurrentLocalLLM',
-                        'Concurrent model requests',
-                        'Shared by resident conversations, visiting brains and memory work.',
+                        t("Concurrent model requests"),
+                        t("Shared by resident conversations, visiting brains and memory work."),
                       ],
                       [
                         'maxPendingDecisions',
-                        'Pending visitor decisions',
-                        'Limits outstanding remote decision turns.',
+                        t("Pending visitor decisions"),
+                        t("Limits outstanding remote decision turns."),
                       ],
                       [
                         'maxPendingLocalLLM',
-                        'Queued model requests',
-                        'Requests wait in order for up to 30 seconds within their overall deadline.',
+                        t("Queued model requests"),
+                        t("Requests wait in order for up to 30 seconds within their overall deadline."),
                       ],
                     ] as const
                   ).map(([key, label, hint]) => (
@@ -318,13 +319,12 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   ))}
                   <div className="admin-form-actions">
                     <AdminButton type="submit" disabled={!!task.pending}>
-                      Save capacity
+                      {t("Save capacity")}
                     </AdminButton>
                   </div>
                 </form>
                 <p className="admin-muted">
-                  Reducing limits preserves existing residents and work. Zero pauses new admissions
-                  or requests for that budget.
+                  {t("Reducing limits preserves existing residents and work. Zero pauses new admissions or requests for that budget.")}
                 </p>
                 <form
                   className="admin-inline-form"
@@ -333,7 +333,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     event.preventDefault();
                     const fields = new FormData(event.currentTarget);
                     const raw = String(fields.get('sourceQuota')).trim();
-                    void task.run('Saving source visitor quota', async () => {
+                    void task.run(t("Saving source visitor quota"), async () => {
                       await convex.mutation(
                         api.federation.resourceMonitoring.configureSourceQuota,
                         {
@@ -346,8 +346,8 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   }}
                 >
                   <Field
-                    label="Visitor slots per source town"
-                    hint="Leave blank to use only the total town limit. This cap counts reservations and visitors awaiting physical cleanup; it preserves existing visits and is not a waiting queue."
+                    label={t("Visitor slots per source town")}
+                    hint={t("Leave blank to use only the total town limit. This cap counts reservations and visitors awaiting physical cleanup; it preserves existing visits and is not a waiting queue.")}
                   >
                     <input
                       name="sourceQuota"
@@ -359,7 +359,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     />
                   </Field>
                   <AdminButton type="submit" disabled={!!task.pending}>
-                    Save source quota
+                    {t("Save source quota")}
                   </AdminButton>
                 </form>
                 <form
@@ -368,7 +368,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   onSubmit={(event) => {
                     event.preventDefault();
                     const raw = String(new FormData(event.currentTarget).get('eventRate')).trim();
-                    void task.run('Saving remote event rate', async () => {
+                    void task.run(t("Saving remote event rate"), async () => {
                       await convex.mutation(api.federation.resourceMonitoring.configureRemoteEventRate, {
                         adminToken, maxRemoteEventsPerSecond: raw === '' ? null : Number(raw),
                       });
@@ -377,45 +377,43 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   }}
                 >
                   <Field
-                    label="Remote work events per second"
-                    hint="Leave blank for unlimited. A shared token bucket permits a burst of up to this limit and refills each second. Zero pauses new visit requests and immediate runtime events. Retries reuse their receipts; lease renewals, return, cleanup, history and stream recovery remain available."
+                    label={t("Remote work events per second")}
+                    hint={t("Leave blank for unlimited. A shared token bucket permits a burst of up to this limit and refills each second. Zero pauses new visit requests and immediate runtime events. Retries reuse their receipts; lease renewals, return, cleanup, history and stream recovery remain available.")}
                   >
                     <input name="eventRate" type="number" min={0} max={1000} step={1}
                       defaultValue={data.resources.maxRemoteEventsPerSecond ?? ''} />
                   </Field>
-                  <AdminButton type="submit" disabled={!!task.pending}>Save event rate</AdminButton>
+                  <AdminButton type="submit" disabled={!!task.pending}>{t("Save event rate")}</AdminButton>
                 </form>
                 {data.resources.sourceOccupancy.length > 0 && (
                   <ul className="admin-list">
                     {data.resources.sourceOccupancy.map((source) => (
                       <li key={source.townId}>
-                        <code>{source.townId}</code> · {source.occupied} occupied visitor slots
+                        <code>{source.townId}</code> · {source.occupied} {t("occupied visitor slots")}
                       </li>
                     ))}
                   </ul>
                 )}
                 <HostResourcePanel adminToken={adminToken} resources={data.resources.hostResources}
                   key={`host-resources-${JSON.stringify(data.resources.hostResources.thresholds)}`} />
-                <h3>Measured workload</h3>
+                <h3>{t("Measured workload")}</h3>
                 <p className="admin-muted">
-                  Window: {formatTime(data.resources.measurements.windowStartedAt)} to{' '}
-                  {formatTime(data.resources.measurements.measuredAt)}. Values update when server
-                  state changes or you refresh.
+                  {t("Window:")} {formatTime(data.resources.measurements.windowStartedAt)} {t("to")}{' '}
+                  {formatTime(data.resources.measurements.measuredAt)}{t(". Values update when server state changes or you refresh.")}
                 </p>
                 <dl className="admin-facts">
-                  <dt>Authenticated inbound events</dt>
+                  <dt>{t("Authenticated inbound events")}</dt>
                   <dd>
-                    {data.resources.measurements.inboundEvents} unique events ·{' '}
-                    {data.resources.measurements.inboundEventsPerSecond.toFixed(3)}/second. Includes
-                    buffered and rejected sequences; retries are counted once. Probes are excluded.
+                    {data.resources.measurements.inboundEvents} {t("unique events ·")}{' '}
+                    {data.resources.measurements.inboundEventsPerSecond.toFixed(3)}{t("/second. Includes buffered and rejected sequences; retries are counted once. Probes are excluded.")}
                   </dd>
                   {(
                     [
-                      ['Model queue wait', data.resources.measurements.chatQueue],
-                      ['Model call duration', data.resources.measurements.chatProvider],
-                      ['Successful remote decision', data.resources.measurements.decision],
+                      [t("Model queue wait"), data.resources.measurements.chatQueue],
+                      [t("Model call duration"), data.resources.measurements.chatProvider],
+                      [t("Successful remote decision"), data.resources.measurements.decision],
                       [
-                        'Failed / expired remote decision',
+                        t("Failed / expired remote decision"),
                         data.resources.measurements.failedDecision,
                       ],
                     ] as const
@@ -424,29 +422,27 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                       <dt>{label}</dt>
                       <dd>
                         {metric.meanMs === null
-                          ? 'No measured completions'
-                          : `${metric.meanMs.toFixed(0)} ms mean · ${metric.p95Ms?.toFixed(0)} ms P95`}{' '}
-                        · {metric.durationCount} measured · {metric.sampleCount} P95 samples
-                        {metric.sampled ? ' (recent samples per bucket; truncated)' : ''}
+                          ? t("No measured completions")
+                          : t("{mean} ms mean · {p95} ms P95", { mean: metric.meanMs.toFixed(0), p95: metric.p95Ms?.toFixed(0) ?? "" })}{' '}
+                        · {metric.durationCount} {t("measured ·")} {metric.sampleCount} {t("P95 samples")}
+                        {metric.sampled ? t(" (recent samples per bucket; truncated)") : ''}
                       </dd>
                     </div>
                   ))}
-                  <dt>Model outcomes</dt>
+                  <dt>{t("Model outcomes")}</dt>
                   <dd>
-                    {data.resources.measurements.chatSucceeded} succeeded ·{' '}
-                    {data.resources.measurements.chatFailed} failed ·{' '}
-                    {data.resources.measurements.chatAbandoned} abandoned permits reclaimed
+                    {data.resources.measurements.chatSucceeded} {t("succeeded ·")}{' '}
+                    {data.resources.measurements.chatFailed} {t("failed ·")}{' '}
+                    {data.resources.measurements.chatAbandoned} {t("abandoned permits reclaimed")}
                   </dd>
                 </dl>
                 <p className="admin-muted">
-                  Model duration includes provider retries. Remote decision duration runs from
-                  receipt of the observation job to its terminal result, including memory retrieval,
-                  queue wait and model calls. Abandoned work has no fabricated completion time.
+                  {t("Model duration includes provider retries. Remote decision duration runs from receipt of the observation job to its terminal result, including memory retrieval, queue wait and model calls. Abandoned work has no fabricated completion time.")}
                 </p>
                 <details className="admin-disclosure">
-                  <summary>Recent capacity policy audit</summary>
+                  <summary>{t("Recent capacity policy audit")}</summary>
                   {!data.resources.audit.length && (
-                    <p className="admin-muted">No capacity policy changes recorded.</p>
+                    <p className="admin-muted">{t("No capacity policy changes recorded.")}</p>
                   )}
                   <ul className="admin-list">
                     {data.resources.audit.map((entry) => (
@@ -462,15 +458,12 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
               </>
             )}
             <p className="admin-warning">
-              Unencrypted HTTP is disabled (DISABLED). The required authentication library is
-              unavailable in this build. HTTP-SIGNED-PLAINTEXT would expose chat, observations and
-              metadata to eavesdropping; it provides no confidentiality.
+              {t("Unencrypted HTTP is disabled (DISABLED). The required authentication library is unavailable in this build. HTTP-SIGNED-PLAINTEXT would expose chat, observations and metadata to eavesdropping; it provides no confidentiality.")}
             </p>
-            <h3>Connected towns</h3>
+            <h3>{t("Connected towns")}</h3>
             {!data.peers.length && (
               <EmptyState>
-                Add a town below, approve the request on both ends, then run a two-way transport
-                probe.
+                {t("Add a town below, approve the request on both ends, then run a two-way transport probe.")}
               </EmptyState>
             )}
             <ul className="admin-list">
@@ -484,22 +477,22 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     <code>{peer.fingerprint}</code>
                     <p>{peer.endpoint}</p>
                     {(peer.endpointCandidates?.length ?? 0) > 1 && <ul className="admin-muted">
-                      {peer.endpointCandidates!.map(candidate => <li key={candidate.url}>Priority {candidate.priority} · {candidate.url}</li>)}
+                      {peer.endpointCandidates!.map(candidate => <li key={candidate.url}>{t("Priority")} {candidate.priority} · {candidate.url}</li>)}
                     </ul>}
-                    {peer.outboundEndpoint && <p className="admin-muted">Verified outbound route: {peer.outboundEndpoint}</p>}
+                    {peer.outboundEndpoint && <p className="admin-muted">{t("Verified outbound route:")} {peer.outboundEndpoint}</p>}
                     <p className="admin-muted">
                       {peer.transportType} ·{' '}
                       {peer.channelState === 'TRANSPORT_READY'
-                        ? 'Both directions verified'
-                        : 'Travel blocked until both directions are verified'}
+                        ? t("Both directions verified")
+                        : t("Travel blocked until both directions are verified")}
                     </p>
-                    {peer.lastError && <p className="admin-error">{adminErrorSummary(peer.lastError)} <code>{peer.lastError}</code></p>}
+                    {peer.lastError && <p className="admin-error">{adminErrorSummary(peer.lastError, t)} <code>{peer.lastError}</code></p>}
                     <div className="admin-toolbar">
                       <AdminButton
                         disabled={!!task.pending || peer.trustState !== 'TRUSTED'}
                         onClick={() =>
                           void task.run(
-                            'Testing both directions',
+                            t("Testing both directions"),
                             async () => {
                               await convex.action(api.federation.transport.probe, {
                                 adminToken,
@@ -507,11 +500,11 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                               });
                               await refresh();
                             },
-                            'Probe finished. Check the transport state above.',
+                            t("Probe finished. Check the transport state above."),
                           )
                         }
                       >
-                        Probe transport
+                        {t("Probe transport")}
                       </AdminButton>
                     </div>
                     <form
@@ -520,7 +513,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                         event.preventDefault();
                         const fields = new FormData(event.currentTarget);
                         void task.run(
-                          'Verifying new endpoint',
+                          t("Verifying new endpoint"),
                           async () => {
                             await convex.action(api.federation.peers.updateEndpoint, {
                               adminToken,
@@ -531,11 +524,11 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                             });
                             await refresh();
                           },
-                          'Endpoint verified. Run new probes before travel.',
+                          t("Endpoint verified. Run new probes before travel."),
                         );
                       }}
                     >
-                      <Field label="Update endpoint">
+                      <Field label={t("Update endpoint")}>
                         <input
                           name="endpoint"
                           type="text"
@@ -544,14 +537,14 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                           required
                         />
                       </Field>
-                      <Field label="Operator">
+                      <Field label={t("Operator")}>
                         <input name="operator" required maxLength={100} />
                       </Field>
-                      <Field label="Verification reason">
+                      <Field label={t("Verification reason")}>
                         <input name="reason" required maxLength={1000} />
                       </Field>
                       <AdminButton type="submit" disabled={!!task.pending || peer.trustState !== 'TRUSTED' || data.identity?.mode !== 'ACTIVE'}>
-                        Verify &amp; update
+                        {t("Verify & update")}
                       </AdminButton>
                     </form>
                     <form
@@ -562,7 +555,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                         const state = String(fields.get('trustState'));
                         if (state !== 'TRUSTED' && state !== 'PAUSED' && state !== 'REVOKED')
                           return;
-                        void task.run('Saving peer permissions', async () => {
+                        void task.run(t("Saving peer permissions"), async () => {
                           await convex.mutation(api.federation.peers.setPolicy, {
                             adminToken,
                             peerTownId: peer.townId,
@@ -580,7 +573,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                           type="checkbox"
                           defaultChecked={peer.inboundVisitsAllowed}
                         />{' '}
-                        Incoming visits
+                        {t("Incoming visits")}
                       </label>
                       <label className="admin-check">
                         <input
@@ -588,17 +581,17 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                           type="checkbox"
                           defaultChecked={peer.outboundVisitsAllowed}
                         />{' '}
-                        Outgoing visits
+                        {t("Outgoing visits")}
                       </label>
-                      <Field label="Trust policy">
+                      <Field label={t("Trust policy")}>
                         <select name="trustState" defaultValue={peer.trustState}>
-                          <option>TRUSTED</option>
-                          <option>PAUSED</option>
-                          <option>REVOKED</option>
+                          <option value="TRUSTED">{t("TRUSTED")}</option>
+                          <option value="PAUSED">{t("PAUSED")}</option>
+                          <option value="REVOKED">{t("REVOKED")}</option>
                         </select>
                       </Field>
                       <AdminButton type="submit" disabled={!!task.pending}>
-                        Save permissions
+                        {t("Save permissions")}
                       </AdminButton>
                     </form>
                   </div>
@@ -606,16 +599,16 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
               ))}
             </ul>
             <h3>
-              Pairing requests{' '}
+              {t("Pairing requests")}{' '}
               {data.unreadPairRequests > 0 && (
                 <span className="admin-badge" role="status">
-                  {data.unreadPairRequests > 1000 ? '1000+' : data.unreadPairRequests} unread
+                  {data.unreadPairRequests > 1000 ? '1000+' : data.unreadPairRequests} {t("unread")}
                 </span>
               )}
             </h3>
             {!data.pairRequests.length && (
               <EmptyState>
-                No pairing requests. A request never grants visitor admission by itself.
+                {t("No pairing requests. A request never grants visitor admission by itself.")}
               </EmptyState>
             )}
             <ul className="admin-list">
@@ -626,28 +619,28 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     <span className="admin-badge">
                       {request.direction} · {request.state}
                     </span>
-                    {request.unread && <span className="admin-badge">Unread request</span>}
+                    {request.unread && <span className="admin-badge">{t("Unread request")}</span>}
                     <code>{request.pairRequestId}</code>
                     <p>{request.endpoint}</p>
                     <p className={request.identityVerified ? 'admin-muted' : 'admin-warning'}>
                       {request.identityVerified
-                        ? 'Identity verified by pairing.'
-                        : 'Self-reported identity — not yet verified. The name, Town ID, fingerprint and address are claims until both towns complete authentication.'}
+                        ? t("Identity verified by pairing.")
+                        : t("Self-reported identity — not yet verified. The name, Town ID, fingerprint and address are claims until both towns complete authentication.")}
                     </p>
-                    <code>Claimed Town ID: {request.claimedTownId}</code>
-                    <code>Claimed fingerprint: {request.fingerprint}</code>
+                    <code>{t("Claimed Town ID:")} {request.claimedTownId}</code>
+                    <code>{t("Claimed fingerprint:")} {request.fingerprint}</code>
                     <p className="admin-muted">
-                      Protocol: {request.protocol ?? 'Unknown'} ·{' '}
+                      {t("Protocol:")} {request.protocol ?? t("Unknown")} ·{' '}
                       {request.endpoint.startsWith('https:') ? 'HTTPS' : 'HTTP'}
                     </p>
-                    <p className="admin-muted">Requested: {formatTime(request.requestedAt)}</p>
-                    <p className="admin-muted">Expires: {formatTime(request.expiresAt)}</p>
+                    <p className="admin-muted">{t("Requested:")} {formatTime(request.requestedAt)}</p>
+                    <p className="admin-muted">{t("Expires:")} {formatTime(request.expiresAt)}</p>
                     {request.unread && (
                       <AdminButton
                         disabled={!!task.pending}
                         onClick={() =>
                           void task.run(
-                            'Marking request read',
+                            t("Marking request read"),
                             async () => {
                               await convex.mutation(api.federation.peers.markPairRead, {
                                 adminToken,
@@ -659,47 +652,42 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                           )
                         }
                       >
-                        Mark read
+                        {t("Mark read")}
                       </AdminButton>
                     )}
                     {request.state === 'PENDING_APPROVAL' && (
                       <p role="status">
                         {request.direction === 'OUTBOUND'
-                          ? 'Waiting for the other administrator to approve. No trust or visitor access has been granted.'
-                          : 'A town requests a connection. Accepting requires the secret independently agreed with its administrator.'}
+                          ? t("Waiting for the other administrator to approve. No trust or visitor access has been granted.")
+                          : t("A town requests a connection. Accepting requires the secret independently agreed with its administrator.")}
                       </p>
                     )}
                     {request.state === 'PENDING_BOTH_CONFIRM' && (
                       <p role="status">
-                        Waiting for both towns to confirm their identity and communication
-                        credential. Travel is unavailable.{' '}
+                        {t("Waiting for both towns to confirm their identity and communication credential. Travel is unavailable.")}{' '}
                         {request.direction === 'OUTBOUND' &&
-                          'Continue to reconcile: the other town may already have received confirmation.'}
+                          t("Continue to reconcile: the other town may already have received confirmation.")}
                       </p>
                     )}
                     {request.state === 'CANCEL_PENDING' && (
                       <p role="status">
-                        Cancelled locally; awaiting the other town's acknowledgement. Local
-                        authentication is blocked. Retry cancellation if the connection was
-                        interrupted; the remote request also expires at the time above.
+                        {t("Cancelled locally; awaiting the other town's acknowledgement. Local authentication is blocked. Retry cancellation if the connection was interrupted; the remote request also expires at the time above.")}
                       </p>
                     )}
                     {request.state === 'CANCELLED' && (
-                      <p role="status">This request was cancelled. It cannot establish trust.</p>
+                      <p role="status">{t("This request was cancelled. It cannot establish trust.")}</p>
                     )}
                     {request.state === 'REJECTED' && (
                       <p role="status">
                         {request.direction === 'OUTBOUND'
-                          ? 'The other administrator rejected this request.'
-                          : 'You rejected this request.'}{' '}
-                        History is retained; a new request is allowed after the cooldown.
+                          ? t("The other administrator rejected this request.")
+                          : t("You rejected this request.")}{' '}
+                        {t("History is retained; a new request is allowed after the cooldown.")}
                       </p>
                     )}
                     {request.state === 'AUTH_FAILED' && (
                       <p role="status">
-                        Pairing secret or identity verification failed. No connection was
-                        established. Agree on a secret through a trusted channel before submitting a
-                        new request.
+                        {t("Pairing secret or identity verification failed. No connection was established. Agree on a secret through a trusted channel before submitting a new request.")}
                       </p>
                     )}
                     {request.direction === 'INBOUND' && request.state === 'PENDING_APPROVAL' && (
@@ -708,7 +696,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                         onSubmit={(event) => {
                           event.preventDefault();
                           const fields = new FormData(event.currentTarget);
-                          void task.run('Approving and authenticating', async () => {
+                          void task.run(t("Approving and authenticating"), async () => {
                             await convex.action(api.federation.peers.approvePair, {
                               adminToken,
                               pairRequestId: request.pairRequestId,
@@ -719,19 +707,19 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                         }}
                       >
                         <Field
-                          label="Shared high-entropy pairing secret"
-                          hint="Enter the secret previously agreed through a trusted channel. The request does not supply a trusted secret."
+                          label={t("Shared high-entropy pairing secret")}
+                          hint={t("Enter the secret previously agreed through a trusted channel. The request does not supply a trusted secret.")}
                         >
                           <input name="secret" type="password" autoComplete="off" required />
                         </Field>
                         <AdminButton type="submit" disabled={!!task.pending}>
-                          Approve &amp; verify
+                          {t("Approve & verify")}
                         </AdminButton>
                         <AdminButton
                           danger
                           disabled={!!task.pending}
                           onClick={() =>
-                            void task.run('Rejecting request', async () => {
+                            void task.run(t("Rejecting request"), async () => {
                               await convex.mutation(api.federation.peers.rejectPair, {
                                 adminToken,
                                 pairRequestId: request.pairRequestId,
@@ -740,7 +728,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                             })
                           }
                         >
-                          Reject
+                          {t("Reject")}
                         </AdminButton>
                       </form>
                     )}
@@ -749,7 +737,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                         <AdminButton
                           disabled={!!task.pending}
                           onClick={() =>
-                            void task.run('Checking pairing approval', async () => {
+                            void task.run(t("Checking pairing approval"), async () => {
                               await convex.action(api.federation.peers.continuePair, {
                                 adminToken,
                                 pairRequestId: request.pairRequestId,
@@ -758,7 +746,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                             })
                           }
                         >
-                          Check / continue pairing
+                          {t("Check / continue pairing")}
                         </AdminButton>
                       )}
                     {((request.direction === 'OUTBOUND' &&
@@ -772,7 +760,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                         disabled={!!task.pending}
                         onClick={() =>
                           void task.run(
-                            'Cancelling pairing request',
+                            t("Cancelling pairing request"),
                             async () => {
                               await convex.action(api.federation.peers.cancelPair, {
                                 adminToken,
@@ -780,13 +768,13 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                               });
                               await refresh();
                             },
-                            'Pairing request closed. Its recorded result is shown above.',
+                            t("Pairing request closed. Its recorded result is shown above."),
                           )
                         }
                       >
                         {request.state === 'CANCEL_PENDING'
-                          ? 'Retry cancellation'
-                          : 'Cancel request'}
+                          ? t("Retry cancellation")
+                          : t("Cancel request")}
                       </AdminButton>
                     )}
                     {request.direction === 'OUTBOUND' &&
@@ -795,8 +783,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                       ) && (
                         <>
                           <p className="admin-muted">
-                            New request available after {formatTime(request.retryAfter)}. Refresh
-                            after the cooldown.
+                            {t("New request available after")} {formatTime(request.retryAfter)}{t(". Refresh after the cooldown.")}
                           </p>
                           <AdminButton
                             disabled={!!task.pending || request.retryAfter > Date.now()}
@@ -812,7 +799,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                               }
                             }}
                           >
-                            Prepare new request
+                            {t("Prepare new request")}
                           </AdminButton>
                         </>
                       )}
@@ -821,16 +808,15 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
               ))}
             </ul>
             <details className="admin-disclosure" ref={connectionForm}>
-              <summary>Request a connection</summary>
+              <summary>{t("Request a connection")}</summary>
               <p className="admin-muted">
-                Share the same generated secret with the other administrator through a trusted
-                channel. It is used for authentication and never sent as plaintext to the peer.
+                {t("Share the same generated secret with the other administrator through a trusted channel. It is used for authentication and never sent as plaintext to the peer.")}
               </p>
               <AdminButton
                 disabled={!!task.pending}
                 onClick={() =>
                   void task.run(
-                    'Generating pairing secret',
+                    t("Generating pairing secret"),
                     async () => {
                       const result = await convex.action(
                         api.federation.admin.generatePairingSecret,
@@ -838,18 +824,18 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                       );
                       setPairingSecret(result.pairingSecret);
                     },
-                    'Secret generated. Copy it securely; it is only shown in this form.',
+                    t("Secret generated. Copy it securely; it is only shown in this form."),
                   )
                 }
               >
-                Generate secret
+                {t("Generate secret")}
               </AdminButton>
               <form
                 className="admin-form"
                 onSubmit={(event) => {
                   event.preventDefault();
                   void task.run(
-                    'Sending pairing request',
+                    t("Sending pairing request"),
                     async () => {
                       await convex.action(api.federation.peers.requestPair, {
                         adminToken,
@@ -859,11 +845,11 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                       setPairingSecret('');
                       await refresh();
                     },
-                    'Request sent. Wait for the other administrator to approve, then continue pairing.',
+                    t("Request sent. Wait for the other administrator to approve, then continue pairing."),
                   );
                 }}
               >
-                <Field label="Other town's HTTPS endpoint">
+                <Field label={t("Other town's HTTPS endpoint")}>
                   <input
                     name="endpoint"
                     value={pairEndpoint}
@@ -874,7 +860,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     placeholder="https://other-town.convex.site"
                   />
                 </Field>
-                <Field label="Shared pairing secret">
+                <Field label={t("Shared pairing secret")}>
                   <input
                     value={pairingSecret}
                     onChange={(event) => setPairingSecret(event.target.value)}
@@ -889,11 +875,11 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     checked={showSecret}
                     onChange={(event) => setShowSecret(event.target.checked)}
                   />{' '}
-                  Show generated secret to copy securely
+                  {t("Show generated secret to copy securely")}
                 </label>
                 <div className="admin-form-actions">
                   <AdminButton type="submit" disabled={!!task.pending}>
-                    Send pairing request
+                    {t("Send pairing request")}
                   </AdminButton>
                 </div>
               </form>

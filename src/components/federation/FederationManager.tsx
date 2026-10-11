@@ -1,3 +1,4 @@
+import { LanguageSetting, useLocale } from '../../i18n';
 import { useState } from 'react';
 import ReactModal from 'react-modal';
 import { useConvex, useConvexConnectionState } from 'convex/react';
@@ -25,6 +26,7 @@ export default function FederationManager({
   isOpen: boolean;
   onClose: () => void;
 }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const connection = useConvexConnectionState();
@@ -45,7 +47,7 @@ export default function FederationManager({
     <ReactModal
       isOpen={isOpen}
       onRequestClose={onClose}
-      contentLabel="Town administration"
+      contentLabel={t('Town administration')}
       className="federation-modal font-body"
       overlayClassName="federation-overlay"
       ariaHideApp={false}
@@ -53,30 +55,34 @@ export default function FederationManager({
     >
       <header className="admin-header">
         <div>
-          <p className="admin-eyebrow">AI Town · Direct federation</p>
-          <h1 className="font-display">Town administration</h1>
+          <p className="admin-eyebrow">{t('AI Town · Direct federation')}</p>
+          <h1 className="font-display">{t('Town administration')}</h1>
         </div>
         <button
           type="button"
           className="admin-close"
-          aria-label="Close town administration"
+          aria-label={t('Close town administration')}
           onClick={onClose}
         >
           ×
         </button>
       </header>
+      <section className="admin-panel">
+        <LanguageSetting />
+      </section>
       {!adminToken ? (
         <section className="admin-panel admin-unlock">
-          <h2>Administrator access</h2>
+          <h2>{t('Administrator access')}</h2>
           <p>
-            Enter the token configured as FEDERATION_ADMIN_TOKEN on this server. Town simulation
-            continues independently of this panel.
+            {t(
+              'Enter the token configured as FEDERATION_ADMIN_TOKEN on this server. Town simulation continues independently of this panel.',
+            )}
           </p>
           <form
             onSubmit={(event) => {
               event.preventDefault();
               void task.run(
-                'Checking administrator access',
+                t('Checking administrator access'),
                 async () => {
                   await convex.query(api.federation.admin.status, { adminToken: inputToken });
                   if (remember) {
@@ -84,7 +90,7 @@ export default function FederationManager({
                       sessionStorage.setItem(storageKey, inputToken);
                     } catch {
                       throw new Error(
-                        'Session storage is unavailable. Uncheck remember and try again.',
+                        t('Session storage is unavailable. Uncheck remember and try again.'),
                       );
                     }
                   } else {
@@ -100,7 +106,7 @@ export default function FederationManager({
               );
             }}
           >
-            <Field label="Admin token">
+            <Field label={t('Admin token')}>
               <input
                 type="password"
                 value={inputToken}
@@ -115,47 +121,51 @@ export default function FederationManager({
                 checked={remember}
                 onChange={(event) => setRemember(event.target.checked)}
               />{' '}
-              Remember in this browser tab's session
+              {t("Remember in this browser tab's session")}
             </label>
             <p className="admin-muted">
-              By default, the token stays in memory. Close this tab or lock the panel to clear
-              access.
+              {t(
+                'By default, the token stays in memory. Close this tab or lock the panel to clear access.',
+              )}
             </p>
             {!connection.isWebSocketConnected && (
               <p role="status" className="admin-warning">
-                The town server is not connected. Access checks will become available after
-                reconnection.
+                {t(
+                  'The town server is not connected. Access checks will become available after reconnection.',
+                )}
               </p>
             )}
             <AdminButton
               type="submit"
               disabled={!!task.pending || !connection.isWebSocketConnected}
             >
-              Open administration
+              {t('Open administration')}
             </AdminButton>
           </form>
           <TaskFeedback task={task} />
         </section>
       ) : (
         <>
-          <nav className="admin-tabs" aria-label="Administration sections">
+          <nav className="admin-tabs" aria-label={t('Administration sections')}>
             {[
-              ['town', 'Federation'],
-              ['travel', 'Travel & visitors'],
-              ['models', 'Models & memory'],
-              ['data', 'Data & backups'],
+              ['town', t('Federation')],
+              ['travel', t('Travel & visitors')],
+              ['models', t('Models & memory')],
+              ['data', t('Data & backups')],
             ].map(([id, name]) => (
               <button type="button" key={id} aria-pressed={tab === id} onClick={() => setTab(id)}>
-                {name}
+                {t(name)}
               </button>
             ))}
             <button type="button" onClick={lock}>
-              Lock
+              {t('Lock')}
             </button>
           </nav>
           {!connection.isWebSocketConnected && (
             <p className="admin-warning" role="status">
-              Connection interrupted. Displayed values may be stale; operations wait for the server.
+              {t(
+                'Connection interrupted. Displayed values may be stale; operations wait for the server.',
+              )}
             </p>
           )}
           <TownErrorBoundary key={tab}>

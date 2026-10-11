@@ -1,3 +1,5 @@
+import { translate } from '../../locale';
+import { federationMessages } from '../../locales/federation';
 import {
   adminErrorSummary,
   safeReturnSummary, eventProgressSummary,
@@ -124,4 +126,18 @@ test('clock uncertainty and history progress have explicit safe-return wording',
   expect(safeReturnSummary('SIGNED_CLEANUP')).toContain('signed cleanup');
   expect(eventProgressSummary(71, 69, 'host')).toContain('2 event page(s)');
   expect(eventProgressSummary(69, 69, 'home')).toContain('cannot be reconstructed');
+});
+
+test('localized safety summaries retain countdown values and unknown evidence', () => {
+  const t = (message: string, values?: Record<string, string | number>) =>
+    translate('zh-CN', federationMessages, message, values);
+  expect(deadlineRemaining(61000, 0, t)).toBe('剩余 1 分 1 秒');
+  expect(deadlineRemaining(1000, 1000, t)).toBe('已过期');
+  expect(deadlineRemaining(undefined, 0, t)).toBe('未报告');
+  expect(safeReturnSummary('SIGNED_CLEANUP', t)).toBe('接待方签名清理已确认；已授权在家乡恢复。');
+  expect(eventProgressSummary(71, 69, 'host', t)).toContain('还有 2 页事件等待确认');
+  expect(adminErrorSummary('FEDERATION_HTTP_503', t)).toBe('远程 HTTPS 服务返回 HTTP 503。');
+  expect(adminErrorSummary('HOST_CAPACITY_EXCEEDED', t)).toContain('可用访客名额');
+  expect(adminErrorSummary('Opaque evidence: town-id', t)).toBe('Opaque evidence: town-id');
+  expect(safeReturnSummary('UNRECOGNIZED_EVIDENCE', t)).toBe('UNRECOGNIZED_EVIDENCE');
 });

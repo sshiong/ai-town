@@ -1,4 +1,5 @@
 import React from 'react';
+import { LocaleProvider, useLocale } from './i18n';
 import ReactDOM from 'react-dom/client';
 const Home = React.lazy(() => import('./App.tsx'));
 import './index.css';
@@ -6,10 +7,23 @@ import 'uplot/dist/uPlot.min.css';
 import 'react-toastify/dist/ReactToastify.css';
 import ConvexClientProvider from './components/ConvexClientProvider.tsx';
 
+function LoadingTown() {
+  const { t } = useLocale();
+  return (
+    <p className="admin-panel font-body" role="status">
+      {t('Loading the town…')}
+    </p>
+  );
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <ConvexClientProvider>
-      <React.Suspense fallback={<p className="admin-panel font-body" role="status">Loading the town…</p>}><Home /></React.Suspense>
-    </ConvexClientProvider>
+    <LocaleProvider>
+      <ConvexClientProvider>
+        <React.Suspense fallback={<LoadingTown />}>
+          <Home />
+        </React.Suspense>
+      </ConvexClientProvider>
+    </LocaleProvider>
   </React.StrictMode>,
 );

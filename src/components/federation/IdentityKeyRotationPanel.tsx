@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import { makeFunctionReference } from 'convex/server';
@@ -49,6 +50,7 @@ export default function IdentityKeyRotationPanel({
   adminToken: string;
   peers: { townId: string; townName: string }[];
 }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const data = useQuery(statusRef, { adminToken });
@@ -68,30 +70,28 @@ export default function IdentityKeyRotationPanel({
   const run = (label: string, fn: () => Promise<unknown>, success: string) =>
     void task.run(label, fn, success);
   return (
-    <section aria-label="Town identity key rotation">
-      <h3>Town identity key rotation</h3>
+    <section aria-label={t("Town identity key rotation")}>
+      <h3>{t("Town identity key rotation")}</h3>
       <p>
-        Rotate this town’s signing key while keeping its town and resident identities. Every trusted
-        neighbor must prove the new key before activation. After activation, delivery continues
-        until each neighbor confirms.
+        {t("Rotate this town’s signing key while keeping its town and resident identities. Every trusted neighbor must prove the new key before activation. After activation, delivery continues until each neighbor confirms.")}
       </p>
       {data && (
         <p className="admin-muted">
-          Identity version {data.identityVersion}
+          {t("Identity version")} {data.identityVersion}
           <br />
-          Verified fingerprint: <code>{data.fingerprint}</code>
+          {t("Verified fingerprint:")} <code>{data.fingerprint}</code>
           <br />
-          Public signing key: <code>{data.publicKey}</code>
+          {t("Public signing key:")} <code>{data.publicKey}</code>
         </p>
       )}
       <div className="admin-inline-form">
-        <Field label="Identity operation operator">
+        <Field label={t("Identity operation operator")}>
           <input maxLength={100} value={operator} onChange={(e) => setOperator(e.target.value)} />
         </Field>
-        <Field label="Identity operation reason">
+        <Field label={t("Identity operation reason")}>
           <input maxLength={1000} value={reason} onChange={(e) => setReason(e.target.value)} />
         </Field>
-        <Field label="Preparation timeout (minutes)">
+        <Field label={t("Preparation timeout (minutes)")}>
           <input
             type="number"
             min={1}
@@ -102,24 +102,23 @@ export default function IdentityKeyRotationPanel({
         </Field>
       </div>
       <p className="admin-muted">
-        Operator names are administrator declarations recorded for audit, not independently verified
-        accounts.
+        {t("Operator names are administrator declarations recorded for audit, not independently verified accounts.")}
       </p>
       <AdminButton
         disabled={!canAct || !Number.isInteger(minutes) || minutes < 1 || minutes > 30}
         onClick={() =>
           run(
-            'Preparing identity key rotation',
+            t("Preparing identity key rotation"),
             () =>
               convex.action(actionRef('start'), { ...audit, prepareTimeoutMs: minutes * 60000 }),
-            'Preparation recorded. Review neighbor confirmations below.',
+            t("Preparation recorded. Review neighbor confirmations below."),
           )
         }
       >
-        Prepare new signing key
+        {t("Prepare new signing key")}
       </AdminButton>
       {!data?.rotations.length ? (
-        <EmptyState>No identity key operations recorded.</EmptyState>
+        <EmptyState>{t("No identity key operations recorded.")}</EmptyState>
       ) : (
         <ul className="admin-list">
           {data.rotations.map((rotation) => {
@@ -133,17 +132,17 @@ export default function IdentityKeyRotationPanel({
                   {rotation.state}
                   {rotation.state === 'COMMITTED'
                     ? confirmed
-                      ? ' · all neighbors confirmed'
-                      : ' · awaiting neighbor confirmation'
+                      ? t(" · all neighbors confirmed")
+                      : t(" · awaiting neighbor confirmation")
                     : ''}
                 </strong>
                 <code>{rotation.rotationId}</code>
-                <p className="admin-muted">Preparation expires: {formatTime(rotation.expiresAt)}</p>
+                <p className="admin-muted">{t("Preparation expires:")} {formatTime(rotation.expiresAt)}</p>
                 {exchanges.map((item) => (
                   <p key={`${item.peerTownId}:${item.direction}`} className="admin-muted">
                     {peers.find((peer) => peer.townId === item.peerTownId)?.townName ??
                       item.peerTownId}{' '}
-                    · {item.direction} · {item.state} · attempts {item.attempts}
+                    · {item.direction} · {item.state} {t("· attempts")} {item.attempts}
                     {item.lastError ? ` · ${item.lastError}` : ''}
                   </p>
                 ))}
@@ -153,17 +152,17 @@ export default function IdentityKeyRotationPanel({
                       disabled={!!task.pending}
                       onClick={() =>
                         run(
-                          'Retrying identity key delivery',
+                          t("Retrying identity key delivery"),
                           () =>
                             convex.action(actionRef('retry'), {
                               adminToken,
                               rotationId: rotation.rotationId,
                             }),
-                          'Delivery retried. Check each neighbor’s status.',
+                          t("Delivery retried. Check each neighbor’s status."),
                         )
                       }
                     >
-                      Retry key delivery
+                      {t("Retry key delivery")}
                     </AdminButton>
                   )}
                   {rotation.state === 'PREPARING' && (
@@ -172,17 +171,17 @@ export default function IdentityKeyRotationPanel({
                       disabled={!canAct}
                       onClick={() =>
                         run(
-                          'Cancelling key preparation',
+                          t("Cancelling key preparation"),
                           () =>
                             convex.mutation(mutationRef('abort'), {
                               ...audit,
                               rotationId: rotation.rotationId,
                             }),
-                          'Preparation cancelled before activation.',
+                          t("Preparation cancelled before activation."),
                         )
                       }
                     >
-                      Cancel preparation
+                      {t("Cancel preparation")}
                     </AdminButton>
                   )}
                   {rotation.state === 'RECOVERY' && (
@@ -190,18 +189,18 @@ export default function IdentityKeyRotationPanel({
                       disabled={!canAct || !finishReviewed}
                       onClick={() =>
                         run(
-                          'Finishing reviewed identity recovery',
+                          t("Finishing reviewed identity recovery"),
                           () =>
                             convex.mutation(mutationRef('finishRecovery'), {
                               ...audit,
                               rotationId: rotation.rotationId,
                               enableFederation,
                             }),
-                          'Recovery finalized with the selected federation admission setting.',
+                          t("Recovery finalized with the selected federation admission setting."),
                         )
                       }
                     >
-                      Finish reviewed recovery
+                      {t("Finish reviewed recovery")}
                     </AdminButton>
                   )}
                 </div>
@@ -211,10 +210,9 @@ export default function IdentityKeyRotationPanel({
         </ul>
       )}
       <details className="admin-disclosure">
-        <summary>Recover when the old signing key is unavailable</summary>
+        <summary>{t("Recover when the old signing key is unavailable")}</summary>
         <p>
-          This stops federation admission and requires independent neighbor review. End visits and
-          drain queued work first. Historical backups do not establish live trust.
+          {t("This stops federation admission and requires independent neighbor review. End visits and drain queued work first. Historical backups do not establish live trust.")}
         </p>
         <label className="admin-check">
           <input
@@ -222,24 +220,24 @@ export default function IdentityKeyRotationPanel({
             checked={oldKeyUnavailable}
             onChange={(e) => setOldKeyUnavailable(e.target.checked)}
           />{' '}
-          I confirmed that the old signing key is unavailable and reviewed this recovery.
+          {t("I confirmed that the old signing key is unavailable and reviewed this recovery.")}
         </label>
         <AdminButton
           danger
           disabled={!canAct || !oldKeyUnavailable}
           onClick={() =>
             run(
-              'Creating reviewed recovery identity',
+              t("Creating reviewed recovery identity"),
               () =>
                 convex.action(actionRef('recoverLocalIdentity'), {
                   ...audit,
                   oldKeyUnavailable: true,
                 }),
-              'Recovery key created. Share its fingerprint through an independent channel and complete neighbor review.',
+              t("Recovery key created. Share its fingerprint through an independent channel and complete neighbor review."),
             )
           }
         >
-          Create recovery signing key
+          {t("Create recovery signing key")}
         </AdminButton>
         <label className="admin-check">
           <input
@@ -247,7 +245,7 @@ export default function IdentityKeyRotationPanel({
             checked={finishReviewed}
             onChange={(e) => setFinishReviewed(e.target.checked)}
           />{' '}
-          I reviewed all neighbor identity confirmations before finishing recovery.
+          {t("I reviewed all neighbor identity confirmations before finishing recovery.")}
         </label>
         <label className="admin-check">
           <input
@@ -255,17 +253,16 @@ export default function IdentityKeyRotationPanel({
             checked={enableFederation}
             onChange={(e) => setEnableFederation(e.target.checked)}
           />{' '}
-          Enable federation admission when recovery finishes.
+          {t("Enable federation admission when recovery finishes.")}
         </label>
       </details>
       <details className="admin-disclosure">
-        <summary>Independently review a neighbor’s recovery key</summary>
+        <summary>{t("Independently review a neighbor’s recovery key")}</summary>
         <p>
-          Verify the claimed fingerprint through a separate channel before confirming. The server
-          also challenges the neighbor to prove it holds the new private key.
+          {t("Verify the claimed fingerprint through a separate channel before confirming. The server also challenges the neighbor to prove it holds the new private key.")}
         </p>
         <div className="admin-inline-form">
-          <Field label="Recovery neighbor">
+          <Field label={t("Recovery neighbor")}>
             <select
               value={peerTownId}
               onChange={(e) => {
@@ -273,7 +270,7 @@ export default function IdentityKeyRotationPanel({
                 setIndependentlyVerified(false);
               }}
             >
-              <option value="">Choose a neighbor</option>
+              <option value="">{t("Choose a neighbor")}</option>
               {peers.map((peer) => (
                 <option key={peer.townId} value={peer.townId}>
                   {peer.townName}
@@ -281,7 +278,7 @@ export default function IdentityKeyRotationPanel({
               ))}
             </select>
           </Field>
-          <Field label="Neighbor new public key">
+          <Field label={t("Neighbor new public key")}>
             <input
               value={publicKey}
               onChange={(e) => {
@@ -290,7 +287,7 @@ export default function IdentityKeyRotationPanel({
               }}
             />
           </Field>
-          <Field label="Neighbor identity version">
+          <Field label={t("Neighbor identity version")}>
             <input
               type="number"
               min={1}
@@ -301,7 +298,7 @@ export default function IdentityKeyRotationPanel({
               }}
             />
           </Field>
-          <Field label="Independently verified fingerprint">
+          <Field label={t("Independently verified fingerprint")}>
             <input
               value={independentFingerprint}
               onChange={(e) => {
@@ -317,7 +314,7 @@ export default function IdentityKeyRotationPanel({
             checked={independentlyVerified}
             onChange={(e) => setIndependentlyVerified(e.target.checked)}
           />{' '}
-          I verified this exact public key fingerprint through an independent channel.
+          {t("I verified this exact public key fingerprint through an independent channel.")}
         </label>
         <AdminButton
           danger
@@ -332,7 +329,7 @@ export default function IdentityKeyRotationPanel({
           }
           onClick={() =>
             run(
-              'Reviewing neighbor recovery key',
+              t("Reviewing neighbor recovery key"),
               () =>
                 convex.action(actionRef('reviewPeerIdentity'), {
                   ...audit,
@@ -342,11 +339,11 @@ export default function IdentityKeyRotationPanel({
                   independentFingerprint: independentFingerprint.trim(),
                   independentlyVerified: true,
                 }),
-              'Neighbor key challenge and independent review completed.',
+              t("Neighbor key challenge and independent review completed."),
             )
           }
         >
-          Confirm reviewed neighbor key
+          {t("Confirm reviewed neighbor key")}
         </AdminButton>
       </details>
       <TaskFeedback task={task} />

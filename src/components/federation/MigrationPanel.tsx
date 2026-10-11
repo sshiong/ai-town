@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import type { Handoff } from '../../../convex/federation/migration';
@@ -13,6 +14,7 @@ import {
 } from './AdminShared';
 
 export default function MigrationPanel({ adminToken }: { adminToken: string }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const status = useQuery(api.federation.admin.status, { adminToken });
@@ -30,35 +32,38 @@ export default function MigrationPanel({ adminToken }: { adminToken: string }) {
   async function readPacket(file: File, setPacket: (packet: unknown) => void) {
     setPacket(undefined);
     await task.run(
-      'Reading public migration proof',
+      t('Reading public migration proof'),
       async () => {
-        if (file.size > 64 * 1024) throw new Error('Migration proofs must be smaller than 64 KiB.');
+        if (file.size > 64 * 1024)
+          throw new Error(t('Migration proofs must be smaller than 64 KiB.'));
         const parsed: unknown = JSON.parse(await file.text());
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
-          throw new Error('Choose an exported migration proof JSON object.');
+          throw new Error(t('Choose an exported migration proof JSON object.'));
         setPacket(parsed);
       },
-      'Proof loaded. The server verifies its signature when submitted.',
+      t('Proof loaded. The server verifies its signature when submitted.'),
     );
   }
   return (
     <section className="admin-panel">
-      <h2>Move this town to another server</h2>
+      <h2>{t('Move this town to another server')}</h2>
       <p className="admin-muted">
-        Recover the same town identity and a consistent archive on the destination first. A signed
-        handoff transfers federation authority to its new deployment. Connected towns verify the
-        handoff and establish fresh credentials before travel resumes.
+        {t(
+          'Recover the same town identity and a consistent archive on the destination first. A signed handoff transfers federation authority to its new deployment. Connected towns verify the handoff and establish fresh credentials before travel resumes.',
+        )}
       </p>
       <TaskFeedback task={task} />
       {!local ? (
-        <EmptyState>Restore or initialize a town identity before preparing a move.</EmptyState>
+        <EmptyState>
+          {t('Restore or initialize a town identity before preparing a move.')}
+        </EmptyState>
       ) : (
         <>
-          <h3>1. Freeze the original town</h3>
+          <h3>{t('1. Freeze the original town')}</h3>
           <p className="admin-muted">
-            Freezing permanently closes federation authority on this deployment. Existing visits are
-            cleaned up; local simulation can continue. After cleanup, pause simulation and export
-            the consistent archive and encrypted identity package above.
+            {t(
+              'Freezing permanently closes federation authority on this deployment. Existing visits are cleaned up; local simulation can continue. After cleanup, pause simulation and export the consistent archive and encrypted identity package above.',
+            )}
           </p>
           <form
             className="admin-inline-form"
@@ -66,18 +71,20 @@ export default function MigrationPanel({ adminToken }: { adminToken: string }) {
               event.preventDefault();
               const fields = new FormData(event.currentTarget);
               void task.run(
-                'Freezing the original deployment',
+                t('Freezing the original deployment'),
                 async () => {
                   await convex.mutation(api.federation.migration.freezeSource, {
                     adminToken,
                     operator: String(fields.get('operator')).trim(),
                   });
                 },
-                'Source frozen. Repeat cleanup if visits remain, then pause simulation before signing the handoff.',
+                t(
+                  'Source frozen. Repeat cleanup if visits remain, then pause simulation before signing the handoff.',
+                ),
               );
             }}
           >
-            <Field label="Operator name" hint="Recorded with the signed handoff.">
+            <Field label={t('Operator name')} hint={t('Recorded with the signed handoff.')}>
               <input name="operator" required maxLength={100} />
             </Field>
             <AdminButton
@@ -86,14 +93,15 @@ export default function MigrationPanel({ adminToken }: { adminToken: string }) {
               disabled={!!task.pending || !['ACTIVE', 'MIGRATING_OUT'].includes(local.mode)}
             >
               {local.mode === 'MIGRATING_OUT'
-                ? 'Continue source cleanup'
-                : 'Freeze source authority'}
+                ? t('Continue source cleanup')
+                : t('Freeze source authority')}
             </AdminButton>
           </form>
-          <h3>2. Prepare the restored destination</h3>
+          <h3>{t('2. Prepare the restored destination')}</h3>
           <p className="admin-muted">
-            On the destination, finish restoring the encrypted identity and town archive, and
-            reconcile all restored travelers. Keep federation disabled while preparing this proof.
+            {t(
+              'On the destination, finish restoring the encrypted identity and town archive, and reconcile all restored travelers. Keep federation disabled while preparing this proof.',
+            )}
           </p>
           <form
             className="admin-inline-form"
@@ -102,7 +110,7 @@ export default function MigrationPanel({ adminToken }: { adminToken: string }) {
               event.preventDefault();
               const fields = new FormData(event.currentTarget);
               void task.run(
-                'Preparing the destination',
+                t('Preparing the destination'),
                 async () => {
                   const packet = await convex.action(api.federation.migration.prepareTarget, {
                     adminToken,
@@ -110,11 +118,11 @@ export default function MigrationPanel({ adminToken }: { adminToken: string }) {
                   });
                   downloadBundle(packet, 'ai-town-migration-target.json');
                 },
-                'Public destination proof downloaded. Load it on the frozen source town.',
+                t('Public destination proof downloaded. Load it on the frozen source town.'),
               );
             }}
           >
-            <Field label="Destination HTTPS endpoint">
+            <Field label={t('Destination HTTPS endpoint')}>
               <input
                 name="endpoint"
                 type="text"
@@ -131,11 +139,11 @@ export default function MigrationPanel({ adminToken }: { adminToken: string }) {
                 !['ACTIVE', 'NEEDS_RECONCILIATION', 'MIGRATING_IN'].includes(local.mode)
               }
             >
-              Download destination proof
+              {t('Download destination proof')}
             </AdminButton>
           </form>
-          <h3>3. Sign on the source; activate on the destination</h3>
-          <Field label="Destination proof (on the frozen source)">
+          <h3>{t('3. Sign on the source; activate on the destination')}</h3>
+          <Field label={t('Destination proof (on the frozen source)')}>
             <input
               type="file"
               accept=".json,application/json"
@@ -150,7 +158,7 @@ export default function MigrationPanel({ adminToken }: { adminToken: string }) {
             disabled={!!task.pending || !targetPacket || local.mode !== 'MIGRATING_OUT'}
             onClick={() =>
               void task.run(
-                'Signing the migration handoff',
+                t('Signing the migration handoff'),
                 async () => {
                   const packet = await convex.mutation(api.federation.migration.signHandoff, {
                     adminToken,
@@ -158,13 +166,13 @@ export default function MigrationPanel({ adminToken }: { adminToken: string }) {
                   });
                   downloadBundle(packet, 'ai-town-migration-handoff.json');
                 },
-                'Public signed handoff downloaded. Load it on the recovered destination.',
+                t('Public signed handoff downloaded. Load it on the recovered destination.'),
               )
             }
           >
-            Sign and download handoff
+            {t('Sign and download handoff')}
           </AdminButton>
-          <Field label="Signed handoff (on the destination)">
+          <Field label={t('Signed handoff (on the destination)')}>
             <input
               type="file"
               accept=".json,application/json"
@@ -181,56 +189,60 @@ export default function MigrationPanel({ adminToken }: { adminToken: string }) {
             }
             onClick={() =>
               void task.run(
-                'Verifying and activating the destination',
+                t('Verifying and activating the destination'),
                 async () => {
                   await convex.mutation(api.federation.migration.activateTarget, {
                     adminToken,
                     packet: handoff,
                   });
                 },
-                'Destination authority verified. Reconnect each trusted town, then run its independent reverse probe.',
+                t(
+                  'Destination authority verified. Reconnect each trusted town, then run its independent reverse probe.',
+                ),
               )
             }
           >
-            Verify handoff and activate destination
+            {t('Verify handoff and activate destination')}
           </AdminButton>
-          <h3>4. Reconnect trusted towns</h3>
+          <h3>{t('4. Reconnect trusted towns')}</h3>
           <ul className="admin-list">
             {status.peers
               .filter((p) => ['MIGRATION_PENDING', 'TRUSTED'].includes(p.trustState))
               .map((p) => (
                 <li key={p.townId}>
                   <strong>{p.townName}</strong>{' '}
-                  <span className="admin-badge">{p.channelState}</span>
+                  <span className="admin-badge">{t(p.channelState)}</span>
                   <AdminButton
                     disabled={!!task.pending || local.mode !== 'ACTIVE' || !isDestination}
                     onClick={() =>
                       void task.run(
-                        'Reconnecting the migrated town',
+                        t('Reconnecting the migrated town'),
                         async () => {
                           await convex.action(api.federation.migration.notifyPeer, {
                             adminToken,
                             peerTownId: p.townId,
                           });
                         },
-                        'Handoff verified and local probe completed. The other town must complete its own reverse probe.',
+                        t(
+                          'Handoff verified and local probe completed. The other town must complete its own reverse probe.',
+                        ),
                       )
                     }
                   >
-                    Verify migrated link
+                    {t('Verify migrated link')}
                   </AdminButton>
                 </li>
               ))}
           </ul>
           <details className="admin-disclosure">
-            <summary>Signed migration history</summary>
+            <summary>{t('Signed migration history')}</summary>
             {!history?.length ? (
-              <EmptyState>No signed handoffs recorded.</EmptyState>
+              <EmptyState>{t('No signed handoffs recorded.')}</EmptyState>
             ) : (
               <ul className="admin-list">
                 {history.map((record) => (
                   <li key={record._id}>
-                    <strong>{record.role}</strong>
+                    <strong>{t(record.role)}</strong>
                     <code>{record.handoffId}</code>
                     <p>{formatTime(record.acceptedAt)}</p>
                   </li>

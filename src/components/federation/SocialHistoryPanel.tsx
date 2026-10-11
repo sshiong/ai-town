@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useState } from 'react';
 import { ColdHistorySource } from './ColdHistorySource';
 import { useQuery } from 'convex/react';
@@ -46,19 +47,21 @@ function Pager({
   done: boolean;
   next: string | null;
 }) {
+  const { t } = useLocale();
   return (
     <div className="admin-toolbar">
       <AdminButton disabled={cursor === null} onClick={() => setCursor(null)}>
-        First page
+        {t("First page")}
       </AdminButton>
       <AdminButton disabled={done || !next} onClick={() => setCursor(next)}>
-        Older records
+        {t("Older records")}
       </AdminButton>
     </div>
   );
 }
 
 function RawSource({ owner, memory }: { owner: Owner; memory: Memory }) {
+  const { t } = useLocale();
   const [cursor, setCursor] = useState<string | null>(null);
   const [pageNumber, setPageNumber] = useState(
     memory.data.type === 'travel' ? (memory.data.transcriptPageNumber ?? 0) : 0,
@@ -77,14 +80,14 @@ function RawSource({ owner, memory }: { owner: Owner; memory: Memory }) {
   if (memory.data.type === 'conversation')
     return (
       <div>
-        <h4>Retained conversation messages</h4>
+        <h4>{t("Retained conversation messages")}</h4>
         <code>{memory.data.conversationId}</code>
         {conversation === undefined ? (
-          <p role="status">Loading source...</p>
+          <p role="status">{t("Loading source...")}</p>
         ) : (
           <>
             {conversation.status !== 'AVAILABLE' && (
-              <p className="admin-muted">Source: {conversation.status}</p>
+              <p className="admin-muted">{t("Source:")} {conversation.status}</p>
             )}
             <ul className="admin-list">
               {conversation.page.map((message) => (
@@ -93,7 +96,7 @@ function RawSource({ owner, memory }: { owner: Owner; memory: Memory }) {
                     <code>{message.messageId}</code>
                     <pre className="admin-report">{message.text}</pre>
                     <p className="admin-muted">
-                      Author presence {message.authorPlayerId} · {formatTime(message.occurredAt)}
+                      {t("Author presence")} {message.authorPlayerId} · {formatTime(message.occurredAt)}
                     </p>
                   </div>
                 </li>
@@ -111,18 +114,17 @@ function RawSource({ owner, memory }: { owner: Owner; memory: Memory }) {
     );
   return (
     <div>
-      <h4>Committed Home transcript</h4>
+      <h4>{t("Committed Home transcript")}</h4>
       {transcript === undefined ? (
-        <p role="status">Loading transcript...</p>
+        <p role="status">{t("Loading transcript...")}</p>
       ) : (
         <>
-          <p className="admin-muted">Source: {transcript.status}</p>
+          <p className="admin-muted">{t("Source:")} {transcript.status}</p>
           {transcript.transcript && (
             <>
               <code>{transcript.transcript.transcriptId}</code>
               <p className="admin-muted">
-                {transcript.transcript.state} · {transcript.transcript.receivedPageCount} received
-                pages · {transcript.transcript.totalMessageCount} committed messages · summary{' '}
+                {transcript.transcript.state} · {transcript.transcript.receivedPageCount} {t("received pages ·")} {transcript.transcript.totalMessageCount} {t("committed messages · summary")}{' '}
                 {transcript.transcript.summaryState}
               </p>
               <ul className="admin-list">
@@ -132,22 +134,22 @@ function RawSource({ owner, memory }: { owner: Owner; memory: Memory }) {
                       <strong>{p.name}</strong>
                       <code>{p.agentGlobalId}</code>
                       <p className="admin-muted">
-                        Home: {p.homeTownId} · presence: {p.playerId}
+                        {t("Home:")} {p.homeTownId} {t("· presence:")} {p.playerId}
                       </p>
                     </div>
                   </li>
                 ))}
               </ul>
               <p>
-                Page {pageNumber + 1} /{' '}
+                {t("Page")} {pageNumber + 1} /{' '}
                 {(transcript.transcript.finalPageNumber ??
                   transcript.transcript.highestPageNumber) + 1}
                 {transcript.transcript.finalPageNumber === undefined &&
-                  ' received so far (final page pending)'}
+                  t(" received so far (final page pending)")}
               </p>
               {transcript.status === 'MISSING_PAGE' && (
                 <p className="admin-error">
-                  This page has not been retained or received. Other pages remain accessible.
+                  {t("This page has not been retained or received. Other pages remain accessible.")}
                 </p>
               )}
               {transcript.page && (
@@ -178,7 +180,7 @@ function RawSource({ owner, memory }: { owner: Owner; memory: Memory }) {
                   disabled={pageNumber === 0}
                   onClick={() => setPageNumber(pageNumber - 1)}
                 >
-                  Previous page
+                  {t("Previous page")}
                 </AdminButton>
                 <AdminButton
                   disabled={
@@ -188,14 +190,14 @@ function RawSource({ owner, memory }: { owner: Owner; memory: Memory }) {
                   }
                   onClick={() => setPageNumber(pageNumber + 1)}
                 >
-                  Next page
+                  {t("Next page")}
                 </AdminButton>
               </div>
             </>
           )}
           {!transcript.transcript && memory.data.type === 'travel' && memory.data.messageText && (
             <>
-              <p>Retained committed message:</p>
+              <p>{t("Retained committed message:")}</p>
               <pre className="admin-report">{memory.data.messageText}</pre>
               <code>{memory.data.messageId}</code>
               <code>{memory.data.authorGlobalId}</code>
@@ -208,6 +210,7 @@ function RawSource({ owner, memory }: { owner: Owner; memory: Memory }) {
 }
 
 function Evidence({ owner, memory }: { owner: Owner; memory: Memory }) {
+  const { t } = useLocale();
   const [cursor, setCursor] = useState<string | null>(null);
   const result = useQuery(evidenceQuery, {
     ...owner,
@@ -219,16 +222,16 @@ function Evidence({ owner, memory }: { owner: Owner; memory: Memory }) {
     <>
       {memory.data.type === 'reflection' && (
         <p className="admin-muted">
-          This is a subjective reflection. The cited events below are its sources.
+          {t("This is a subjective reflection. The cited events below are its sources.")}
         </p>
       )}
       {result === undefined ? (
-        <p role="status">Loading citations...</p>
+        <p role="status">{t("Loading citations...")}</p>
       ) : (
         <>
           {result.status !== 'AVAILABLE' && <p className="admin-error">{result.status}</p>}
           {!result.page.length && result.status === 'AVAILABLE' && (
-            <p className="admin-muted">No cited memory IDs were recorded.</p>
+            <p className="admin-muted">{t("No cited memory IDs were recorded.")}</p>
           )}
           <ul className="admin-list">
             {result.page.map((source) => (
@@ -236,7 +239,7 @@ function Evidence({ owner, memory }: { owner: Owner; memory: Memory }) {
                 <div>
                   <code>{source.memoryId}</code>
                   {!source.memory ? (
-                    <p className="admin-error">Source: {source.status}</p>
+                    <p className="admin-error">{t("Source:")} {source.status}</p>
                   ) : (
                     <>
                       <p>{source.memory.description}</p>
@@ -268,16 +271,18 @@ function Evidence({ owner, memory }: { owner: Owner; memory: Memory }) {
 }
 
 function SourceDisclosure({ owner, memory }: { owner: Owner; memory: Memory }) {
+  const { t } = useLocale();
   const [open, setOpen] = useState(false);
   return (
     <details className="admin-disclosure" onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary>Evidence &amp; original messages</summary>
+      <summary>{t("Evidence & original messages")}</summary>
       {open && <Evidence owner={owner} memory={memory} />}
     </details>
   );
 }
 
 function ResidentHistory({ owner }: { owner: Owner }) {
+  const { t } = useLocale();
   const [relationshipCursor, setRelationshipCursor] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | null>(null);
   const [text, setText] = useState('');
@@ -298,16 +303,16 @@ function ResidentHistory({ owner }: { owner: Owner }) {
   });
   return (
     <>
-      <h3>Relationships from this resident's perspective</h3>
+      <h3>{t("Relationships from this resident's perspective")}</h3>
       <p className="admin-muted">
-        Edges preserve recorded encounters and citations. No affinity or trust score is inferred.
+        {t("Edges preserve recorded encounters and citations. No affinity or trust score is inferred.")}
       </p>
       {relationships === undefined ? (
-        <p role="status">Loading relationships...</p>
+        <p role="status">{t("Loading relationships...")}</p>
       ) : (
         <>
           {!relationships.page.length && (
-            <EmptyState>No relationship edges on this page.</EmptyState>
+            <EmptyState>{t("No relationship edges on this page.")}</EmptyState>
           )}
           <ul className="admin-list">
             {relationships.page.map((memory) => (
@@ -316,14 +321,14 @@ function ResidentHistory({ owner }: { owner: Owner }) {
                   {memory.data.type === 'relationship' && (
                     <>
                       <strong>
-                        {memory.data.agentGlobalId ?? `Local presence ${memory.data.playerId}`}
+                        {memory.data.agentGlobalId ?? t("Local presence {playerId}", { playerId: String(memory.data.playerId) })}
                       </strong>
                       <p className="admin-muted">
-                        Home: {memory.data.homeTownId ?? 'Not recorded'} · recorded encounters:{' '}
-                        {memory.data.encounterCount ?? 'Not recorded'}
+                        {t("Home:")} {memory.data.homeTownId ?? t("Not recorded")} {t("· recorded encounters:")}{' '}
+                        {memory.data.encounterCount ?? t("Not recorded")}
                       </p>
                       <p className="admin-muted">
-                        First: {formatTime(memory.data.firstMetAt)} · latest:{' '}
+                        {t("First:")} {formatTime(memory.data.firstMetAt)} {t("· latest:")}{' '}
                         {formatTime(memory.data.lastMetAt)}
                       </p>
                     </>
@@ -343,15 +348,14 @@ function ResidentHistory({ owner }: { owner: Owner }) {
           />
         </>
       )}
-      <h3>Canonical memory history</h3>
+      <h3>{t("Canonical memory history")}</h3>
       <p className="admin-muted">
-        Records with verified world ownership appear here. Legacy records without a world ID need
-        ownership repair before inspection.
+        {t("Records with verified world ownership appear here. Legacy records without a world ID need ownership repair before inspection.")}
       </p>
       <div className="admin-form">
         <Field
-          label="Find retained text"
-          hint="Search scans each page of world-scoped retained history; continue through older pages for earlier matches."
+          label={t("Find retained text")}
+          hint={t("Search scans each page of world-scoped retained history; continue through older pages for earlier matches.")}
         >
           <input
             value={text}
@@ -363,8 +367,8 @@ function ResidentHistory({ owner }: { owner: Owner }) {
           />
         </Field>
         <Field
-          label="Participant global ID"
-          hint="Use the exact global ID to distinguish residents who share a name."
+          label={t("Participant global ID")}
+          hint={t("Use the exact global ID to distinguish residents who share a name.")}
         >
           <input
             value={participant}
@@ -375,7 +379,7 @@ function ResidentHistory({ owner }: { owner: Owner }) {
             }}
           />
         </Field>
-        <Field label="Memory type">
+        <Field label={t("Memory type")}>
           <select
             value={kind}
             onChange={(event) => {
@@ -383,7 +387,7 @@ function ResidentHistory({ owner }: { owner: Owner }) {
               setKind(event.target.value as typeof kind);
             }}
           >
-            <option value="">All types</option>
+            <option value="">{t("All types")}</option>
             {['relationship', 'conversation', 'travel', 'reflection'].map((type) => (
               <option key={type}>{type}</option>
             ))}
@@ -391,13 +395,13 @@ function ResidentHistory({ owner }: { owner: Owner }) {
         </Field>
       </div>
       {history === undefined ? (
-        <p role="status">Loading retained history...</p>
+        <p role="status">{t("Loading retained history...")}</p>
       ) : (
         <>
           {!history.page.length && (
             <EmptyState>
-              No matches among the {history.scanned} records scanned on this page.
-              {!history.isDone && ' Older records remain.'}
+              {t("No matches among the")} {history.scanned} {t("records scanned on this page.")}
+              {!history.isDone && t(" Older records remain.")}
             </EmptyState>
           )}
           <ul className="admin-list">
@@ -407,9 +411,9 @@ function ResidentHistory({ owner }: { owner: Owner }) {
                   <strong>{memory.data.type}</strong>
                   <p>{memory.description}</p>
                   <p className="admin-muted">
-                    Recorded {formatTime(memory.recordedAt)}
+                    {t("Recorded")} {formatTime(memory.recordedAt)}
                     {memory.data.type === 'travel' &&
-                      ` · occurred ${formatTime(memory.data.occurredAt)} · at ${memory.data.hostTownId}`}
+                      t(" · occurred {time} · at {townId}", { time: formatTime(memory.data.occurredAt), townId: memory.data.hostTownId })}
                   </p>
                   <code>{memory.memoryId}</code>
                   <SourceDisclosure owner={owner} memory={memory} />
@@ -430,25 +434,25 @@ function ResidentHistory({ owner }: { owner: Owner }) {
 }
 
 export default function SocialHistoryPanel({ adminToken }: { adminToken: string }) {
+  const { t } = useLocale();
   const [selected, setSelected] = useState('');
   const residents = useQuery(api.federation.runtime.listResidents, { adminToken });
   const residentKey = (r: { worldId: Id<'worlds'>; playerId: string }) =>
     `${r.worldId}/${r.playerId}`;
   const resident = residents?.find((r) => residentKey(r) === selected) ?? residents?.[0];
   return (
-    <section className="admin-panel" aria-label="Relationships and retained history">
-      <h2>Relationships &amp; retained history</h2>
+    <section className="admin-panel" aria-label={t("Relationships and retained history")}>
+      <h2>{t("Relationships & retained history")}</h2>
       <p className="admin-muted">
-        Private Home records for the selected resident. Identity, evidence and original messages
-        stay linked across visits.
+        {t("Private Home records for the selected resident. Identity, evidence and original messages stay linked across visits.")}
       </p>
       {residents === undefined ? (
-        <p role="status">Loading residents...</p>
+        <p role="status">{t("Loading residents...")}</p>
       ) : !resident ? (
-        <EmptyState>Register resident identities to inspect their retained history.</EmptyState>
+        <EmptyState>{t("Register resident identities to inspect their retained history.")}</EmptyState>
       ) : (
         <>
-          <Field label="Resident">
+          <Field label={t("Resident")}>
             <select
               value={residentKey(resident)}
               onChange={(event) => setSelected(event.target.value)}
@@ -462,7 +466,7 @@ export default function SocialHistoryPanel({ adminToken }: { adminToken: string 
           </Field>
           <code>{resident.agentGlobalId}</code>
           <p className="admin-muted">
-            World {resident.worldId} · presence {resident.playerId}
+            {t("World")} {resident.worldId} {t("· presence")} {resident.playerId}
           </p>
           <ResidentHistory
             key={`${residentKey(resident)}/${resident.agentGlobalId}`}

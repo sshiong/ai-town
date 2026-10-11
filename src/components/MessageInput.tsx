@@ -1,3 +1,4 @@
+import { useLocale } from '../i18n';
 import clsx from 'clsx';
 import { useMutation, useQuery } from 'convex/react';
 import { KeyboardEvent, useRef, useState } from 'react';
@@ -18,6 +19,7 @@ export function MessageInput({
   humanPlayer: Player;
   conversation: Conversation;
 }) {
+  const { t } = useLocale();
   const descriptions = useQuery(api.world.gameDescriptions, { worldId });
   const humanName = descriptions?.playerDescriptions.find((p) => p.playerId === humanPlayer.id)
     ?.name;
@@ -85,7 +87,7 @@ export function MessageInput({
           contentEditable
           style={{ outline: 'none' }}
           tabIndex={0}
-          placeholder="Type here"
+          placeholder={t("Type here")}
           onKeyDown={(e) => onKeyDown(e)}
         />
       </div>

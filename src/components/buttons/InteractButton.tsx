@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import Button from './Button';
 import { toast } from 'react-toastify';
 import interactImg from '../../../assets/interact.svg';
@@ -11,6 +12,7 @@ import { waitForInput } from '../../hooks/sendInput';
 import { useServerGame } from '../../hooks/serverGame';
 
 export default function InteractButton() {
+  const { t } = useLocale();
   // const { isAuthenticated } = useConvexAuth();
   const worldStatus = useQuery(api.world.defaultWorldStatus);
   const worldId = worldStatus?.worldId;
@@ -69,7 +71,7 @@ export default function InteractButton() {
   // }
   return (
     <Button imgUrl={interactImg} onClick={joinOrLeaveGame}>
-      {isPlaying ? 'Leave' : 'Interact'}
+      {isPlaying ? t("Leave") : t("Interact")}
     </Button>
   );
 }

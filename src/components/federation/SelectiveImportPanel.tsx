@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useEffect, useRef, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import { makeFunctionReference } from 'convex/server';
@@ -74,7 +75,10 @@ const configurationChoices: { value: Options['configuration'][number]; label: st
   { value: 'federationResidentPolicy', label: 'Merge denied resident IDs (keep exact identities)' },
   { value: 'visitorPolicy', label: 'Visitor limits' },
   { value: 'mainChatProfile', label: 'Main Chat Profile (future residents)' },
-  { value: 'modelProviderQuotas', label: 'Provider daily request quotas (usage is not transferred)' },
+  {
+    value: 'modelProviderQuotas',
+    label: 'Provider daily request quotas (usage is not transferred)',
+  },
   { value: 'embeddingProfiles', label: 'Embedding drafts (no active space switch)' },
 ];
 
@@ -87,6 +91,7 @@ function decoded(encoded: unknown): Record<string, any> {
 }
 
 export default function SelectiveImportPanel({ adminToken }: { adminToken: string }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const jobs = useQuery(listJobs, { adminToken });
@@ -188,7 +193,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
       typeof value.signature !== 'string'
     )
       throw new Error(
-        'Choose a signed selective manifest. Full-town backups use the other import panel.',
+        t('Choose a signed selective manifest. Full-town backups use the other import panel.'),
       );
     setSigned(value);
     setOwners(
@@ -213,7 +218,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
     if (!signed) return;
     setInspected(false);
     if (files.length !== signed.manifest.chunks.length)
-      throw new Error('Select every chunk declared by this manifest, without duplicates.');
+      throw new Error(t('Select every chunk declared by this manifest, without duplicates.'));
     const seen = new Set<number>(),
       externalIds = new Set<string>(),
       worlds = new Set<string>();
@@ -221,7 +226,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
       referencedEdges = new Map<string, ExternalEdge>();
     const memoryOwners = new Map<string, string>();
     for (const [i, file] of files.entries()) {
-      setProgress(`Inspecting file ${i + 1} / ${files.length}`);
+      setProgress(t('Inspecting file {index} / {count}', { index: i + 1, count: files.length }));
       const chunk = JSON.parse(
         await readBackupText(file, 900_000, 'chunk', password),
       ) as LargeChunk;
@@ -232,7 +237,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
         !Array.isArray(chunk.rows) ||
         seen.has(chunk.index)
       )
-        throw new Error('A chunk is duplicated or belongs to another manifest.');
+        throw new Error(t('A chunk is duplicated or belongs to another manifest.'));
       seen.add(chunk.index);
       for (const encoded of chunk.rows) {
         const envelope = decoded(encoded) as ArchiveEnvelope;
@@ -240,7 +245,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
           if (envelope.table === 'memories') externalIds.add(envelope.sourceId);
           continue;
         }
-        if (envelope.kind !== 'record') throw new Error('Invalid selective archive record.');
+        if (envelope.kind !== 'record') throw new Error(t('Invalid selective archive record.'));
         const row = decoded(envelope.record);
         if (chunk.table === 'chatProfiles')
           discoveredProfiles.set(row._id, { sourceId: row._id, name: row.name, model: row.model });
@@ -271,11 +276,13 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
     setSourceWorlds([...worlds]);
     setInspected(true);
     setProgress(
-      'Local inspection complete. The server will verify the signature, all chunk checksums and the complete reference closure before preflight.',
+      t(
+        'Local inspection complete. The server will verify the signature, all chunk checksums and the complete reference closure before preflight.',
+      ),
     );
   }
   async function create() {
-    if (!signed || !mappingReady) throw new Error('Complete the explicit mappings first.');
+    if (!signed || !mappingReady) throw new Error(t('Complete the explicit mappings first.'));
     const result = await convex.action(action('createImport'), {
       adminToken,
       ...signed,
@@ -294,12 +301,12 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
     setJobId(result.jobId);
   }
   async function upload() {
-    if (!jobId || !files.length) throw new Error('Select the archive chunks to upload.');
+    if (!jobId || !files.length) throw new Error(t('Select the archive chunks to upload.'));
     stop.current = false;
     try {
       for (const [i, file] of files.entries()) {
         if (stop.current) break;
-        setProgress(`Uploading file ${i + 1} / ${files.length}`);
+        setProgress(t('Uploading file {index} / {count}', { index: i + 1, count: files.length }));
         const chunk = await readBackupText(file, 900_000, 'chunk', password);
         await convex.action(action('stageChunk'), { adminToken, jobId, chunk });
       }
@@ -319,16 +326,15 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
     setOwners(owners.map((o) => (o.sourceAgentGlobalId === sourceId ? { ...o, ...patch } : o)));
   }
   return (
-    <section aria-label="Selective data import">
-      <h3>Selective data import</h3>
+    <section aria-label={t('Selective data import')}>
+      <h3>{t('Selective data import')}</h3>
       <p className="admin-muted">
-        Pause all target worlds, drain queued work, end visits and disable federation. Clone
-        residents with new Home identities, merge selected history into proven local residents, or
-        restore residents at their original Home. Raw memories remain available while local vectors
-        rebuild.
+        {t(
+          'Pause all target worlds, drain queued work, end visits and disable federation. Clone residents with new Home identities, merge selected history into proven local residents, or restore residents at their original Home. Raw memories remain available while local vectors rebuild.',
+        )}
       </p>
       <TaskFeedback task={task} />
-      <Field label="Backup passphrase (encrypted manifest and chunks only)">
+      <Field label={t('Backup passphrase (encrypted manifest and chunks only)')}>
         <input
           type="password"
           autoComplete="off"
@@ -338,10 +344,11 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
         />
       </Field>
       <p className="admin-muted">
-        Decryption happens in this browser. The passphrase never goes to the server and is cleared
-        after uploading. Re-enter it when resuming encrypted uploads.
+        {t(
+          'Decryption happens in this browser. The passphrase never goes to the server and is cleared after uploading. Re-enter it when resuming encrypted uploads.',
+        )}
       </p>
-      <Field label="Signed selective manifest">
+      <Field label={t('Signed selective manifest')}>
         <input
           type="file"
           accept=".json,application/json"
@@ -353,44 +360,48 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
         disabled={!!task.pending || !manifestFile}
         onClick={() =>
           void task.run(
-            'Reading selective manifest',
+            t('Reading selective manifest'),
             loadManifest,
-            'Manifest loaded. Review the signed scope and choose its chunks.',
+            t('Manifest loaded. Review the signed scope and choose its chunks.'),
           )
         }
       >
-        Load manifest
+        {t('Load manifest')}
       </AdminButton>
       {signed && (
         <>
           <p>
-            Source: {signed.manifest.source.townName} · {signed.manifest.source.townId} · version{' '}
-            {signed.manifest.version}
+            {t('Source: ')}
+            {signed.manifest.source.townName} · {signed.manifest.source.townId}
+            {t(' · version')} {signed.manifest.version}
           </p>
           <p className="admin-muted">
-            Signed scope: {signed.manifest.scope} · {signed.manifest.selection.owners.length} owners
-            · {signed.manifest.selection.categories.join(', ')} · {signed.manifest.chunks.length}{' '}
-            chunks. Range:{' '}
+            {t('Signed scope: ')}
+            {t(signed.manifest.scope)} · {signed.manifest.selection.owners.length}
+            {t(' owners · ')}
+            {signed.manifest.selection.categories.map((category) => t(category)).join(', ')} ·{' '}
+            {signed.manifest.chunks.length} {t('chunks. Range:')}{' '}
             {signed.manifest.selection.from === null
-              ? 'start'
+              ? t('start')
               : new Date(signed.manifest.selection.from).toISOString()}{' '}
             —{' '}
             {signed.manifest.selection.to === null
-              ? 'end'
+              ? t('end')
               : new Date(signed.manifest.selection.to).toISOString()}{' '}
-            (exclusive).
+            {t('(exclusive).')}
           </p>
           {!transfer && (
             <p role="alert">
-              Version 1 is a read-only archive. Export a version 2 selective transfer from the
-              source before importing.
+              {t(
+                'Version 1 is a read-only archive. Export a version 2 selective transfer from the source before importing.',
+              )}
             </p>
           )}
         </>
       )}
       {(transfer || job?.phase === 'STAGING') && (
         <>
-          <Field label="All selective archive chunks">
+          <Field label={t('All selective archive chunks')}>
             <input
               type="file"
               multiple
@@ -407,13 +418,13 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
               disabled={!!task.pending || !files.length}
               onClick={() =>
                 void task.run(
-                  'Inspecting archive mappings',
+                  t('Inspecting archive mappings'),
                   inspectChunks,
-                  'Review the source profiles and external references below.',
+                  t('Review the source profiles and external references below.'),
                 )
               }
             >
-              Inspect chunks locally
+              {t('Inspect chunks locally')}
             </AdminButton>
           )}
         </>
@@ -421,7 +432,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
       {progress && <p role="status">{progress}</p>}
       {inspected && !jobId && (
         <>
-          <Field label="Import strategy">
+          <Field label={t('Import strategy')}>
             <select
               value={mode}
               disabled={!editable}
@@ -435,8 +446,8 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                 );
               }}
             >
-              <option value="merge">Clone / limited merge</option>
-              <option value="restore">Original Home restore</option>
+              <option value="merge">{t('Clone / limited merge')}</option>
+              <option value="restore">{t('Original Home restore')}</option>
             </select>
           </Field>
           {signed?.manifest.selection.owners.map((sourceOwner) => {
@@ -446,7 +457,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
             return (
               <fieldset key={sourceOwner.agentGlobalId}>
                 <legend>{sourceOwner.agentGlobalId}</legend>
-                <Field label="Owner operation">
+                <Field label={t('Owner operation')}>
                   <select
                     disabled={!editable}
                     value={mapping.operation}
@@ -458,16 +469,16 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                       })
                     }
                   >
-                    <option value="skip">Skip this owner</option>
+                    <option value="skip">{t('Skip this owner')}</option>
                     {mode === 'restore' ? (
-                      <option value="restore">Restore original Home resident</option>
+                      <option value="restore">{t('Restore original Home resident')}</option>
                     ) : (
                       <>
                         {residentScope && (
-                          <option value="clone">Clone as a new local resident</option>
+                          <option value="clone">{t('Clone as a new local resident')}</option>
                         )}
                         <option value="merge">
-                          Merge history; keep target personality and Chat binding
+                          {t('Merge history; keep target personality and Chat binding')}
                         </option>
                       </>
                     )}
@@ -475,7 +486,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                 </Field>
                 {mapping.operation !== 'skip' && (
                   <>
-                    <Field label="Target world">
+                    <Field label={t('Target world')}>
                       <select
                         disabled={!editable}
                         value={mapping.targetWorldId ?? ''}
@@ -486,19 +497,19 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                           })
                         }
                       >
-                        <option value="">Choose a stopped world</option>
+                        <option value="">{t('Choose a stopped world')}</option>
                         {targets
                           ?.filter((w) => w.status === 'stoppedByDeveloper')
                           .map((w) => (
                             <option value={w.worldId} key={w.worldId}>
-                              {w.isDefault ? 'Default · ' : ''}
+                              {w.isDefault ? t('Default · ') : ''}
                               {w.worldId}
                             </option>
                           ))}
                       </select>
                     </Field>
                     {mapping.operation !== 'clone' && (
-                      <Field label="Proven target Home resident">
+                      <Field label={t('Proven target Home resident')}>
                         <select
                           disabled={!editable}
                           value={mapping.targetAgentGlobalId ?? ''}
@@ -508,7 +519,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                             })
                           }
                         >
-                          <option value="">Choose a resident</option>
+                          <option value="">{t('Choose a resident')}</option>
                           {residents
                             ?.filter(
                               (r) =>
@@ -531,11 +542,11 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
           })}
           {!!profiles.length && (
             <fieldset>
-              <legend>Explicit source Chat Profile mappings</legend>
+              <legend>{t('Explicit source Chat Profile mappings')}</legend>
               <p className="admin-muted">
-                Clone and resident restore require a mapping. Drafts retain the source
-                provider/model and require a new local API-key environment variable; no source
-                credentials are copied. Limited merge keeps the target resident binding.
+                {t(
+                  'Clone and resident restore require a mapping. Drafts retain the source provider/model and require a new local API-key environment variable; no source credentials are copied. Limited merge keeps the target resident binding.',
+                )}
               </p>
               {profiles.map((p) => {
                 const mapping = profileMappings.find((m) => m.sourceId === p.sourceId)!;
@@ -560,12 +571,12 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                         )
                       }
                     >
-                      <option value="skip">Skip this profile</option>
-                      <option value="draft">Create a credential-missing draft</option>
+                      <option value="skip">{t('Skip this profile')}</option>
+                      <option value="draft">{t('Create a credential-missing draft')}</option>
                       {models?.chatProfiles.map((target) => (
                         <option value={target._id} key={target._id}>
                           {target.name} · {target.model}
-                          {target.credentialAvailable ? '' : ' · credentials missing'}
+                          {target.credentialAvailable ? '' : t(' · credentials missing')}
                         </option>
                       ))}
                     </select>
@@ -576,10 +587,11 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
           )}
           {!!activeEdges.length && (
             <fieldset>
-              <legend>External, skipped-owner or missing evidence</legend>
+              <legend>{t('External, skipped-owner or missing evidence')}</legend>
               <p className="admin-muted">
-                Every edge needs an explicit policy. Mapping is accepted only when the existing
-                target memory belongs to the mapped resident.
+                {t(
+                  'Every edge needs an explicit policy. Mapping is accepted only when the existing target memory belongs to the mapped resident.',
+                )}
               </p>
               {activeEdges.map((edge) => {
                 const mapping = edgeMappings.find((m) => edgeKey(m) === edgeKey(edge));
@@ -604,13 +616,13 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                           ])
                         }
                       >
-                        <option value="">Choose an edge policy</option>
-                        <option value="skip-edge">Skip this evidence edge</option>
-                        <option value="map">Map to an existing target memory</option>
+                        <option value="">{t('Choose an edge policy')}</option>
+                        <option value="skip-edge">{t('Skip this evidence edge')}</option>
+                        <option value="map">{t('Map to an existing target memory')}</option>
                       </select>
                     </Field>
                     {mapping?.operation === 'map' && (
-                      <Field label="Existing target memory ID">
+                      <Field label={t('Existing target memory ID')}>
                         <input
                           disabled={!editable}
                           value={mapping.targetId ?? ''}
@@ -636,7 +648,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
           )}
           {configScope && (
             <fieldset>
-              <legend>Configuration changes</legend>
+              <legend>{t('Configuration changes')}</legend>
               {configurationChoices.map((choice) => (
                 <label key={choice.value}>
                   <input
@@ -651,11 +663,14 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                       )
                     }
                   />{' '}
-                  {choice.label}
+                  {t(choice.label)}
                 </label>
               ))}
               {sourceWorlds.map((sourceId) => (
-                <Field key={sourceId} label={`Import map for source world ${sourceId}`}>
+                <Field
+                  key={sourceId}
+                  label={t('Import map for source world {sourceId}', { sourceId })}
+                >
                   <select
                     disabled={!editable}
                     value={worldMappings.find((w) => w.sourceId === sourceId)?.targetId ?? ''}
@@ -674,7 +689,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                       ])
                     }
                   >
-                    <option value="">Skip this map</option>
+                    <option value="">{t('Skip this map')}</option>
                     {targets
                       ?.filter((w) => w.status === 'stoppedByDeveloper')
                       .map((w) => (
@@ -695,12 +710,13 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                 checked={sourceStopped}
                 onChange={(e) => setSourceStopped(e.target.checked)}
               />{' '}
-              I confirm the source deployment has stopped. The server must also prove the same
-              original Home identity.
+              {t(
+                'I confirm the source deployment has stopped. The server must also prove the same original Home identity.',
+              )}
             </label>
           )}
           <div className="admin-toolbar">
-            <Field label="Operator">
+            <Field label={t('Operator')}>
               <input
                 disabled={!editable}
                 value={operator}
@@ -708,7 +724,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                 maxLength={200}
               />
             </Field>
-            <Field label="Import reason">
+            <Field label={t('Import reason')}>
               <input
                 disabled={!editable}
                 value={reason}
@@ -721,17 +737,17 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
             disabled={!editable || !mappingReady || !operator.trim() || !reason.trim()}
             onClick={() =>
               void task.run(
-                'Creating selective import',
+                t('Creating selective import'),
                 create,
-                'Mappings saved. Upload chunks, then run the server preflight.',
+                t('Mappings saved. Upload chunks, then run the server preflight.'),
               )
             }
           >
-            Save import plan
+            {t('Save import plan')}
           </AdminButton>
         </>
       )}
-      <Field label="Selective import task">
+      <Field label={t('Selective import task')}>
         <select
           disabled={!!task.pending}
           value={jobId ?? ''}
@@ -740,10 +756,10 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
             setReviewed(false);
           }}
         >
-          <option value="">New import / choose a task</option>
+          <option value="">{t('New import / choose a task')}</option>
           {jobs?.map((j) => (
             <option key={j.jobId} value={j.jobId}>
-              {j.selection.scope} · {j.state} · {j.jobId}
+              {t(j.selection.scope)} · {t(j.state)} · {j.jobId}
             </option>
           ))}
         </select>
@@ -751,32 +767,43 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
       {job && (
         <>
           <p role="status">
-            {job.state} · {job.phase} · {job.uploadedChunks} / {job.chunkCount} uploaded chunks ·{' '}
-            {job.recordCount} source records
+            {t(job.state)} · {t(job.phase)} · {job.uploadedChunks} / {job.chunkCount}
+            {t(' uploaded chunks ·')} {job.recordCount}
+            {t(' source records')}
           </p>
           {job.error && <p role="alert">{job.error}</p>}
           <details className="admin-disclosure">
-            <summary>Saved mapping plan</summary>
+            <summary>{t('Saved mapping plan')}</summary>
             <pre className="admin-report">{JSON.stringify(job.options, null, 2)}</pre>
           </details>
           <p className="admin-muted">
-            Source: {job.report.sourceTownId}. Raw bytes:{' '}
-            {job.report.rawBytesEstimate.toLocaleString()}; planned memories:{' '}
-            {job.report.plannedMemories}; estimated vector bytes:{' '}
-            {job.report.vectorStorageBytesEstimate?.toLocaleString() ?? 'no writable space'};
-            estimated embedding calls: {job.report.embeddingCallsEstimate ?? 'no writable space'}.
-            Estimates exclude database overhead.
+            {t('Source: ')}
+            {job.report.sourceTownId}
+            {t('. Raw bytes:')} {job.report.rawBytesEstimate.toLocaleString()}
+            {t('; planned memories:')} {job.report.plannedMemories}
+            {t('; estimated vector bytes:')}{' '}
+            {job.report.vectorStorageBytesEstimate?.toLocaleString() ?? t('no writable space')}
+            {t('; estimated embedding calls: ')}
+            {job.report.embeddingCallsEstimate ?? t('no writable space')}
+            {t('. Estimates exclude database overhead.')}
           </p>
           <p className="admin-muted">
-            Created: {job.report.created}; replaced: {job.report.replaced}; skipped:{' '}
-            {job.report.skipped}; skipped external edges: {job.report.externalEdgesSkipped}. Local
-            index: {job.report.indexState} {job.report.indexError ?? ''}
+            {t('Created: ')}
+            {job.report.created}
+            {t('; replaced: ')}
+            {job.report.replaced}
+            {t('; skipped:')} {job.report.skipped}
+            {t('; skipped external edges: ')}
+            {job.report.externalEdgesSkipped}
+            {t('. Local index: ')}
+            {t(job.report.indexState)} {job.report.indexError ?? ''}
           </p>
           {job.state === 'READY' && (
             <>
               <p>
-                Every source chunk and reference has passed preflight. The target rollback snapshot
-                is saved. Review the mappings before applying.
+                {t(
+                  'Every source chunk and reference has passed preflight. The target rollback snapshot is saved. Review the mappings before applying.',
+                )}
               </p>
               <label>
                 <input
@@ -784,8 +811,9 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                   checked={reviewed}
                   onChange={(e) => setReviewed(e.target.checked)}
                 />{' '}
-                I reviewed this saved plan and its target snapshot. Apply only these mapped owners
-                and configuration changes.
+                {t(
+                  'I reviewed this saved plan and its target snapshot. Apply only these mapped owners and configuration changes.',
+                )}
               </label>
             </>
           )}
@@ -796,13 +824,13 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
               }
               onClick={() =>
                 void task.run(
-                  'Uploading selective chunks',
+                  t('Uploading selective chunks'),
                   upload,
-                  'Upload checkpoint saved. Run preflight when every chunk is present.',
+                  t('Upload checkpoint saved. Run preflight when every chunk is present.'),
                 )
               }
             >
-              Upload selected chunks
+              {t('Upload selected chunks')}
             </AdminButton>
             <AdminButton
               disabled={
@@ -812,13 +840,13 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
               }
               onClick={() =>
                 void task.run(
-                  'Processing selective import pages',
+                  t('Processing selective import pages'),
                   run,
-                  'Processing stopped at a saved checkpoint. Review the task state.',
+                  t('Processing stopped at a saved checkpoint. Review the task state.'),
                 )
               }
             >
-              Continue pages / preflight
+              {t('Continue pages / preflight')}
             </AdminButton>
             {task.pending && (
               <AdminButton
@@ -826,7 +854,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                   stop.current = true;
                 }}
               >
-                Stop after this page
+                {t('Stop after this page')}
               </AdminButton>
             )}
             <AdminButton
@@ -834,7 +862,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
               disabled={!!task.pending || job.state !== 'READY' || !reviewed}
               onClick={() =>
                 void task.run(
-                  'Applying reviewed selective plan',
+                  t('Applying reviewed selective plan'),
                   async () => {
                     await convex.mutation(mutation('startApply'), {
                       adminToken,
@@ -845,39 +873,41 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
                     });
                     await run();
                   },
-                  'Application checkpoint saved. Review completion and local index status.',
+                  t('Application checkpoint saved. Review completion and local index status.'),
                 )
               }
             >
-              Apply reviewed plan
+              {t('Apply reviewed plan')}
             </AdminButton>
             <AdminButton
               disabled={!!task.pending || job.state !== 'FAILED'}
               onClick={() =>
                 void task.run(
-                  'Resuming selective import',
+                  t('Resuming selective import'),
                   () => convex.mutation(mutation('resume'), { adminToken, jobId }),
-                  'Ready to continue from the saved checkpoint.',
+                  t('Ready to continue from the saved checkpoint.'),
                 )
               }
             >
-              Resume failed task
+              {t('Resume failed task')}
             </AdminButton>
             <AdminButton
               danger
               disabled={!!task.pending || ['COMPLETE', 'CANCELLED'].includes(job.state)}
               onClick={() =>
                 void task.run(
-                  'Cancelling / rolling back selective import',
+                  t('Cancelling / rolling back selective import'),
                   async () => {
                     await convex.mutation(mutation('cancel'), { adminToken, jobId });
                     await run();
                   },
-                  'Cancellation checkpoint saved. Continue pages until CANCELLED to finish rollback.',
+                  t(
+                    'Cancellation checkpoint saved. Continue pages until CANCELLED to finish rollback.',
+                  ),
                 )
               }
             >
-              Cancel / roll back
+              {t('Cancel / roll back')}
             </AdminButton>
             <AdminButton
               disabled={
@@ -885,19 +915,19 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
               }
               onClick={() =>
                 void task.run(
-                  'Retrying local memory index',
+                  t('Retrying local memory index'),
                   () => convex.mutation(mutation('retryIndex'), { adminToken, jobId }),
-                  'Local index rebuild queued; raw imported text remains saved.',
+                  t('Local index rebuild queued; raw imported text remains saved.'),
                 )
               }
             >
-              Retry failed local index
+              {t('Retry failed local index')}
             </AdminButton>
           </div>
           <p className="admin-muted">
-            Active visits, pending Agent operations, queued conversations, memory jobs and leases
-            are never replayed. Travel policies and transport facts are stored as provenance
-            history; enabling federation remains a separate operation.
+            {t(
+              'Active visits, pending Agent operations, queued conversations, memory jobs and leases are never replayed. Travel policies and transport facts are stored as provenance history; enabling federation remains a separate operation.',
+            )}
           </p>
         </>
       )}

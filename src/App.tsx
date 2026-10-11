@@ -1,3 +1,4 @@
+import { LanguageSetting, useLocale } from './i18n';
 import Game from './components/Game.tsx';
 
 import { ToastContainer } from 'react-toastify';
@@ -19,49 +20,79 @@ import PoweredByConvex from './components/PoweredByConvex.tsx';
 import FederationManager from './components/federation/FederationManager.tsx';
 
 export default function Home() {
+  const { t } = useLocale();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpModalOpen, setHelpModalOpen] = useState(false);
   const [adminModalOpen, setAdminModalOpen] = useState(false);
   return (
     <main className="relative flex min-h-screen flex-col items-center justify-between font-body game-background">
       <PoweredByConvex />
+      <ReactModal
+        isOpen={settingsOpen}
+        onRequestClose={() => setSettingsOpen(false)}
+        contentLabel={t('Settings')}
+        className="federation-modal language-settings font-body"
+        overlayClassName="federation-overlay"
+        ariaHideApp={false}
+      >
+        <header className="admin-header">
+          <h1 className="font-display">{t('Settings')}</h1>
+          <button
+            type="button"
+            className="admin-close"
+            aria-label={t('Close settings')}
+            onClick={() => setSettingsOpen(false)}
+          >
+            ×
+          </button>
+        </header>
+        <section className="admin-panel">
+          <LanguageSetting />
+          <p className="admin-muted">
+            {t('Interface language does not change residents’ conversations or model settings.')}
+          </p>
+        </section>
+      </ReactModal>
       <FederationManager isOpen={adminModalOpen} onClose={() => setAdminModalOpen(false)} />
 
       <ReactModal
         isOpen={helpModalOpen}
         onRequestClose={() => setHelpModalOpen(false)}
         style={modalStyles}
-        contentLabel="Help modal"
+        contentLabel={t('Help modal')}
         ariaHideApp={false}
       >
         <div className="font-body">
-          <h1 className="text-center text-6xl font-bold font-display game-title">Help</h1>
+          <h1 className="text-center text-6xl font-bold font-display game-title">{t('Help')}</h1>
           <p>
-            Welcome to AI town. AI town supports both anonymous <i>spectators</i> and logged in{' '}
-            <i>interactivity</i>.
+            {t(
+              'Welcome to AI town. AI town supports both anonymous spectators and logged in interactivity.',
+            )}
           </p>
-          <h2 className="text-4xl mt-4">Spectating</h2>
+          <h2 className="text-4xl mt-4">{t('Spectating')}</h2>
           <p>
-            Click and drag to move around the town, and scroll in and out to zoom. You can click on
-            an individual character to view its chat history.
+            {t(
+              'Click and drag to move around the town, and scroll in and out to zoom. You can click on an individual character to view its chat history.',
+            )}
           </p>
-          <h2 className="text-4xl mt-4">Interactivity</h2>
+          <h2 className="text-4xl mt-4">{t('Interactivity')}</h2>
           <p>
-            If you log in, you can join the simulation and directly talk to different agents! After
-            logging in, click the "Interact" button, and your character will appear somewhere on the
-            map with a highlighted circle underneath you.
+            {t(
+              'If you log in, you can join the simulation and directly talk to different agents! After logging in, click the "Interact" button, and your character will appear somewhere on the map with a highlighted circle underneath you.',
+            )}
           </p>
-          <p className="text-2xl mt-2">Controls:</p>
-          <p className="mt-4">Click to navigate around.</p>
+          <p className="text-2xl mt-2">{t('Controls:')}</p>
+          <p className="mt-4">{t('Click to navigate around.')}</p>
           <p className="mt-4">
-            To talk to an agent, click on them and then click "Start conversation," which will ask
-            them to start walking towards you. Once they're nearby, the conversation will start, and
-            you can speak to each other. You can leave at any time by closing the conversation pane
-            or moving away. They may propose a conversation to you - you'll see a button to accept
-            in the messages panel.
+            {t(
+              'To talk to an agent, click on them and then click "Start conversation," which will ask them to start walking towards you. Once they\'re nearby, the conversation will start, and you can speak to each other. You can leave at any time by closing the conversation pane or moving away. They may propose a conversation to you - you\'ll see a button to accept in the messages panel.',
+            )}
           </p>
           <p className="mt-4">
-            AI town only supports {MAX_HUMAN_PLAYERS} humans at a time. If you're idle for five
-            minutes, you'll be automatically removed from the simulation.
+            {t(
+              "AI town only supports {count} humans at a time. If you're idle for five minutes, you'll be automatically removed from the simulation.",
+              { count: MAX_HUMAN_PLAYERS },
+            )}
           </p>
         </div>
       </ReactModal>
@@ -77,11 +108,11 @@ export default function Home() {
 
       <div className="w-full lg:h-screen min-h-screen relative isolate overflow-hidden lg:p-8 shadow-2xl flex flex-col justify-start">
         <h1 className="mx-auto text-4xl p-3 sm:text-8xl lg:text-9xl font-bold font-display leading-none tracking-wide game-title w-full text-left sm:text-center sm:w-auto">
-          AI Town
+          {t('AI Town')}
         </h1>
 
         <div className="max-w-xs md:max-w-xl lg:max-w-none mx-auto my-4 text-center text-base sm:text-xl md:text-2xl text-white leading-tight shadow-solid">
-          A virtual town where AI characters live, chat and socialize.
+          {t('A virtual town where AI characters live, chat and socialize.')}
           {/* <Unauthenticated>
             <div className="my-1.5 sm:my-0" />
             Log in to join the town
@@ -92,18 +123,29 @@ export default function Home() {
         <Game />
 
         <footer className="justify-end bottom-0 left-0 w-full flex items-center mt-4 gap-3 p-6 flex-wrap pointer-events-none">
-          <div className="flex gap-4 flex-grow pointer-events-none">
+          <div className="flex flex-wrap gap-4 flex-grow pointer-events-none">
+            <button
+              type="button"
+              className="button text-white shadow-solid text-xl pointer-events-auto"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <span className="bg-clay-700">{t('Settings')}</span>
+            </button>
             <FreezeButton />
             <MusicButton />
             <Button href="https://github.com/a16z-infra/ai-town" imgUrl={starImg}>
-              Star
+              {t('Star')}
             </Button>
             <InteractButton />
             <Button imgUrl={helpImg} onClick={() => setHelpModalOpen(true)}>
-              Help
+              {t('Help')}
             </Button>
-            <button type="button" className="button text-white shadow-solid text-xl pointer-events-auto" onClick={() => setAdminModalOpen(true)}>
-              <span className="bg-clay-700">Town admin</span>
+            <button
+              type="button"
+              className="button text-white shadow-solid text-xl pointer-events-auto"
+              onClick={() => setAdminModalOpen(true)}
+            >
+              <span className="bg-clay-700">{t('Town admin')}</span>
             </button>
           </div>
           <a href="https://a16z.com">
@@ -131,7 +173,9 @@ const modalStyles = {
     bottom: 'auto',
     marginRight: '-50%',
     transform: 'translate(-50%, -50%)',
-    maxWidth: '50%',
+    width: 'calc(100vw - 32px)',
+    maxWidth: '720px',
+    maxHeight: 'calc(100dvh - 32px)',
 
     border: '10px solid rgb(23, 20, 33)',
     borderRadius: '0',

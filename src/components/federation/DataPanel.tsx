@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useEffect, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import type { FunctionReturnType } from 'convex/server';
@@ -51,6 +52,7 @@ const modes: { value: ImportMode; label: string; description: string }[] = [
 ];
 
 export default function DataPanel({ adminToken }: { adminToken: string }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const world = useQuery(api.world.defaultWorldStatus);
@@ -86,7 +88,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
       (validBackupPassphrase(exportPassphrase) && exportPassphrase === exportConfirmation));
   function takeDownloadPassphrase() {
     if (!encryptDownloads) return undefined;
-    if (!canDownload) throw new Error('Enter and confirm a strong backup passphrase.');
+    if (!canDownload) throw new Error(t('Enter and confirm a strong backup passphrase.'));
     const secret = exportPassphrase;
     setExportPassphrase('');
     setExportConfirmation('');
@@ -106,7 +108,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
       await readBackupText(file, 5 * 1024 * 1024, 'snapshot', secret),
     );
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
-      throw new Error('Choose an exported AI Town JSON object.');
+      throw new Error(t('Choose an exported AI Town JSON object.'));
     setBundle(parsed);
     setFilename(file.name);
     setImportFile(undefined);
@@ -140,22 +142,23 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
   }
   return (
     <section className="admin-panel">
-      <h2>Data &amp; backups</h2>
+      <h2>{t('Data & backups')}</h2>
       <p className="admin-muted">
-        Back up readable memory, relationships, resident bindings and world data. Model keys,
-        pairing secrets, private identity keys and live visit authorizations are excluded.
+        {t(
+          'Back up readable memory, relationships, resident bindings and world data. Model keys, pairing secrets, private identity keys and live visit authorizations are excluded.',
+        )}
       </p>
       <TaskFeedback task={task} />
-      <h3>Export</h3>
+      <h3>{t('Export')}</h3>
       <div className="admin-form">
-        <Field label="Export operator">
+        <Field label={t('Export operator')}>
           <input
             value={exportOperator}
             onChange={(e) => setExportOperator(e.target.value)}
             maxLength={200}
           />
         </Field>
-        <Field label="Export reason">
+        <Field label={t('Export reason')}>
           <input
             value={exportReason}
             onChange={(e) => setExportReason(e.target.value)}
@@ -164,9 +167,9 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
         </Field>
       </div>
       <p className="admin-muted">
-        Successful snapshot generation records your declared operator, reason, scope and archive
-        digest. The shared admin token authenticates access; the operator label is not a verified
-        account identity.
+        {t(
+          'Successful snapshot generation records your declared operator, reason, scope and archive digest. The shared admin token authenticates access; the operator label is not a verified account identity.',
+        )}
       </p>
       <label className="admin-check">
         <input
@@ -179,13 +182,15 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
             setExportConfirmation('');
           }}
         />{' '}
-        Encrypt downloaded town and resident snapshots in this browser
+        {t('Encrypt downloaded town and resident snapshots in this browser')}
       </label>
       {encryptDownloads && (
         <div className="admin-form">
           <Field
-            label="Snapshot passphrase"
-            hint="Use a unique strong passphrase (at least 12 characters, up to 1024 UTF-8 bytes). Keep it separately; lost passphrases cannot be recovered."
+            label={t('Snapshot passphrase')}
+            hint={t(
+              'Use a unique strong passphrase (at least 12 characters, up to 1024 UTF-8 bytes). Keep it separately; lost passphrases cannot be recovered.',
+            )}
           >
             <input
               type="password"
@@ -196,7 +201,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               onChange={(event) => setExportPassphrase(event.target.value)}
             />
           </Field>
-          <Field label="Confirm snapshot passphrase">
+          <Field label={t('Confirm snapshot passphrase')}>
             <input
               type="password"
               autoComplete="new-password"
@@ -209,16 +214,16 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
         </div>
       )}
       <p className="admin-muted">
-        Optional AES-256-GCM encryption protects downloaded private memories. The passphrase stays
-        in browser memory and is cleared after each operation. The server still receives ordinary
-        archive data for export and import validation; this option protects saved files.
+        {t(
+          'Optional AES-256-GCM encryption protects downloaded private memories. The passphrase stays in browser memory and is cleared after each operation. The server still receives ordinary archive data for export and import validation; this option protects saved files.',
+        )}
       </p>
       <div className="admin-toolbar">
         <AdminButton
           disabled={!!task.pending || !canDownload}
           onClick={() =>
             void task.run(
-              'Exporting town snapshot',
+              t('Exporting town snapshot'),
               async () => {
                 const secret = takeDownloadPassphrase();
                 await saveSnapshot(
@@ -231,16 +236,18 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                   secret,
                 );
               },
-              'Town snapshot downloaded. Store it securely; resident memories may contain private information.',
+              t(
+                'Town snapshot downloaded. Store it securely; resident memories may contain private information.',
+              ),
             )
           }
         >
-          Download full town
+          {t('Download full town')}
         </AdminButton>
       </div>
       {!residents?.length ? (
         <EmptyState>
-          Register residents in Travel to export an individual resident's story and memory.
+          {t("Register residents in Travel to export an individual resident's story and memory.")}
         </EmptyState>
       ) : (
         <form
@@ -251,7 +258,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
             const resident = residents.find((r) => r.agentGlobalId === fields.get('resident'));
             if (!resident) return;
             void task.run(
-              'Exporting resident',
+              t('Exporting resident'),
               async () => {
                 const secret = takeDownloadPassphrase();
                 await saveSnapshot(
@@ -266,11 +273,11 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                   secret,
                 );
               },
-              'Resident snapshot downloaded.',
+              t('Resident snapshot downloaded.'),
             );
           }}
         >
-          <Field label="Resident">
+          <Field label={t('Resident')}>
             <select name="resident">
               {residents.map((r) => (
                 <option key={r.agentGlobalId} value={r.agentGlobalId}>
@@ -280,35 +287,37 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
             </select>
           </Field>
           <AdminButton type="submit" disabled={!!task.pending || !canDownload}>
-            Download resident
+            {t('Download resident')}
           </AdminButton>
         </form>
       )}
       <p className="admin-muted">
-        The single-file export has a 5 MiB / 500-record limit. For larger towns, use chunked
-        archives below. Private identity recovery uses a separate encrypted package.
+        {t(
+          'The single-file export has a 5 MiB / 500-record limit. For larger towns, use chunked archives below. Private identity recovery uses a separate encrypted package.',
+        )}
       </p>
       <SelectiveExportPanel adminToken={adminToken} />
       <SelectiveImportPanel adminToken={adminToken} />
-      <h3>Import &amp; recovery</h3>
+      <h3>{t('Import & recovery')}</h3>
       {mode !== 'clone' && (
         <>
           <p className="admin-muted">
-            End active visits, then pause the target simulation before preflight or import. The
-            server refuses to pause while visit cleanup is incomplete. Resume after recovery.
+            {t(
+              'End active visits, then pause the target simulation before preflight or import. The server refuses to pause while visit cleanup is incomplete. Resume after recovery.',
+            )}
           </p>
           <div className="admin-toolbar">
             <AdminButton
               disabled={!!task.pending || !world || world.status === 'stoppedByDeveloper'}
               onClick={() =>
                 void task.run(
-                  'Pausing target simulation',
+                  t('Pausing target simulation'),
                   () => convex.mutation(api.testing.stop, { adminToken }),
-                  'Target paused. Run preflight before importing.',
+                  t('Target paused. Run preflight before importing.'),
                 )
               }
             >
-              Pause target for import
+              {t('Pause target for import')}
             </AdminButton>
             <AdminButton
               disabled={
@@ -320,18 +329,23 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               }
               onClick={() =>
                 void task.run(
-                  'Resuming target simulation',
+                  t('Resuming target simulation'),
                   () => convex.mutation(api.testing.resume, { adminToken }),
-                  'Target simulation resumed.',
+                  t('Target simulation resumed.'),
                 )
               }
             >
-              Resume target simulation
+              {t('Resume target simulation')}
             </AdminButton>
-            <p className="admin-muted">World state: {world?.status ?? 'No default world'}</p>
+            <p className="admin-muted">
+              {t('World state: ')}
+              {world?.status ? t(world.status) : t('No default world')}
+            </p>
             {pendingWorldRecovery && (
               <p className="admin-warning">
-                Reconcile this world’s restored travelers below before resuming the simulation.
+                {t(
+                  'Reconcile this world’s restored travelers below before resuming the simulation.',
+                )}
               </p>
             )}
           </div>
@@ -339,8 +353,10 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
       )}
       <div className="admin-form">
         <Field
-          label="Backup JSON file"
-          hint="Choose a plain or browser-encrypted snapshot (up to 5 MiB before encryption, 500 records). For encrypted files, enter the passphrase below and retry loading. The server validates the decrypted archive."
+          label={t('Backup JSON file')}
+          hint={t(
+            'Choose a plain or browser-encrypted snapshot (up to 5 MiB before encryption, 500 records). For encrypted files, enter the passphrase below and retry loading. The server validates the decrypted archive.',
+          )}
         >
           <input
             type="file"
@@ -355,16 +371,18 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               setImportFile(file);
               if (!file) return;
               void task.run(
-                'Reading backup',
+                t('Reading backup'),
                 () => loadBackup(file),
-                'File loaded. Run preflight to review its scope and conflicts.',
+                t('File loaded. Run preflight to review its scope and conflicts.'),
               );
             }}
           />
         </Field>
         <Field
-          label="Encrypted snapshot passphrase"
-          hint="Only needed for encrypted files. Decryption happens in this browser before server preflight."
+          label={t('Encrypted snapshot passphrase')}
+          hint={t(
+            'Only needed for encrypted files. Decryption happens in this browser before server preflight.',
+          )}
         >
           <input
             type="password"
@@ -375,7 +393,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
             onChange={(event) => setImportPassphrase(event.target.value)}
           />
         </Field>
-        <Field label="Import mode">
+        <Field label={t('Import mode')}>
           <select
             value={mode}
             disabled={!!task.pending}
@@ -387,7 +405,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
           >
             {modes.map((item) => (
               <option key={item.value} value={item.value}>
-                {item.label}
+                {t(item.label)}
               </option>
             ))}
           </select>
@@ -399,28 +417,34 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
             disabled={!!task.pending}
             onClick={() =>
               void task.run(
-                'Reading backup',
+                t('Reading backup'),
                 () => loadBackup(importFile),
-                'File loaded. Run preflight to review its scope and conflicts.',
+                t('File loaded. Run preflight to review its scope and conflicts.'),
               )
             }
           >
-            Load selected backup
+            {t('Load selected backup')}
           </AdminButton>
         </div>
       )}
-      <p className="admin-muted">{modes.find((item) => item.value === mode)?.description}</p>
+      <p className="admin-muted">
+        {t(modes.find((item) => item.value === mode)?.description ?? '')}
+      </p>
       {(mode === 'merge' || mode === 'restore') && (
         <p>
-          Target world: <code>{world?.worldId ?? 'No default world exists'}</code>
+          {t('Target world: ')}
+          <code>{world?.worldId ?? t('No default world exists')}</code>
         </p>
       )}
       {(mode === 'restore' || mode === 'migrate') && (
         <p className="admin-warning">
-          The active target is backed up before import. Restore and migration require matching
-          long-term identity. Do not activate two deployments with the same private key.
+          {t(
+            'The active target is backed up before import. Restore and migration require matching long-term identity. Do not activate two deployments with the same private key.',
+          )}
           {encryptDownloads &&
-            ' Enter the snapshot passphrase again above to encrypt the before-import safety download.'}
+            t(
+              ' Enter the snapshot passphrase again above to encrypt the before-import safety download.',
+            )}
         </p>
       )}
       {requiresStoppedSource(mode) && (
@@ -434,20 +458,24 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               invalidate();
             }}
           />{' '}
-          I have stopped the source deployment and prevented it from issuing new visit
-          authorizations. Only this target will run the restored identity.
+          {t(
+            'I have stopped the source deployment and prevented it from issuing new visit authorizations. Only this target will run the restored identity.',
+          )}
         </label>
       )}
       {mode === 'clone' && status?.identity && (
         <p className="admin-error">
-          This town already has an identity. Use a fresh deployment to create a new town from the
-          backup.
+          {t(
+            'This town already has an identity. Use a fresh deployment to create a new town from the backup.',
+          )}
         </p>
       )}
       {mode === 'clone' && (
         <Field
-          label="New town's HTTPS endpoint"
-          hint="Use this new deployment's HTTP actions endpoint, not the source town's address."
+          label={t("New town's HTTPS endpoint")}
+          hint={t(
+            "Use this new deployment's HTTP actions endpoint, not the source town's address.",
+          )}
         >
           <input
             type="url"
@@ -462,7 +490,12 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
           />
         </Field>
       )}
-      {filename && <p className="admin-muted">Selected: {filename}</p>}
+      {filename && (
+        <p className="admin-muted">
+          {t('Selected: ')}
+          {filename}
+        </p>
+      )}
       <div className="admin-toolbar">
         <AdminButton
           disabled={
@@ -475,26 +508,34 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
           }
           onClick={() =>
             void task.run(
-              'Validating backup and conflicts',
+              t('Validating backup and conflicts'),
               async () => {
                 setReport(undefined);
                 setResult(undefined);
                 setAcknowledged(false);
                 setReport(await convex.action(api.federation.backup.preflight, args));
               },
-              'Preflight complete. Review the report before importing.',
+              t('Preflight complete. Review the report before importing.'),
             )
           }
         >
-          Run preflight
+          {t('Run preflight')}
         </AdminButton>
       </div>
       {report && (
         <>
           <div className="admin-warning">
-            <strong>Preflight: {report.valid ? 'VALID' : 'BLOCKED'}</strong>
+            <strong>
+              {t('Preflight: ')}
+              {report.valid ? t('VALID') : t('BLOCKED')}
+            </strong>
             <p>
-              Mode: {report.mode} · scope: {report.scope} · vectors: {report.vectorPolicy}
+              {t('Mode: ')}
+              {t(report.mode)}
+              {t(' · scope: ')}
+              {t(report.scope)}
+              {t(' · vectors: ')}
+              {t(report.vectorPolicy)}
             </p>
             {report.warnings.map((warning, i) => (
               <p key={i}>{warning}</p>
@@ -503,32 +544,39 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
             {report.residentRestorePlan && (
               <>
                 <p>
-                  Restore resident: <code>{report.residentRestorePlan.agentGlobalId}</code>
+                  {t('Restore resident: ')}
+                  <code>{report.residentRestorePlan.agentGlobalId}</code>
                 </p>
                 <p>
-                  Fixed Chat model: {report.residentRestorePlan.model.model} · credential:{' '}
+                  {t('Fixed Chat model: ')}
+                  {report.residentRestorePlan.model.model}
+                  {t(' · credential:')}{' '}
                   {report.residentRestorePlan.model.credentialConfigured
-                    ? 'configured'
-                    : 'requires configuration'}
+                    ? t('configured')
+                    : t('requires configuration')}
                 </p>
                 <p>
-                  Archived memories: {report.residentRestorePlan.memoryCount}. Newer memories and
-                  other residents are retained. The server stores a target snapshot before applying
-                  the restore.
+                  {t('Archived memories: ')}
+                  {report.residentRestorePlan.memoryCount}
+                  {t(
+                    '. Newer memories and other residents are retained. The server stores a target snapshot before applying the restore.',
+                  )}
                 </p>
                 <p>
-                  Target confirmation: <code>{report.residentRestorePlan.targetDigest}</code>
+                  {t('Target confirmation: ')}
+                  <code>{report.residentRestorePlan.targetDigest}</code>
                 </p>
               </>
             )}
           </div>
           <p className="admin-muted">
-            Vectors require rebuilding in the target's verified space. Imported travel is
-            historical; no visitor lease or remote task is reactivated.
+            {t(
+              "Vectors require rebuilding in the target's verified space. Imported travel is historical; no visitor lease or remote task is reactivated.",
+            )}
           </p>
           {report.residentRestorePlan && (
             <div className="admin-form">
-              <Field label="Restore operator">
+              <Field label={t('Restore operator')}>
                 <input
                   value={operator}
                   maxLength={120}
@@ -539,7 +587,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                   }}
                 />
               </Field>
-              <Field label="Restore reason">
+              <Field label={t('Restore reason')}>
                 <input
                   value={reason}
                   maxLength={1000}
@@ -560,8 +608,10 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               onChange={(event) => setAcknowledged(event.target.checked)}
             />{' '}
             {report.residentRestorePlan
-              ? 'I reviewed this target snapshot and authorize overwriting this resident’s archived records, persona and fixed Chat binding.'
-              : 'I reviewed the scope, identity requirements and conflict warnings.'}
+              ? t(
+                  'I reviewed this target snapshot and authorize overwriting this resident’s archived records, persona and fixed Chat binding.',
+                )
+              : t('I reviewed the scope, identity requirements and conflict warnings.')}
           </label>
           <div className="admin-toolbar">
             <AdminButton
@@ -580,7 +630,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               }
               onClick={() =>
                 void task.run(
-                  'Importing validated backup',
+                  t('Importing validated backup'),
                   async () => {
                     if ((mode === 'restore' || mode === 'migrate') && !report.residentRestorePlan) {
                       const secret = takeDownloadPassphrase();
@@ -596,40 +646,44 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                     }
                     setResult(await convex.action(api.federation.backup.importBackup, args));
                   },
-                  'Data import completed. Review the mapping and rebuild memory vectors before activation.',
+                  t(
+                    'Data import completed. Review the mapping and rebuild memory vectors before activation.',
+                  ),
                 )
               }
             >
-              Import validated package
+              {t('Import validated package')}
             </AdminButton>
           </div>
         </>
       )}
       {result && (
         <div>
-          <h3>Import result</h3>
+          <h3>{t('Import result')}</h3>
           <pre className="admin-report">{JSON.stringify(result, null, 2)}</pre>
           <p className="admin-muted">
-            Use Models &amp; memory to rebuild and validate the target index. Missing API keys must
-            be configured on the server; bindings are not silently reassigned.
+            {t(
+              'Use Models & memory to rebuild and validate the target index. Missing API keys must be configured on the server; bindings are not silently reassigned.',
+            )}
           </p>
         </div>
       )}
       <RecoveryPanel adminToken={adminToken} />
       <details className="admin-disclosure">
-        <summary>Import history</summary>
+        <summary>{t('Import history')}</summary>
         {!history?.length ? (
-          <EmptyState>No import operations recorded.</EmptyState>
+          <EmptyState>{t('No import operations recorded.')}</EmptyState>
         ) : (
           <ul className="admin-list">
             {history.map((item) => (
               <li key={item._id}>
                 <div>
-                  <strong>{item.mode}</strong>
+                  <strong>{t(item.mode)}</strong>
                   <code>{item.sourceTownId}</code>
                   <p className="admin-muted">
-                    Backup created: {formatTime(item.exportedAt)} · imported:{' '}
-                    {formatTime(item.importedAt)}
+                    {t('Backup created: ')}
+                    {formatTime(item.exportedAt)}
+                    {t(' · imported:')} {formatTime(item.importedAt)}
                   </p>
                 </div>
               </li>

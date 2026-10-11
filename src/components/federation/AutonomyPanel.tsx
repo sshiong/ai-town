@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import { makeFunctionReference, type FunctionArgs, type FunctionReturnType } from 'convex/server';
@@ -16,6 +17,7 @@ const configureRef = makeFunctionReference<'mutation',
   FunctionReturnType<typeof api.federation.autonomy.configure>>('federation/autonomy:configure');
 
 export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const [selected, setSelected] = useState('');
@@ -31,21 +33,19 @@ export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
   const peers =
     status?.peers.filter((p) => p.trustState === 'TRUSTED' && p.outboundVisitsAllowed) ?? [];
   return (
-    <section className="admin-panel" aria-label="Autonomous travel">
-      <h2>Autonomous travel</h2>
+    <section className="admin-panel" aria-label={t("Autonomous travel")}>
+      <h2>{t("Autonomous travel")}</h2>
       <p className="admin-muted">
-        Off by default. Authorize each resident explicitly: their existing idle decision process can
-        choose a trusted destination or stay, using their personality, memories and fixed model.
-        Current conversations finish before considering travel.
+        {t("Off by default. Authorize each resident explicitly: their existing idle decision process can choose a trusted destination or stay, using their personality, memories and fixed model. Current conversations finish before considering travel.")}
       </p>
       <TaskFeedback task={task} />
       {!data || !residents ? (
-        <p role="status">Loading travel authorizations…</p>
+        <p role="status">{t("Loading travel authorizations…")}</p>
       ) : !resident ? (
-        <EmptyState>Register resident identities before authorizing autonomous travel.</EmptyState>
+        <EmptyState>{t("Register resident identities before authorizing autonomous travel.")}</EmptyState>
       ) : (
         <>
-          <Field label="Resident authorization">
+          <Field label={t("Resident authorization")}>
             <select value={resident.agentGlobalId} onChange={(e) => setSelected(e.target.value)}>
               {residents.map((r) => (
                 <option key={r.agentGlobalId} value={r.agentGlobalId}>
@@ -55,8 +55,8 @@ export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
             </select>
           </Field>
           <p className="admin-muted">
-            Current authorization: {policy?.enabled ? 'Enabled' : 'Disabled'}
-            {policy?.enabled && ` · next eligible decision ${formatTime(policy.nextDecisionAt)}`}.
+            {t("Current authorization:")} {policy?.enabled ? t("Enabled") : t("Disabled")}
+            {policy?.enabled && t(" · next eligible decision {time}", { time: formatTime(policy.nextDecisionAt) })}.
           </p>
           <form
             className="admin-form"
@@ -65,7 +65,7 @@ export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
               event.preventDefault();
               const values = new FormData(event.currentTarget);
               void task.run(
-                'Saving autonomous travel authorization',
+                t("Saving autonomous travel authorization"),
                 () =>
                   convex.mutation(configureRef, {
                     adminToken,
@@ -78,22 +78,22 @@ export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
                     operator: String(values.get('operator') ?? ''),
                     reason: String(values.get('reason') ?? ''),
                   }),
-                'Authorization saved. Only an actual model choice can request a visit; readiness and quotas are checked again when it commits.',
+                t("Authorization saved. Only an actual model choice can request a visit; readiness and quotas are checked again when it commits."),
               );
             }}
           >
             <label className="admin-check">
               <input type="checkbox" name="enabled" defaultChecked={policy?.enabled ?? false} />
-              Allow this resident to consider autonomous travel
+              {t("Allow this resident to consider autonomous travel")}
             </label>
             <label className="admin-check">
               <input type="checkbox" name="allowQueue" defaultChecked={policy?.allowQueue ?? false} disabled={!!task.pending} />
-              Allow this resident to wait for admission during autonomous travel
+              {t("Allow this resident to wait for admission during autonomous travel")}
             </label>
             <fieldset>
-              <legend>Authorized destinations</legend>
+              <legend>{t("Authorized destinations")}</legend>
               {!peers.length && (
-                <p className="admin-muted">No trusted peer allows outgoing visits.</p>
+                <p className="admin-muted">{t("No trusted peer allows outgoing visits.")}</p>
               )}
               {peers.map((p) => (
                 <label className="admin-check" key={p.townId}>
@@ -107,7 +107,7 @@ export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
                 </label>
               ))}
             </fieldset>
-            <Field label="Minimum decision interval (minutes)">
+            <Field label={t("Minimum decision interval (minutes)")}>
               <input
                 type="number"
                 name="interval"
@@ -118,7 +118,7 @@ export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
                 defaultValue={(policy?.decisionIntervalMs ?? 900000) / 60000}
               />
             </Field>
-            <Field label="Maximum visit requests in the last 24 hours">
+            <Field label={t("Maximum visit requests in the last 24 hours")}>
               <input
                 type="number"
                 name="limit"
@@ -130,27 +130,23 @@ export default function AutonomyPanel({ adminToken }: { adminToken: string }) {
               />
             </Field>
             <p className="admin-muted">
-              The request quota includes manual requests and refused requests. Offline or revoked
-              destinations are never selected. Waiting consumes the existing travel authorization
-              and does not trigger another model decision. Saving an authorization change cancels
-              autonomous requests that have not departed, including waiting requests. Manual
-              requests and visits already underway retain their normal return path.
+              {t("The request quota includes manual requests and refused requests. Offline or revoked destinations are never selected. Waiting consumes the existing travel authorization and does not trigger another model decision. Saving an authorization change cancels autonomous requests that have not departed, including waiting requests. Manual requests and visits already underway retain their normal return path.")}
             </p>
-            <Field label="Operator">
+            <Field label={t("Operator")}>
               <input name="operator" maxLength={120} required />
             </Field>
-            <Field label="Authorization reason">
+            <Field label={t("Authorization reason")}>
               <textarea name="reason" maxLength={1000} required />
             </Field>
             <AdminButton type="submit" disabled={!!task.pending}>
-              Save resident authorization
+              {t("Save resident authorization")}
             </AdminButton>
           </form>
         </>
       )}
       {!!data?.decisions.length && (
         <>
-          <h3>Model travel decisions</h3>
+          <h3>{t("Model travel decisions")}</h3>
           <ul className="admin-list">
             {data.decisions.map((d) => (
               <li key={d._id}>

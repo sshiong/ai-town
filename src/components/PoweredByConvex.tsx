@@ -1,11 +1,13 @@
+import { useLocale } from '../i18n';
 import bannerBg from '../../assets/convex-bg.webp';
 export default function PoweredByConvex() {
+  const { t } = useLocale();
   return (
     <a
       href="https://convex.dev/c/ai-town"
       target="_blank"
       className="group absolute top-0 left-0 w-64 h-64 md:block z-10 hidden shape-top-left-corner overflow-hidden"
-      aria-label="Powered by Convex"
+      aria-label={t("Powered by Convex")}
     >
       <img
         src={bannerBg}
@@ -18,8 +20,7 @@ export default function PoweredByConvex() {
       <div className="absolute inset-0 flex p-6">
         <div className="flex flex-col gap-1 items-center">
           <span className="font-system font-medium uppercase tracking-wider text-stone-600">
-            Powered by
-          </span>
+            {t("Powered by")}</span>
           <svg
             width="126"
             height="20"

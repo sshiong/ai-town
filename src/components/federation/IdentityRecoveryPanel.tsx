@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import { readArchiveJson, validRecoveryPassphrase } from './archiveFiles';
@@ -12,6 +13,7 @@ import {
 } from './AdminShared';
 
 export default function IdentityRecoveryPanel({ adminToken }: { adminToken: string }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const status = useQuery(api.federation.admin.status, { adminToken });
@@ -28,24 +30,24 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
   const [result, setResult] = useState<unknown>();
   const emptyTarget = status?.identity === null && world === null;
   return (
-    <section aria-label="Encrypted identity disaster recovery">
-      <h3>Encrypted identity disaster recovery</h3>
+    <section aria-label={t('Encrypted identity disaster recovery')}>
+      <h3>{t('Encrypted identity disaster recovery')}</h3>
       <p className="admin-warning">
-        This separate package contains the town's long-term private identity. Restoring it while the
-        old source still runs can create two deployments with the same identity. Stop the source
-        before restoration and keep the encrypted file and its passphrase separately.
+        {t(
+          "This separate package contains the town's long-term private identity. Restoring it while the old source still runs can create two deployments with the same identity. Stop the source before restoration and keep the encrypted file and its passphrase separately.",
+        )}
       </p>
       <p className="admin-muted">
-        Ordinary town archives never contain this private key. Peer credentials and model API keys
-        are not restored by this workflow. Passphrases stay in this form only and are cleared after
-        each request; they are not saved in browser storage.
+        {t(
+          'Ordinary town archives never contain this private key. Peer credentials and model API keys are not restored by this workflow. Passphrases stay in this form only and are cleared after each request; they are not saved in browser storage.',
+        )}
       </p>
       <TaskFeedback task={task} />
       <details className="admin-disclosure">
-        <summary>Export encrypted identity package</summary>
+        <summary>{t('Export encrypted identity package')}</summary>
         {!status?.identity && (
           <p className="admin-muted">
-            Initialize the town identity before exporting its recovery package.
+            {t('Initialize the town identity before exporting its recovery package.')}
           </p>
         )}
         <form
@@ -53,11 +55,14 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
           onSubmit={(event) => {
             event.preventDefault();
             void task.run(
-              'Encrypting identity recovery package',
+              t('Encrypting identity recovery package'),
               async () => {
                 if (!validRecoveryPassphrase(passphrase))
-                  throw new Error('Use at least 12 characters and no more than 1024 UTF-8 bytes.');
-                if (passphrase !== confirmation) throw new Error('The passphrases do not match.');
+                  throw new Error(
+                    t('Use at least 12 characters and no more than 1024 UTF-8 bytes.'),
+                  );
+                if (passphrase !== confirmation)
+                  throw new Error(t('The passphrases do not match.'));
                 const secret = passphrase;
                 setPassphrase('');
                 setConfirmation('');
@@ -69,13 +74,17 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
                   `ai-town-identity-encrypted-${Date.now()}.json`,
                 );
               },
-              'Encrypted identity package downloaded. Preserve it separately from the ordinary archive and keep its passphrase offline.',
+              t(
+                'Encrypted identity package downloaded. Preserve it separately from the ordinary archive and keep its passphrase offline.',
+              ),
             );
           }}
         >
           <Field
-            label="Identity backup passphrase"
-            hint="Use at least 12 characters, up to 1024 UTF-8 bytes. Losing it makes this package unrecoverable."
+            label={t('Identity backup passphrase')}
+            hint={t(
+              'Use at least 12 characters, up to 1024 UTF-8 bytes. Losing it makes this package unrecoverable.',
+            )}
           >
             <input
               type="password"
@@ -88,7 +97,7 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
               onChange={(event) => setPassphrase(event.target.value)}
             />
           </Field>
-          <Field label="Confirm identity backup passphrase">
+          <Field label={t('Confirm identity backup passphrase')}>
             <input
               type="password"
               minLength={12}
@@ -110,17 +119,18 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
                 passphrase !== confirmation
               }
             >
-              Download encrypted identity
+              {t('Download encrypted identity')}
             </AdminButton>
           </div>
         </form>
       </details>
       <details className="admin-disclosure">
-        <summary>Restore identity on an empty deployment</summary>
+        <summary>{t('Restore identity on an empty deployment')}</summary>
         {!emptyTarget && (
           <p className="admin-warning">
-            Identity restoration requires an empty deployment with no identity or world. This server
-            already has town data, or its state has not finished loading.
+            {t(
+              'Identity restoration requires an empty deployment with no identity or world. This server already has town data, or its state has not finished loading.',
+            )}
           </p>
         )}
         <form
@@ -128,10 +138,12 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
           onSubmit={(event) => {
             event.preventDefault();
             void task.run(
-              'Decrypting and verifying identity recovery package',
+              t('Decrypting and verifying identity recovery package'),
               async () => {
                 if (!validRecoveryPassphrase(restorePassphrase))
-                  throw new Error('Use at least 12 characters and no more than 1024 UTF-8 bytes.');
+                  throw new Error(
+                    t('Use at least 12 characters and no more than 1024 UTF-8 bytes.'),
+                  );
                 const secret = restorePassphrase;
                 setRestorePassphrase('');
                 setResult(
@@ -147,13 +159,17 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
                 setSourceStopped(false);
                 setCloneRiskAccepted(false);
               },
-              'Identity restored in MIGRATING_IN mode. Import the ordinary town archive, then complete the signed source-to-destination handoff in Identity migration. Admission settings cannot activate this deployment; peers receive fresh credentials after the verified handoff.',
+              t(
+                'Identity restored in MIGRATING_IN mode. Import the ordinary town archive, then complete the signed source-to-destination handoff in Identity migration. Admission settings cannot activate this deployment; peers receive fresh credentials after the verified handoff.',
+              ),
             );
           }}
         >
           <Field
-            label="Encrypted identity JSON file"
-            hint="Select an encrypted identity package up to 64 KiB. Loading it does not verify or decrypt its contents."
+            label={t('Encrypted identity JSON file')}
+            hint={t(
+              'Select an encrypted identity package up to 64 KiB. Loading it does not verify or decrypt its contents.',
+            )}
           >
             <input
               type="file"
@@ -169,18 +185,20 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
                 setCloneRiskAccepted(false);
                 if (!file) return;
                 void task.run(
-                  'Reading encrypted identity package',
+                  t('Reading encrypted identity package'),
                   async () => {
                     const value = await readArchiveJson(file, 64 * 1024);
                     setEncryptedPackage(value);
                     setFilename(file.name);
                   },
-                  'File loaded as unverified ciphertext. Only the server can decrypt and authenticate it with the correct passphrase.',
+                  t(
+                    'File loaded as unverified ciphertext. Only the server can decrypt and authenticate it with the correct passphrase.',
+                  ),
                 );
               }}
             />
           </Field>
-          <Field label="Identity recovery passphrase">
+          <Field label={t('Identity recovery passphrase')}>
             <input
               type="password"
               minLength={12}
@@ -192,7 +210,7 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
               onChange={(event) => setRestorePassphrase(event.target.value)}
             />
           </Field>
-          <Field label="Recovered deployment's HTTPS endpoint">
+          <Field label={t("Recovered deployment's HTTPS endpoint")}>
             <input
               type="url"
               required
@@ -204,7 +222,11 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
           </Field>
           <div className="admin-form-actions">
             {filename && (
-              <p className="admin-muted">Selected: {filename} · UNVERIFIED CIPHERTEXT</p>
+              <p className="admin-muted">
+                {t('Selected: ')}
+                {filename}
+                {t(' · UNVERIFIED CIPHERTEXT')}
+              </p>
             )}
             <label className="admin-check">
               <input
@@ -213,7 +235,7 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
                 disabled={!!task.pending}
                 onChange={(event) => setSourceStopped(event.target.checked)}
               />{' '}
-              The old source deployment is stopped and cannot issue or renew authorizations.
+              {t('The old source deployment is stopped and cannot issue or renew authorizations.')}
             </label>
             <label className="admin-check">
               <input
@@ -222,8 +244,9 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
                 disabled={!!task.pending}
                 onChange={(event) => setCloneRiskAccepted(event.target.checked)}
               />{' '}
-              I understand that restoring this identity to another active deployment can create a
-              clone conflict.
+              {t(
+                'I understand that restoring this identity to another active deployment can create a clone conflict.',
+              )}
             </label>
             <AdminButton
               type="submit"
@@ -238,30 +261,34 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
                 !cloneRiskAccepted
               }
             >
-              Decrypt &amp; restore identity
+              {t('Decrypt & restore identity')}
             </AdminButton>
           </div>
         </form>
         {result !== undefined && (
           <>
-            <h3>Verified server recovery result</h3>
+            <h3>{t('Verified server recovery result')}</h3>
             <pre className="admin-report">{JSON.stringify(result, null, 2)}</pre>
           </>
         )}
       </details>
       <details className="admin-disclosure">
-        <summary>Identity recovery audit history</summary>
+        <summary>{t('Identity recovery audit history')}</summary>
         {!history?.length ? (
-          <p className="admin-muted">No identity export or restoration operations recorded.</p>
+          <p className="admin-muted">
+            {t('No identity export or restoration operations recorded.')}
+          </p>
         ) : (
           <ul className="admin-list">
             {history.map((item) => (
               <li key={item._id}>
                 <div>
-                  <strong>{item.operation}</strong>
+                  <strong>{t(item.operation)}</strong>
                   <code>{item.townId}</code>
                   <p className="admin-muted">
-                    {formatTime(item.createdAt)} · source epoch {item.sourceDeploymentEpoch}
+                    {formatTime(item.createdAt)}
+                    {t(' · source epoch ')}
+                    {item.sourceDeploymentEpoch}
                   </p>
                 </div>
               </li>

@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useState } from 'react';
 import { ColdHistoryFileTransfer } from './ColdHistoryFileTransfer';
 import { ColdHistoryJob } from './ColdHistoryJob';
@@ -17,6 +18,7 @@ export function ColdHistorySource({
   owner: { adminToken: string; worldId: Id<'worlds'>; playerId: string; agentGlobalId?: string };
   memoryId: Id<'memories'>;
 }) {
+  const { t } = useLocale();
   const args = { ...owner, memoryId };
   const status = useQuery(discover, args),
     publish = useAction(archive),
@@ -25,36 +27,42 @@ export function ColdHistorySource({
   const [page, setPage] = useState<FunctionReturnType<ColdApi['read']>>();
   async function show(offset: number) {
     await task.run(
-      'Reading verified archive',
+      t('Reading verified archive'),
       async () => {
         setPage(await load({ ...args, offset, numItems: 12 }));
       },
-      'Archive verified and read.',
+      t('Archive verified and read.'),
     );
   }
   return (
-    <section className="admin-section" aria-label="Cold history source">
-      <h4>Private history archive</h4>
+    <section className="admin-section" aria-label={t('Cold history source')}>
+      <h4>{t('Private history archive')}</h4>
       <p className="admin-muted">
-        A signed copy in private file storage. Original hot messages, memories and citations stay
-        available.
+        {t(
+          'A signed copy in private file storage. Original hot messages, memories and citations stay available.',
+        )}
       </p>
       {status === undefined ? (
-        <p role="status">Checking archive…</p>
+        <p role="status">{t('Checking archive…')}</p>
       ) : status?.state === 'UNAVAILABLE' ? (
         <p className="admin-muted">
-          Archive requires a completed conversation and, for travel, a completed Home summary.
+          {t(
+            'Archive requires a completed conversation and, for travel, a completed Home summary.',
+          )}
         </p>
       ) : (
         <>
           {status?.state === 'VERIFIED' ? (
             <>
               <p>
-                Verified archive · {status.count} messages · {status.bytes} bytes ·{' '}
-                {formatTime(status.verifiedAt)}
+                {t('Verified archive · ')}
+                {status.count}
+                {t(' messages · ')}
+                {status.bytes}
+                {t(' bytes ·')} {formatTime(status.verifiedAt)}
               </p>
               <AdminButton disabled={!!task.pending} onClick={() => void show(0)}>
-                Read original messages from archive
+                {t('Read original messages from archive')}
               </AdminButton>
             </>
           ) : status?.jobId ? (
@@ -64,15 +72,17 @@ export function ColdHistorySource({
               disabled={!!task.pending}
               onClick={() =>
                 void task.run(
-                  'Verifying private archive',
+                  t('Verifying private archive'),
                   () => publish(args),
-                  'Archive request saved. Review verification status below; hot records retained.',
+                  t(
+                    'Archive request saved. Review verification status below; hot records retained.',
+                  ),
                 )
               }
             >
               {status?.state === 'PENDING'
-                ? 'Retry archive verification'
-                : 'Create verified private archive'}
+                ? t('Retry archive verification')
+                : t('Create verified private archive')}
             </AdminButton>
           )}
         </>
@@ -90,7 +100,8 @@ export function ColdHistorySource({
       {page && (
         <>
           <p className="admin-muted">
-            Reading from private file storage · source town {page.sourceTownId}
+            {t('Reading from private file storage · source town ')}
+            {page.sourceTownId}
           </p>
           <ul className="admin-list">
             {page.page.map((m) => (
@@ -102,7 +113,10 @@ export function ColdHistorySource({
                     {m.authorGlobalId ?? m.authorPlayerId} · {formatTime(m.occurredAt)}
                   </p>
                   {'targetAuthor' in m && (
-                    <p className="admin-muted">Restored author: {m.targetAuthor}</p>
+                    <p className="admin-muted">
+                      {t('Restored author: ')}
+                      {m.targetAuthor}
+                    </p>
                   )}
                 </div>
               </li>
@@ -110,13 +124,13 @@ export function ColdHistorySource({
           </ul>
           <div className="admin-toolbar">
             <AdminButton disabled={!!task.pending} onClick={() => void show(0)}>
-              First archive page
+              {t('First archive page')}
             </AdminButton>
             <AdminButton
               disabled={page.isDone || !!task.pending}
               onClick={() => void show(page.nextOffset)}
             >
-              Next archive page
+              {t('Next archive page')}
             </AdminButton>
           </div>
         </>

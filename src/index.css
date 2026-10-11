@@ -256,3 +256,12 @@ p[contenteditable='true']:empty::before {
 .travel-notice { position: absolute; bottom: 12px; left: 12px; max-width: calc(100% - 24px); background: #23263a; border: 3px solid #171421; color: #ffe2a2; font-size: 12px; padding: 10px 12px; pointer-events: none; }
 @media (max-width: 640px) { .federation-overlay { padding: 8px; } .federation-modal { max-height: calc(100dvh - 16px); border-width: 4px; } .admin-header, .admin-panel { padding: 18px 16px; } .admin-form, .admin-residents { grid-template-columns: 1fr; } .admin-facts { grid-template-columns: 1fr; gap: 6px; } .admin-facts dd { margin-bottom: 10px; } .admin-tabs { padding: 8px; } .admin-tabs button { font-size: 12px; padding: 10px; } .admin-list > li { flex-direction: column; } }
 @media (prefers-reduced-motion: reduce) { .game-progress-bar-progress { animation: none; } }
+
+/* Chinese glyphs use locally available fonts; pixel assets and Latin fonts remain intact. */
+:lang(zh-CN) .font-body {
+  font-family: 'VCR OSD Mono', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+:lang(zh-CN) .font-display {
+  font-family: 'Upheaval Pro', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+.language-settings { max-width: 36rem; }

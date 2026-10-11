@@ -1,3 +1,4 @@
+import { useLocale } from '../i18n';
 import clsx from 'clsx';
 import { Doc, Id } from '../../convex/_generated/dataModel';
 import { useQuery } from 'convex/react';
@@ -24,6 +25,7 @@ export function Messages({
   humanPlayer?: Player;
   scrollViewRef: React.RefObject<HTMLDivElement>;
 }) {
+  const { t } = useLocale();
   const humanPlayerId = humanPlayer?.id;
   const descriptions = useQuery(api.world.gameDescriptions, { worldId });
   const messages = useQuery(api.messages.listMessages, {
@@ -99,7 +101,7 @@ export function Messages({
         membershipNodes.push({
           node: (
             <div key={`joined-${playerId}`} className="leading-tight mb-6">
-              <p className="text-brown-700 text-center">{playerName} joined the conversation.</p>
+              <p className="text-brown-700 text-center">{t("{name} joined the conversation.", { name: playerName ?? "" })}</p>
             </div>
           ),
           time: started,
@@ -114,7 +116,7 @@ export function Messages({
       membershipNodes.push({
         node: (
           <div key={`joined-${playerId}`} className="leading-tight mb-6">
-            <p className="text-brown-700 text-center">{playerName} joined the conversation.</p>
+            <p className="text-brown-700 text-center">{t("{name} joined the conversation.", { name: playerName ?? "" })}</p>
           </div>
         ),
         time: started,
@@ -123,7 +125,7 @@ export function Messages({
       membershipNodes.push({
         node: (
           <div key={`left-${playerId}`} className="leading-tight mb-6">
-            <p className="text-brown-700 text-center">{playerName} left the conversation.</p>
+            <p className="text-brown-700 text-center">{t("{name} left the conversation.", { name: playerName ?? "" })}</p>
           </div>
         ),
         // Always sort all "left" messages after the last message.
@@ -148,7 +150,7 @@ export function Messages({
             </div>
             <div className={clsx('bubble')}>
               <p className="bg-white -mx-3 -my-1">
-                <i>typing...</i>
+                <i>{t("typing...")}</i>
               </p>
             </div>
           </div>

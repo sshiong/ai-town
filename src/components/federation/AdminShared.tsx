@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useRef, useState, type ReactNode, type MouseEventHandler } from 'react';
 import { useConvexConnectionState } from 'convex/react';
 import { adminErrorSummary } from './uiPolicy';
@@ -51,11 +52,12 @@ export function EmptyState({ children }: { children: ReactNode }) {
 }
 
 export function useAdminTask() {
+  const { t } = useLocale();
   const [pending, setPending] = useState<string>();
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
   const busy = useRef(false);
-  async function run(label: string, work: () => Promise<unknown>, success = 'Saved.') {
+  async function run(label: string, work: () => Promise<unknown>, success = t('Saved.')) {
     if (busy.current) return;
     busy.current = true;
     setPending(label);
@@ -65,7 +67,7 @@ export function useAdminTask() {
       await work();
       setMessage(success);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'The request failed. Please try again.');
+      setError(err instanceof Error ? err.message : t('The request failed. Please try again.'));
     } finally {
       busy.current = false;
       setPending(undefined);
@@ -75,17 +77,18 @@ export function useAdminTask() {
 }
 
 export function TaskFeedback({ task }: { task: ReturnType<typeof useAdminTask> }) {
+  const { t } = useLocale();
   return (
     <div className="admin-feedback" aria-live="polite">
       {task.pending && <p role="status">{task.pending}…</p>}
       {task.error && (
         <>
           <p className="admin-error" role="alert">
-            {adminErrorSummary(task.error)}
+            {adminErrorSummary(task.error, t)}
           </p>
-          {adminErrorSummary(task.error) !== task.error && (
+          {adminErrorSummary(task.error, t) !== task.error && (
             <details className="admin-disclosure">
-              <summary>Server error details</summary>
+              <summary>{t('Server error details')}</summary>
               <pre className="admin-report">{task.error}</pre>
             </details>
           )}
@@ -97,7 +100,11 @@ export function TaskFeedback({ task }: { task: ReturnType<typeof useAdminTask> }
 }
 
 export function formatTime(value?: number) {
-  return value ? new Date(value).toLocaleString() : '—';
+  return value
+    ? new Date(value).toLocaleString(
+        typeof document === 'undefined' ? 'en' : document.documentElement.lang || 'en',
+      )
+    : '—';
 }
 
 export function downloadBundle(value: unknown, filename: string) {

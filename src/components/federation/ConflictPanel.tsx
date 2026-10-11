@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
@@ -11,6 +12,7 @@ import {
 } from './AdminShared';
 
 export default function ConflictPanel({ adminToken }: { adminToken: string }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const status = useQuery(api.federation.identityConflict.status, { adminToken });
   const town = useQuery(api.federation.admin.status, { adminToken });
@@ -24,30 +26,26 @@ export default function ConflictPanel({ adminToken }: { adminToken: string }) {
   const conflict = open.find((c) => c._id === selected) ?? open[0];
   const localConflict = conflict?.townId === town?.identity?.townId;
   return (
-    <section className="admin-panel" aria-label="Identity conflicts">
-      <h2>Identity conflicts</h2>
+    <section className="admin-panel" aria-label={t("Identity conflicts")}>
+      <h2>{t("Identity conflicts")}</h2>
       <p className="admin-muted">
-        A valid signature from a known identity using another deployment instance pauses new
-        federation authorizations. Local residents continue their activities; existing visits retain
-        their safe return and cleanup paths.
+        {t("A valid signature from a known identity using another deployment instance pauses new federation authorizations. Local residents continue their activities; existing visits retain their safe return and cleanup paths.")}
       </p>
       <TaskFeedback task={task} />
       {!status ? (
-        <p role="status">Checking identity evidence…</p>
+        <p role="status">{t("Checking identity evidence…")}</p>
       ) : (
         <>
           {status.quarantined && (
             <p className="admin-error" role="alert">
-              This town is quarantined. Resolve every verified conflict after draining visits.
-              Federation stays disabled after release; reconnect affected peers and run both probes
-              before enabling it.
+              {t("This town is quarantined. Resolve every verified conflict after draining visits. Federation stays disabled after release; reconnect affected peers and run both probes before enabling it.")}
             </p>
           )}
           {!open.length ? (
-            <EmptyState>No unresolved verified identity conflicts.</EmptyState>
+            <EmptyState>{t("No unresolved verified identity conflicts.")}</EmptyState>
           ) : (
             <>
-              <Field label="Verified conflict">
+              <Field label={t("Verified conflict")}>
                 <select
                   value={conflict?._id ?? ''}
                   onChange={(e) => {
@@ -64,47 +62,47 @@ export default function ConflictPanel({ adminToken }: { adminToken: string }) {
               </Field>
               {conflict && (
                 <dl className="admin-facts">
-                  <dt>Known instance</dt>
+                  <dt>{t("Known instance")}</dt>
                   <dd>
-                    <code>{conflict.knownDeploymentInstanceId}</code> · epoch{' '}
+                    <code>{conflict.knownDeploymentInstanceId}</code> {t("· epoch")}{' '}
                     {conflict.knownDeploymentEpoch}
                   </dd>
-                  <dt>Observed instance</dt>
+                  <dt>{t("Observed instance")}</dt>
                   <dd>
-                    <code>{conflict.observedDeploymentInstanceId}</code> · epoch{' '}
+                    <code>{conflict.observedDeploymentInstanceId}</code> {t("· epoch")}{' '}
                     {conflict.observedDeploymentEpoch}
                   </dd>
-                  <dt>Evidence</dt>
+                  <dt>{t("Evidence")}</dt>
                   <dd>
                     {conflict.source} · {formatTime(conflict.detectedAt)}
                   </dd>
                 </dl>
               )}
-              <Field label="Operator">
+              <Field label={t("Operator")}>
                 <input
                   value={operator}
                   maxLength={120}
                   onChange={(e) => setOperator(e.target.value)}
                 />
               </Field>
-              <Field label="Resolution reason">
+              <Field label={t("Resolution reason")}>
                 <textarea
                   value={reason}
                   maxLength={1000}
                   onChange={(e) => setReason(e.target.value)}
                 />
               </Field>
-              <Field label="Identity decision">
+              <Field label={t("Identity decision")}>
                 <select
                   value={localConflict ? 'RETAIN_KNOWN' : decision}
                   onChange={(e) => setDecision(e.target.value as typeof decision)}
                   disabled={localConflict}
                 >
                   <option value="RETAIN_KNOWN">
-                    Retain the known identity after stopping the conflicting source
+                    {t("Retain the known identity after stopping the conflicting source")}
                   </option>
                   <option value="REVOKE_PEER">
-                    Revoke this peer and require a new verified pairing
+                    {t("Revoke this peer and require a new verified pairing")}
                   </option>
                 </select>
               </Field>
@@ -114,7 +112,7 @@ export default function ConflictPanel({ adminToken }: { adminToken: string }) {
                   checked={sourceStopped}
                   onChange={(e) => setSourceStopped(e.target.checked)}
                 />
-                I have stopped the conflicting source and drained affected visits.
+                {t("I have stopped the conflicting source and drained affected visits.")}
               </label>
               <AdminButton
                 disabled={
@@ -125,7 +123,7 @@ export default function ConflictPanel({ adminToken }: { adminToken: string }) {
                   !sourceStopped
                 }
                 onClick={() =>
-                  void task.run('Resolving verified identity conflict', async () => {
+                  void task.run(t("Resolving verified identity conflict"), async () => {
                     if (!conflict) return;
                     const result = await convex.mutation(api.federation.identityConflict.resolve, {
                       adminToken,
@@ -137,18 +135,18 @@ export default function ConflictPanel({ adminToken }: { adminToken: string }) {
                     });
                     setSourceStopped(false);
                     return result.released
-                      ? 'Isolation released. Federation remains disabled; repair trust and probe before enabling.'
-                      : 'Resolution recorded. Other verified conflicts still require review.';
+                      ? t("Isolation released. Federation remains disabled; repair trust and probe before enabling.")
+                      : t("Resolution recorded. Other verified conflicts still require review.");
                   })
                 }
               >
-                Record resolution
+                {t("Record resolution")}
               </AdminButton>
             </>
           )}
           {!!status.conflicts.length && (
             <details>
-              <summary>Verified evidence and resolution history</summary>
+              <summary>{t("Verified evidence and resolution history")}</summary>
               <pre className="admin-report">
                 {JSON.stringify({ conflicts: status.conflicts, audit: status.audit }, null, 2)}
               </pre>

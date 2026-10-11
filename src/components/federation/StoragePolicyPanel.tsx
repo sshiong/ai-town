@@ -1,3 +1,4 @@
+import { useLocale } from '../../i18n';
 import { useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import type { FunctionReturnType } from 'convex/server';
@@ -19,18 +20,19 @@ function bytes(value: number) {
 }
 
 function PolicyForm({ adminToken, status }: { adminToken: string; status: StorageStatus }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const [policy, setPolicy] = useState(status.policy);
   return (
     <details className="admin-disclosure">
-      <summary>Configure storage budgets and retention</summary>
+      <summary>{t('Configure storage budgets and retention')}</summary>
       <TaskFeedback task={task} />
       <form
         onSubmit={(event) => {
           event.preventDefault();
           void task.run(
-            'Saving storage policy',
+            t('Saving storage policy'),
             () =>
               convex.mutation(api.federation.storagePolicy.configure, {
                 adminToken,
@@ -48,13 +50,13 @@ function PolicyForm({ adminToken, status }: { adminToken: string; status: Storag
                 backupIntervalHours: policy.backupIntervalHours,
                 vectorRebuildBatchSize: policy.vectorRebuildBatchSize,
               }),
-            'Storage policy saved. Usage measurement is refreshing in bounded batches.',
+            t('Storage policy saved. Usage measurement is refreshing in bounded batches.'),
           );
         }}
       >
         <div className="admin-form">
           {categories.map(([, label, field]) => (
-            <Field key={field} label={`${label} budget (MiB)`}>
+            <Field key={field} label={t('{label} budget (MiB)', { label: t(label) })}>
               <input
                 type="number"
                 required
@@ -69,7 +71,7 @@ function PolicyForm({ adminToken, status }: { adminToken: string; status: Storag
               />
             </Field>
           ))}
-          <Field label="Warning threshold (%)">
+          <Field label={t('Warning threshold (%)')}>
             <input
               type="number"
               required
@@ -87,7 +89,13 @@ function PolicyForm({ adminToken, status }: { adminToken: string; status: Storag
             (field) => (
               <Field
                 key={field}
-                label={`${{ messageRetentionMs: 'Completed delivery', runtimeRetentionMs: 'Completed runtime', cacheRetentionMs: 'Embedding cache' }[field]} retention (days)`}
+                label={t('{label} retention (days)', {
+                  label: {
+                    messageRetentionMs: t('Completed delivery'),
+                    runtimeRetentionMs: t('Completed runtime'),
+                    cacheRetentionMs: t('Embedding cache'),
+                  }[field],
+                })}
               >
                 <input
                   type="number"
@@ -104,7 +112,7 @@ function PolicyForm({ adminToken, status }: { adminToken: string; status: Storag
               </Field>
             ),
           )}
-          <Field label="Backup reminder interval (hours)">
+          <Field label={t('Backup reminder interval (hours)')}>
             <input
               type="number"
               required
@@ -118,7 +126,7 @@ function PolicyForm({ adminToken, status }: { adminToken: string; status: Storag
               }
             />
           </Field>
-          <Field label="Vector rebuild batch size">
+          <Field label={t('Vector rebuild batch size')}>
             <input
               type="number"
               required
@@ -133,8 +141,10 @@ function PolicyForm({ adminToken, status }: { adminToken: string; status: Storag
             />
           </Field>
           <Field
-            label="Cold archive location"
-            hint="A reference to where you keep verified archives. This does not upload files or start automatic backups."
+            label={t('Cold archive location')}
+            hint={t(
+              'A reference to where you keep verified archives. This does not upload files or start automatic backups.',
+            )}
           >
             <input
               maxLength={1000}
@@ -155,11 +165,11 @@ function PolicyForm({ adminToken, status }: { adminToken: string; status: Storag
               setPolicy({ ...policy, pauseNonessentialOnLimit: event.target.checked })
             }
           />{' '}
-          Pause cache writes and vector rebuilds when a storage budget is exceeded.
+          {t('Pause cache writes and vector rebuilds when a storage budget is exceeded.')}
         </label>
         <div className="admin-toolbar">
           <AdminButton type="submit" disabled={!!task.pending}>
-            Save storage policy
+            {t('Save storage policy')}
           </AdminButton>
         </div>
       </form>
@@ -168,43 +178,49 @@ function PolicyForm({ adminToken, status }: { adminToken: string; status: Storag
 }
 
 export default function StoragePolicyPanel({ adminToken }: { adminToken: string }) {
+  const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
   const status = useQuery(api.federation.storagePolicy.status, { adminToken });
   const [cleanupReviewed, setCleanupReviewed] = useState(false);
   return (
-    <section aria-label="Storage budgets and retention">
-      <h3>Storage budgets &amp; retention</h3>
+    <section aria-label={t('Storage budgets and retention')}>
+      <h3>{t('Storage budgets & retention')}</h3>
       <p className="admin-muted">
-        Canonical memories, history and relationships are retained. Cleanup removes eligible expired
-        caches and completed runtime records, preserving travel action and event facts before
-        compacting them.
+        {t(
+          'Canonical memories, history and relationships are retained. Cleanup removes eligible expired caches and completed runtime records, preserving travel action and event facts before compacting them.',
+        )}
       </p>
       <TaskFeedback task={task} />
       {!status ? (
-        <p role="status">Loading storage policy…</p>
+        <p role="status">{t('Loading storage policy…')}</p>
       ) : (
         <>
           <dl className="admin-facts">
-            <dt>Last measurement</dt>
+            <dt>{t('Last measurement')}</dt>
             <dd>
-              {formatTime(status.usage.measuredAt ?? undefined)} · {status.usage.scanState}
+              {formatTime(status.usage.measuredAt ?? undefined)} · {t(status.usage.scanState)}
             </dd>
-            <dt>Cache writes</dt>
-            <dd>{status.nonessential.cacheWritesPaused ? 'Paused by budget policy' : 'Allowed'}</dd>
-            <dt>Vector rebuilds</dt>
+            <dt>{t('Cache writes')}</dt>
             <dd>
-              {status.nonessential.vectorRebuildPaused ? 'Paused by budget policy' : 'Allowed'}
+              {status.nonessential.cacheWritesPaused ? t('Paused by budget policy') : t('Allowed')}
             </dd>
-            <dt>Last verified backup</dt>
+            <dt>{t('Vector rebuilds')}</dt>
+            <dd>
+              {status.nonessential.vectorRebuildPaused
+                ? t('Paused by budget policy')
+                : t('Allowed')}
+            </dd>
+            <dt>{t('Last verified backup')}</dt>
             <dd>
               {formatTime(status.backup.lastVerifiedBackupAt ?? undefined)} ·{' '}
-              {status.backup.due ? 'Backup due' : 'Within reminder interval'}
+              {status.backup.due ? t('Backup due') : t('Within reminder interval')}
             </dd>
           </dl>
           <p className="admin-muted">
-            Measurements estimate stored record bytes; they are not provider billing totals. Backups
-            require an explicit archive export and download.
+            {t(
+              'Measurements estimate stored record bytes; they are not provider billing totals. Backups require an explicit archive export and download.',
+            )}
           </p>
           <ul className="admin-list">
             {categories.map(([category, label, field]) => {
@@ -215,16 +231,19 @@ export default function StoragePolicyPanel({ adminToken }: { adminToken: string 
               return (
                 <li key={category}>
                   <div>
-                    <strong>{label}</strong>
+                    <strong>{t(label)}</strong>
                     <p className="admin-muted">
-                      {group?.records ?? 0} records · {bytes(group?.bytes ?? 0)} /{' '}
-                      {bytes(status.policy[field])}
+                      {group?.records ?? 0}
+                      {t(' records · ')}
+                      {bytes(group?.bytes ?? 0)} / {bytes(status.policy[field])}
                     </p>
                   </div>
                   <span className="admin-badge">
                     {status.usage.measuredAt === null
-                      ? 'Not measured'
-                      : (alert?.level ?? 'Within budget')}
+                      ? t('Not measured')
+                      : alert?.level
+                        ? t(alert.level)
+                        : t('Within budget')}
                   </span>
                 </li>
               );
@@ -235,28 +254,33 @@ export default function StoragePolicyPanel({ adminToken }: { adminToken: string 
               disabled={!!task.pending || status.usage.scanState === 'RUNNING'}
               onClick={() =>
                 void task.run(
-                  'Starting storage measurement',
+                  t('Starting storage measurement'),
                   () => convex.mutation(api.federation.storagePolicy.refresh, { adminToken }),
-                  'Usage scan started. Results update after all bounded batches finish.',
+                  t('Usage scan started. Results update after all bounded batches finish.'),
                 )
               }
             >
-              Refresh usage
+              {t('Refresh usage')}
             </AdminButton>
           </div>
           {status.cleanup && (
             <p role="status" className="admin-muted">
-              Cleanup: {status.cleanup.state} · {status.cleanup.table ?? 'Finished'} ·{' '}
-              {status.cleanup.deletedRows} rows removed · {status.cleanup.compactedActions} action
-              facts and {status.cleanup.compactedEvents} event facts preserved
+              {t('Cleanup: ')}
+              {t(status.cleanup.state)} · {status.cleanup.table ?? t('Finished')} ·{' '}
+              {status.cleanup.deletedRows}
+              {t(' rows removed · ')}
+              {status.cleanup.compactedActions}
+              {t(' action facts and ')}
+              {status.cleanup.compactedEvents}
+              {t(' event facts preserved')}
             </p>
           )}
           <details className="admin-disclosure">
-            <summary>Clean eligible derived and completed data</summary>
+            <summary>{t('Clean eligible derived and completed data')}</summary>
             <p className="admin-muted">
-              Active visits, unacknowledged deliveries and pending receipts are retained. This
-              cleanup does not prune canonical memory, messages, relationships or verified town
-              archives.
+              {t(
+                'Active visits, unacknowledged deliveries and pending receipts are retained. This cleanup does not prune canonical memory, messages, relationships or verified town archives.',
+              )}
             </p>
             <label className="admin-check">
               <input
@@ -265,7 +289,7 @@ export default function StoragePolicyPanel({ adminToken }: { adminToken: string 
                 disabled={!!task.pending}
                 onChange={(event) => setCleanupReviewed(event.target.checked)}
               />{' '}
-              I reviewed the configured retention periods.
+              {t('I reviewed the configured retention periods.')}
             </label>
             <div className="admin-toolbar">
               <AdminButton
@@ -273,18 +297,18 @@ export default function StoragePolicyPanel({ adminToken }: { adminToken: string 
                 disabled={!!task.pending || !cleanupReviewed || status.cleanup?.state === 'RUNNING'}
                 onClick={() =>
                   void task.run(
-                    'Starting retained-data cleanup',
+                    t('Starting retained-data cleanup'),
                     async () => {
                       await convex.mutation(api.federation.storagePolicy.cleanupNow, {
                         adminToken,
                       });
                       setCleanupReviewed(false);
                     },
-                    'Cleanup started in bounded batches. Review its server status above.',
+                    t('Cleanup started in bounded batches. Review its server status above.'),
                   )
                 }
               >
-                Run eligible cleanup
+                {t('Run eligible cleanup')}
               </AdminButton>
             </div>
           </details>
