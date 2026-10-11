@@ -377,7 +377,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   </ul>
                 )}
                 <HostResourcePanel adminToken={adminToken} resources={data.resources.hostResources}
-                  key={JSON.stringify(data.resources.hostResources.thresholds)} />
+                  key={`host-resources-${JSON.stringify(data.resources.hostResources.thresholds)}`} />
                 <h3>Measured workload</h3>
                 <p className="admin-muted">
                   Window: {formatTime(data.resources.measurements.windowStartedAt)} to{' '}
