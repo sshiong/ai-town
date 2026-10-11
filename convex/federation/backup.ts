@@ -916,7 +916,9 @@ async function recordExport(
   owner: { worldId: Id<'worlds'>; playerId: string } | Record<string, never> = {},
 ) {
   await ctx.runMutation(makeFunctionReference<'mutation'>('federation/backupExportAudit:record'), {
-    ...args,
+    adminToken: args.adminToken,
+    operator: args.operator,
+    reason: args.reason,
     ...owner,
     scope: bundle.manifest.scope,
     sourceTownId: bundle.manifest.sourceTownId,

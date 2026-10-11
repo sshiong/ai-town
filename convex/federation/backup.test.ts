@@ -1528,3 +1528,18 @@ test('signed small packages cannot import more resident restrictions than the ma
   expect(await t.run(ctx => ctx.db.query('federationResidentPolicy').collect())).toEqual([]);
   expect(await t.run(ctx => ctx.db.query('backupImports').collect())).toEqual([]);
 });
+
+
+test('vector snapshot export options do not leak extra fields into export audit validators', async () => {
+  const { t, worldId } = await town();
+  for (const scope of ['town', 'resident'] as const) {
+    const bundle = await t.action(action(`federation/backup:export${scope === 'town' ? 'Town' : 'Resident'}`), {
+      adminToken, includeVectors: true, operator: 'Snapshot administrator', reason: 'Verified vector snapshot',
+      ...(scope === 'resident' ? { worldId, playerId: 'p:0' } : {}),
+    }) as BackupBundle;
+    expect(bundle.manifest.includeVectors).toBe(true);
+  }
+  const audits = await t.run(ctx => ctx.db.query('backupExportAudits').collect());
+  expect(audits.map(row => row.scope).sort()).toEqual(['resident', 'town']);
+  expect(audits.every(row => row.operator === 'Snapshot administrator' && row.reason === 'Verified vector snapshot')).toBe(true);
+});

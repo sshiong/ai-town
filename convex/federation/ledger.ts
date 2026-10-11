@@ -17,6 +17,20 @@ import {
 } from './visitorQueue';
 
 const TERMINAL = new Set(['COMPLETED', 'REJECTED']);
+
+// Read only the first nonterminal entry in each indexed range. Unknown states
+// remain blocking; completed history does not enlarge departure reads.
+export async function hasNonterminalVisit(ctx: { db: MutationCtx['db'] }, agentGlobalId: string) {
+  const beforeCompleted = await ctx.db.query('visitLedger').withIndex('agent_state', q =>
+    q.eq('agentGlobalId', agentGlobalId).lt('state', 'COMPLETED')).first();
+  if (beforeCompleted) return true;
+  const betweenTerminal = await ctx.db.query('visitLedger').withIndex('agent_state', q =>
+    q.eq('agentGlobalId', agentGlobalId).gt('state', 'COMPLETED').lt('state', 'REJECTED')).first();
+  if (betweenTerminal) return true;
+  return !!await ctx.db.query('visitLedger').withIndex('agent_state', q =>
+    q.eq('agentGlobalId', agentGlobalId).gt('state', 'REJECTED')).first();
+}
+
 const runtimeJob = async (ctx: MutationCtx, name: string, visitId: string) => {
   await ctx.scheduler.runAfter(0, mutationRef(`runtime/${name}`), { visitId });
 };
@@ -63,8 +77,7 @@ export async function startResidentVisit(ctx: MutationCtx, args: {
     await syncResidentRuntimes(ctx, args.worldId);
     const resident = await ctx.db.query('federationAgentRuntimes').withIndex('world', q => q.eq('worldId', args.worldId).eq('playerId', args.homePlayerId as any)).unique();
     if (!resident || resident.homeTownId !== local.townId || resident.state !== 'HOME_ACTIVE' || resident.visitId) throw new Error('RESIDENT_NOT_AVAILABLE');
-    const current = await ctx.db.query('visitLedger').withIndex('agentGlobalId', q => q.eq('agentGlobalId', resident.agentGlobalId)).collect();
-    if (current.some(l => !TERMINAL.has(l.state))) throw new Error('AGENT_ALREADY_TRAVELING');
+    if (await hasNonterminalVisit(ctx, resident.agentGlobalId)) throw new Error('AGENT_ALREADY_TRAVELING');
     const description = await ctx.db.query('playerDescriptions').withIndex('worldId', q => q.eq('worldId', args.worldId).eq('playerId', resident.playerId)).unique();
     if (!description) throw new Error('RESIDENT_PROFILE_MISSING');
     const now = Date.now(), visitId = crypto.randomUUID(), fencingToken = crypto.randomUUID();

@@ -1,3 +1,4 @@
+import { hasNonterminalVisit } from './ledger';
 import { observeClock, readClock } from './timePolicy';
 import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
@@ -573,4 +574,27 @@ test('an unreachable Host drains after explicit UTC return confirmation while ne
   expect((await t.run(ctx => readClock(ctx.db))).healthy).toBe(false);
   await t.mutation(mutationRef('admin/confirmClockRecovery'), { adminToken, synchronizedUtcConfirmed: true });
   expect((await t.run(ctx => readClock(ctx.db))).healthy).toBe(true);
+});
+
+
+test('departure guard ignores terminal history but blocks every nonterminal range and unknown state', async () => {
+  const { t } = await setup('home', 'COMPLETED');
+  const agentGlobalId = 'home/agent:alice';
+  await t.run(async ctx => {
+    const source = (await ctx.db.query('visitLedger').unique())!;
+    const { _id, _creationTime, ...fields } = source;
+    for (let i = 0; i < 250; i++) await ctx.db.insert('visitLedger', { ...fields, visitId: `terminal-${i}`, state: i % 2 ? 'COMPLETED' : 'REJECTED' });
+  });
+  expect(await t.run(ctx => hasNonterminalVisit(ctx, agentGlobalId))).toBe(false);
+  for (const state of ['ACTIVE', 'CONFIRMING', 'RETURN_PENDING', 'UNKNOWN_FUTURE_STATE']) {
+    const id = await t.run(async ctx => {
+      const source = (await ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', 'visit-1')).unique())!;
+      const { _id, _creationTime, ...fields } = source;
+      return await ctx.db.insert('visitLedger', { ...fields, visitId: `blocking-${state}`, state });
+    });
+    expect(await t.run(ctx => hasNonterminalVisit(ctx, agentGlobalId))).toBe(true);
+    expect(await t.run(ctx => hasNonterminalVisit(ctx, 'unrelated-resident'))).toBe(false);
+    await t.run(ctx => ctx.db.delete(id));
+  }
+  expect(await t.run(ctx => hasNonterminalVisit(ctx, agentGlobalId))).toBe(false);
 });
