@@ -256,6 +256,112 @@ async function town() {
   });
   return { t, ...ids };
 }
+
+test('old town backup cannot resurrect a cleared conversation and rejection leaves the target intact', async () => {
+  const { t, worldId } = await town();
+  const memoryId = await t.run(ctx => ctx.db.insert('memories', {
+    worldId, playerId: 'p:0', description: 'Private old dialogue', importance: 5, lastAccess: 1,
+    data: { type: 'conversation', conversationId: 'c:private', playerIds: [] },
+  }));
+  const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  await t.run(async ctx => {
+    await ctx.db.insert('travelPrivacyTombstones', {
+      key: `memory:${memoryId}`, visitId: 'closed-private', createdAt: 2,
+    });
+    await ctx.db.delete(memoryId);
+  });
+  const before = await t.run(ctx => ctx.db.query('worlds').collect());
+  const beforeMemories = await t.run(ctx => ctx.db.query('memories').collect());
+  await expect(t.action(action('federation/backup:importBackup'), {
+    adminToken, bundle, mode: 'restore', sourceStopped: true,
+  })).rejects.toThrow('BACKUP_PRIVACY_REDACTED');
+  expect(await t.run(ctx => ctx.db.query('worlds').collect())).toEqual(before);
+  expect(await t.run(ctx => ctx.db.query('memories').collect())).toEqual(beforeMemories);
+  expect(await t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).toHaveLength(1);
+});
+
+test('resident restore rechecks privacy when clearing happens after confirmation', async () => {
+  const { t, worldId } = await town();
+  const bundle: BackupBundle = await t.action(action('federation/backup:exportResident'), {
+    adminToken, worldId, playerId: 'p:0',
+  });
+  const args = await residentRestoreArgs(t, bundle, worldId);
+  const memoryId = decodeRow(bundle.sections.memories[0])._id as Id<'memories'>;
+  await t.run(async ctx => {
+    await ctx.db.insert('travelPrivacyTombstones', {
+      key: `memory:${memoryId}`, visitId: 'visit-1', createdAt: 2,
+    });
+    await ctx.db.delete(memoryId);
+  });
+  const before = await t.run(ctx => ctx.db.query('memories').collect());
+  await expect(t.action(action('federation/backup:importBackup'), args))
+    .rejects.toThrow('BACKUP_PRIVACY_REDACTED');
+  expect(await t.run(ctx => ctx.db.query('memories').collect())).toEqual(before);
+});
+
+test('clean town clone carries deletion history and rejects importing an older body archive', async () => {
+  const { t, worldId, agentGlobalId } = await town();
+  const memoryId = await t.run(ctx => ctx.db.insert('memories', {
+    worldId, playerId: 'p:0', agentGlobalId, description: 'Private removed message', importance: 4, lastAccess: 1,
+    data: { type: 'conversation', conversationId: 'c:private', playerIds: [] },
+  }));
+  const old = await t.action(action('federation/backup:exportTown'), { adminToken });
+  await t.run(async ctx => {
+    await ctx.db.delete(memoryId);
+    await ctx.db.insert('travelPrivacyTombstones', {
+      key: `memory:${memoryId}`, visitId: 'cleared', worldId, ownerGlobalId: agentGlobalId, playerId: 'p:0', createdAt: 2,
+    });
+    await ctx.db.insert('travelPrivacyTombstones', {
+      key: `conversation:${worldId}:c:private`, visitId: 'cleared', worldId, playerIds: ['p:0'], createdAt: 2,
+    });
+  });
+  const clean = await t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(clean.sections.travelPrivacyTombstones).toHaveLength(2);
+  const dst = convexTest(schema, modules);
+  const result = await dst.action(action('federation/backup:importBackup'), {
+    adminToken, bundle: clean, mode: 'clone', targetEndpoint: 'https://privacy-clone.example/federation/v1',
+  });
+  const graves = await dst.run(ctx => ctx.db.query('travelPrivacyTombstones').collect());
+  expect(graves.some(row => row.key === `conversation:${result.mapping[worldId]}:c:private`)).toBe(true);
+  expect(graves.every(row => row.worldId === result.mapping[worldId])).toBe(true);
+  const before = await dst.run(ctx => ctx.db.query('memories').collect());
+  await expect(dst.action(action('federation/backup:importBackup'), {
+    adminToken, bundle: old, mode: 'merge', targetWorldId: result.mapping[worldId],
+  })).rejects.toThrow('BACKUP_PRIVACY_REDACTED');
+  expect(await dst.run(ctx => ctx.db.query('memories').collect())).toEqual(before);
+});
+
+test('resident export carries only its deletion history including shared conversation participants', async () => {
+  const { t, worldId, agentGlobalId } = await town();
+  await t.run(async ctx => {
+    for (const [key, owner] of [
+      ['memory:removed-owned', { ownerGlobalId: agentGlobalId, playerId: 'p:0' }],
+      [`conversation:${worldId}:c:removed`, { playerIds: ['p:0', 'p:7'] }],
+      ['memory:removed-other', { ownerGlobalId: 'unrelated', playerId: 'p:9' }],
+    ] as Array<[string, { ownerGlobalId?: string; playerId?: string; playerIds?: string[] }]>)
+      await ctx.db.insert('travelPrivacyTombstones', { key, ...owner, worldId, visitId: key, createdAt: 2 });
+  });
+  const bundle: BackupBundle = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  expect(bundle.sections.travelPrivacyTombstones.map(decodeRow).map(row => row.key).sort())
+    .toEqual([`conversation:${worldId}:c:removed`, 'memory:removed-owned'].sort());
+  await t.action(action('federation/backup:importBackup'), await residentRestoreArgs(t, bundle, worldId));
+  expect(await t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).toHaveLength(3);
+});
+
+test('full restore keeps local deletion evidence absent from the archive exportable in the replacement world', async () => {
+  const { t, worldId, agentGlobalId } = await town();
+  const older = await t.action(action('federation/backup:exportTown'), { adminToken });
+  await t.run(ctx => ctx.db.insert('travelPrivacyTombstones', {
+    key: 'memory:later-removed', visitId: 'later-visit', createdAt: 3, worldId, playerId: 'p:0', ownerGlobalId: agentGlobalId,
+  }));
+  const result = await t.action(action('federation/backup:importBackup'), { adminToken, bundle: older, mode: 'restore', sourceStopped: true });
+  const grave = await t.run(ctx => ctx.db.query('travelPrivacyTombstones').first());
+  expect(grave).toMatchObject({ key: 'memory:later-removed', worldId: result.mapping[worldId], createdAt: 3 });
+  const resident = await t.action(action('federation/backup:exportResident'), {
+    adminToken, worldId: result.mapping[worldId], playerId: 'p:0',
+  });
+  expect(resident.sections.travelPrivacyTombstones.map(decodeRow).map((row: any) => row.key)).toContain('memory:later-removed');
+});
 async function rewrite(
   bundle: BackupBundle,
   section: string,
@@ -288,10 +394,9 @@ test.each(['current', 'changed source', 'legacy digest'])('memory provenance sma
   if (variant === 'legacy digest') await source.t.run(ctx => useLegacyMemoryBackupDigests(ctx));
   const bundle = await source.t.action(action('federation/backup:exportTown'), { adminToken });
   const target = convexTest(schema, modules);
-  await target.run(async ctx => {
-    const padding = await ctx.db.insert('worlds', { nextId: 1, players: [], agents: [], conversations: [] });
-    await ctx.db.delete(padding);
-  });
+  // The registered import now allocates a privacy source revision when it
+  // writes the resident binding. That supplies the one-row offset required
+  // for this deliberate ID collision; no additional padding is needed.
   await target.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'clone', targetEndpoint: 'https://memory-copy.example' });
   const copied = await target.run(ctx => assertMemoryBackupEvidence(ctx, true, variant !== 'changed source'));
   const sourceReflection = bundle.sections.memories.map(decodeRow).find((row: Record<string, unknown>) => row.description === 'Ava is a friend.')!;

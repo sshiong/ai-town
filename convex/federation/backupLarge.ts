@@ -1,4 +1,5 @@
 import { trackedMutation as mutation, trackedInternalMutation as internalMutation } from '../maintenanceFunctions';
+import { assertBackupPrivacy, restorePrivacyRows } from './backupPrivacy';
 import { coldLargeOwner, checkColdLargeExport, validateColdLargeRow, coldScope, type ColdLargeRow } from './coldLarge';
 import { load as loadColdHistory } from './coldHistory';
 import { fileStorageDescriptor } from './coldHistoryFiles';
@@ -47,7 +48,7 @@ import {
   validateChunk,
   validateSourceRow,
 } from './backupLargeHelpers';
-import { assertTownUnlocked } from './maintenanceLock';
+import { assertArchiveCanStart } from './maintenanceLock';
 export { assertTownUnlocked } from './maintenanceLock';
 import { rowMetadata, relationKey, leaseEvidence } from './backupLargeHelpers';
 import { validateConnection } from '../models/profiles';
@@ -146,7 +147,7 @@ export const startExport = mutation({
   handler: async (ctx, a) => {
     requireAdmin(a.adminToken);
     const declared = attribution(a);
-    await assertTownUnlocked(ctx);
+    await assertArchiveCanStart(ctx);
     const local = await stable(ctx);
     const now = Date.now();
     const jobId = await ctx.db.insert('backupLargeJobs', {
@@ -591,7 +592,7 @@ export const createImportJob = internalMutation({
   args: { ...importArgs, manifestStorageId: v.id('_storage'), keys: v.optional(v.any()) },
   handler: async (ctx, a) => {
     requireAdmin(a.adminToken);
-    await assertTownUnlocked(ctx);
+    await assertArchiveCanStart(ctx);
     await assertNoIdentityConflict(ctx);
     const local = await stable(ctx, a.mode === 'clone');
     await validateManifest(a.manifest, a.signature);
@@ -695,6 +696,7 @@ export const saveImportChunk = internalMutation({
       return false;
     }
     const rows = await validateChunk(chunk, a.expected);
+    await assertBackupPrivacy(ctx.db, { [chunk.table]: rows }, job.source.townId);
     for (const [rowIndex, row] of rows.entries()) {
       if (chunk.table === 'coldHistoryFiles') await validateColdLargeRow(row);
       if (chunk.table === 'modelMemoryVectors') await validateGenerationEvidence(row);
@@ -840,6 +842,8 @@ export const validatePage = internalMutation({
       .query('backupLargeRows')
       .withIndex('job_role', (q) => q.eq('jobId', job._id).eq('role', 'SOURCE'))
       .paginate({ cursor: job.cursor, numItems: 20, maximumBytesRead: TARGET_CHUNK_BYTES });
+    const sourcePrivacy = await ctx.db.query('backupLargeRows').withIndex('job_table', q =>
+      q.eq('jobId', job._id).eq('role', 'SOURCE').eq('table', 'travelPrivacyTombstones')).first();
     for (const row of page.page) {
       for (const ref of row.references) {
         const target = await sourceRow(ctx, job._id, ref.id);
@@ -847,6 +851,8 @@ export const validatePage = internalMutation({
           throw new Error(`BACKUP_REFERENCE_MISSING:${row.table}:${ref.table}`);
       }
       const m = row.metadata;
+      await assertBackupPrivacy(ctx.db, { [row.table]: [{ ...m, _id: row.sourceId }] }, job.source.townId,
+        sourcePrivacy ? async key => !!(await relatedRow(ctx, job._id, 'travelPrivacyTombstones', key)) : undefined);
       await validateMemoryBackupRelations(row.table, { ...m, _id: row.sourceId }, async id => {
         const target = await sourceRow(ctx, job._id, id);
         return target ? { table: target.table, row: { ...target.metadata, _id: target.sourceId } } : null;
@@ -1181,6 +1187,12 @@ export const applyChunk = internalMutation({
       (await digest(chunk)) !== saved.digest
     )
       throw new Error('BACKUP_CHECKSUM_MISMATCH');
+    if (!rollback) {
+      const sourcePrivacy = await ctx.db.query('backupLargeRows').withIndex('job_table', q =>
+        q.eq('jobId', job._id).eq('role', 'SOURCE').eq('table', 'travelPrivacyTombstones')).first();
+      await assertBackupPrivacy(ctx.db, { [chunk.table]: chunk.rows.map(decodeRow) }, job.source.townId,
+        sourcePrivacy ? async key => !!(await relatedRow(ctx, job._id, 'travelPrivacyTombstones', key)) : undefined);
+    }
     const skip =
       !rollback &&
       (chunk.table === 'modelMemoryVectors' || chunk.table === 'federationIdentity' ||
@@ -1192,6 +1204,11 @@ export const applyChunk = internalMutation({
         if (!staged) throw new Error('BACKUP_STAGED_ROW_MISSING');
         if (skipMemoryBackupRow(chunk.table, row)) {
           await ctx.db.patch(staged._id, { state: 'APPLIED' });
+          continue;
+        }
+        if (chunk.table === 'travelPrivacyTombstones') {
+          if (remapping) await restorePrivacyRows(ctx, [row], await mappingFor(ctx, job, role, row));
+          await ctx.db.patch(staged._id, { state: remapping ? 'APPLIED' : 'ALLOCATED' });
           continue;
         }
         if (
@@ -1285,8 +1302,64 @@ export const repairMemoryProvenance = internalMutation({
   handler: async (ctx, a) => {
     const job = await owned(ctx, a.jobId);
     if (!['MEMORY_PROVENANCE', 'MEMORY_PROVENANCE_ROLLBACK'].includes(job.phase)) throw new Error('BACKUP_CHECKPOINT_CHANGED');
-    await repairMemoryBackupPage(ctx, job, job.phase === 'MEMORY_PROVENANCE' ? 'FINALIZE' : 'ROLLBACK_FINISH',
+    await repairMemoryBackupPage(ctx, job, job.phase === 'MEMORY_PROVENANCE' ? 'PRIVACY_REMAP' : 'PRIVACY_REMAP_ROLLBACK',
       job.phase === 'MEMORY_PROVENANCE' ? 'SOURCE' : 'OLD');
+  },
+});
+
+export const remapPrivacyPage = internalMutation({
+  args: { jobId: v.id('backupLargeJobs') },
+  handler: async (ctx, a) => {
+    const job = await owned(ctx, a.jobId);
+    if (!['PRIVACY_REMAP', 'PRIVACY_REMAP_ROLLBACK'].includes(job.phase)) throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    const rollback = job.phase === 'PRIVACY_REMAP_ROLLBACK', role = rollback ? 'OLD' : 'SOURCE';
+    const page = await ctx.db.query('travelPrivacyTombstones').paginate({ cursor: job.cursor, numItems: 20, maximumBytesRead: TARGET_CHUNK_BYTES });
+    const imports = page.page.length ? await ctx.db.query('backupImports')
+      .withIndex('sourceTown', q => q.eq('sourceTownId', job.source.townId)).take(501) : [];
+    if (imports.length > 500) throw new Error('BACKUP_PRIVACY_HISTORY_LIMIT');
+    for (const grave of page.page) {
+      if (!grave.worldId) continue;
+      const allocated = await ctx.db.query('backupLargeRows').withIndex('job_new', q =>
+        q.eq('jobId', job._id).eq('role', role).eq('newId', grave.worldId)).unique();
+      if (allocated?.table === 'worlds') continue;
+      const candidates = [grave.worldId as string], seen = new Set(candidates);
+      const keyWorld = grave.key.startsWith('conversation:') ? grave.key.slice('conversation:'.length).split(':')[0] : undefined;
+      const add = (value: unknown) => {
+        if (typeof value !== 'string' || !ctx.db.normalizeId('worlds', value) || seen.has(value)) return;
+        seen.add(value); candidates.push(value);
+        if (seen.size > 1000) throw new Error('BACKUP_PRIVACY_WORLD_HISTORY_LIMIT');
+      };
+      if (keyWorld) add(keyWorld);
+      if (rollback) {
+        const partial = await ctx.db.query('backupLargeRows').withIndex('job_new', q =>
+          q.eq('jobId', job._id).eq('role', 'SOURCE').eq('newId', grave.worldId)).unique();
+        if (partial?.table === 'worlds') add(partial.sourceId);
+      }
+      let target: string | undefined;
+      for (let index = 0; index < candidates.length && !target; index++) {
+        const candidate = candidates[index], world = await sourceRow(ctx, job._id, candidate, role);
+        if (world?.table === 'worlds' && world.newId) { target = world.newId; break; }
+        for (const record of imports) {
+          if (rollback) add(record.mapping?.[candidate]);
+          else for (const [source, destination] of Object.entries(record.mapping ?? {}))
+            if (destination === candidate) add(source);
+          const previous = typeof record.manifest?.largeJobId === 'string'
+            ? ctx.db.normalizeId('backupLargeJobs', record.manifest.largeJobId) : null;
+          if (!previous) continue;
+          const historical = rollback ? await sourceRow(ctx, previous, candidate)
+            : await ctx.db.query('backupLargeRows').withIndex('job_new', q =>
+              q.eq('jobId', previous).eq('role', 'SOURCE').eq('newId', candidate)).unique();
+          if (historical?.table === 'worlds') add(rollback ? historical.newId : historical.sourceId);
+        }
+      }
+      // A cancelled empty clone has no OLD resident world to return to. Keep
+      // its original negative keys rather than deleting or inventing ownership.
+      if (!target) continue;
+      const mapping = { [grave.worldId]: target, ...(keyWorld ? { [keyWorld]: target } : {}) };
+      await restorePrivacyRows(ctx, [grave], mapping, true);
+    }
+    await ctx.db.patch(job._id, { cursor: page.isDone ? null : page.continueCursor,
+      phase: page.isDone ? (rollback ? 'ROLLBACK_FINISH' : 'FINALIZE') : job.phase, updatedAt: Date.now() });
   },
 });
 export const finalizeImport = internalMutation({
@@ -1514,6 +1587,8 @@ export const advanceImport = action({
         publicationPending=false;
       } else if (['MEMORY_PROVENANCE', 'MEMORY_PROVENANCE_ROLLBACK'].includes(job.phase))
         await ctx.runMutation(writeRef('repairMemoryProvenance'), { jobId: job._id });
+      else if (['PRIVACY_REMAP', 'PRIVACY_REMAP_ROLLBACK'].includes(job.phase))
+        await ctx.runMutation(writeRef('remapPrivacyPage'), { jobId: job._id });
       else if (job.phase === 'FINALIZE')
         await ctx.runMutation(writeRef('finalizeImport'), { jobId: job._id });
       else if (job.phase === 'ROLLBACK_DELETE')

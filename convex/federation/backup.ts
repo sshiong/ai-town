@@ -1,4 +1,6 @@
 import { readClock } from './timePolicy';
+import { assertArchiveCanStart } from './maintenanceLock';
+import { assertBackupPrivacy, privacyBackupTables, residentPrivacyRows, restorePrivacyRows, remapLocalPrivacy } from './backupPrivacy';
 import { packColdFiles, restoreColdFiles, type PreparedColdFile } from './coldBackup';
 import { fileStorageDescriptor } from './coldHistoryFiles';
 import { queryRef } from './refs';
@@ -93,7 +95,7 @@ function sanitize(value: any): any {
 }
 async function collect(db: DatabaseReader, includeVectors = false): Promise<Record<string, BackupRow[]>> {
   const rows: Record<string, BackupRow[]> = {};
-  for (const name of [...dataTables, ...snapshotTables, 'federationIdentity', 'federationPeers']) {
+  for (const name of [...dataTables, ...snapshotTables, ...privacyBackupTables, 'federationIdentity', 'federationPeers']) {
     // Default archives preserve canonical memories; vectors require separately
     // verified compatibility before an explicit optional snapshot can be reused.
     if (name === 'modelMemoryVectors') {
@@ -120,6 +122,7 @@ export const getTown = internalQuery({
   args: { adminToken: v.string(), includeVectors: v.optional(v.boolean()) },
   handler: async (ctx, args): Promise<BackupBundle> => {
     requireAdmin(args.adminToken);
+    await assertArchiveCanStart(ctx);
     const local = await identity(ctx);
     if (!local) throw new Error('INITIALIZE_IDENTITY_FIRST');
     const bundle = await createBundle(local.townId, 'town', await collect(ctx.db, args.includeVectors));
@@ -133,6 +136,7 @@ export const getResident = internalQuery({
   args: { adminToken: v.string(), worldId: v.id('worlds'), playerId, includeVectors: v.optional(v.boolean()) },
   handler: async (ctx, args): Promise<BackupBundle> => {
     requireAdmin(args.adminToken);
+    await assertArchiveCanStart(ctx);
     const local = await identity(ctx);
     if (!local) throw new Error('INITIALIZE_IDENTITY_FIRST');
     // A small resident archive must not first collect/truncate the whole town.
@@ -258,6 +262,8 @@ export const getResident = internalQuery({
       .withIndex('owner_transcript_page', q => q.eq('agentGlobalId', binding.agentGlobalId!)).take(501);
     rows.federationIdentity = all.federationIdentity;
     rows.federationPeers = [];
+    rows.travelPrivacyTombstones = await residentPrivacyRows(ctx.db,
+      { worldId: args.worldId, playerId: args.playerId, agentGlobalId: binding.agentGlobalId! });
     const activeSpaceId = args.includeVectors ? (await ctx.db.query('modelSettings').withIndex('key', q => q.eq('key', 'town')).unique())?.activeEmbeddingSpaceId : undefined;
     if (activeSpaceId) for (const memory of memories) {
       const vector = await ctx.db.query('modelMemoryVectors').withIndex('memory_space', q => q.eq('memoryId', memory._id).eq('spaceId', activeSpaceId)).unique();
@@ -282,6 +288,7 @@ async function checkImport(
   },
 ) {
   const bundle = await validateBundle(args.bundle);
+  await assertArchiveCanStart(ctx);
   await assertNoIdentityConflict(ctx);
   if (decodeRow(bundle.sections.federationIdentity[0]).mode === 'QUARANTINED')
     throw new Error('TOWN_CLONE_CONFLICT');
@@ -324,6 +331,7 @@ async function checkImport(
   const rows = Object.fromEntries(
     Object.entries(bundle.sections).map(([key, values]) => [key, values.map(decodeRow)]),
   );
+  await assertBackupPrivacy(ctx.db, rows, bundle.manifest.sourceTownId);
   const memoryRows = new Map(Object.entries(rows).flatMap(([table, values]) =>
     values.map(row => [row._id as string, { table, row }] as const)));
   for (const table of memoryBackupTables) for (const row of rows[table] ?? [])
@@ -863,6 +871,9 @@ export async function applyBackupData(
       createdAt: Date.now(),
     });
   }
+  if (args.mode === 'restore' || args.mode === 'migrate')
+    await remapLocalPrivacy(ctx, bundle.manifest.sourceTownId, mapping);
+  await restorePrivacyRows(ctx, rows.travelPrivacyTombstones ?? [], mapping);
   const importId = await ctx.db.insert('backupImports', {
     sourceTownId: bundle.manifest.sourceTownId,
     mode: args.mode,

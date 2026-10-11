@@ -1,3 +1,4 @@
+import { isTravelRedacted, privatePayloadSummary } from './travelPrivacyGuard';
 import { configuredTimePolicy, observeClock, canResume, readClock } from './timePolicy';
 import { v } from 'convex/values';
 import { HttpRouter } from 'convex/server';
@@ -206,7 +207,13 @@ async function dispatchControl(ctx: MutationCtx, message: FederationMessage) {
 async function dispatch(ctx: MutationCtx, message: FederationMessage) {
   if (CONTROL_TYPES.has(message.type)) return dispatchControl(ctx, message);
   if (VISIT_TYPES.has(message.type)) return dispatchLedgerMessage(ctx, message);
-  if (RUNTIME_TYPES.has(message.type)) { await assertVisitAuthority(ctx, message); return dispatchRuntimeMessage(ctx, message); }
+  if (RUNTIME_TYPES.has(message.type)) {
+    await assertVisitAuthority(ctx, message);
+    // An explicit local privacy tombstone retires historical bodies, not their
+    // authenticated delivery sequence. Lifecycle and stream control still dispatch.
+    if (await isTravelRedacted(ctx.db, message.visitId!)) return;
+    return dispatchRuntimeMessage(ctx, message);
+  }
   throw new Error('UNKNOWN_MESSAGE_TYPE');
 }
 
@@ -218,7 +225,8 @@ export const acceptMessage = internalMutation({ args: { message: v.any(), payloa
   const existing = await ctx.db.query('federationInbox').withIndex('messageId', q => q.eq('messageId', message.messageId)).unique();
   if (existing) {
     if (existing.fromTownId !== message.fromTownId || existing.payloadDigest !== args.payloadDigest &&
-        await messageDigest({ ...existing.envelope, credentialId: message.credentialId }) !== args.payloadDigest)
+        await messageDigest({ ...existing.envelope, credentialId: message.credentialId }) !== args.payloadDigest &&
+        (!existing.privacyPayloadDigest || existing.privacyPayloadDigest !== await messageDigest({ ...message, credentialId: '' })))
       throw new Error('MESSAGE_ID_CONFLICT');
     return existing.ack ?? ackFor(message, existing.status);
   }
@@ -229,7 +237,9 @@ export const acceptMessage = internalMutation({ args: { message: v.any(), payloa
   await rememberNonce(ctx, message);
   const pending = await ctx.db.query('federationInbox').withIndex('status', q => q.eq('status', 'BUFFERED')).take(257);
   if (pending.length >= 256) throw new Error('INBOX_CAPACITY_EXCEEDED');
-  const inboxId = await ctx.db.insert('federationInbox', { messageId: message.messageId, fromTownId: message.fromTownId, payloadDigest: args.payloadDigest, envelope: message, status: 'RECEIVED', receivedAt: now() });
+  const redactBody = RUNTIME_TYPES.has(message.type) && await isTravelRedacted(ctx.db, message.visitId!);
+  const storedEnvelope = redactBody ? { ...message, payload: privatePayloadSummary(message.payload) } : message;
+  const inboxId = await ctx.db.insert('federationInbox', { ...(redactBody ? { privacyPayloadDigest: await messageDigest({ ...message, credentialId: '' }) } : {}), messageId: message.messageId, fromTownId: message.fromTownId, payloadDigest: args.payloadDigest, envelope: storedEnvelope, status: 'RECEIVED', receivedAt: now() });
   await recordResourceMetric(ctx, 'INBOUND_EVENT');
   if (CONTROL_TYPES.has(message.type)) {
     await dispatch(ctx, message);

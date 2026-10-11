@@ -1,3 +1,4 @@
+import TravelPrivacyPanel from './TravelPrivacyPanel';
 import { useLocale } from '../../i18n';
 import { useEffect, useState } from 'react';
 import AutonomyPanel from './AutonomyPanel';
@@ -366,6 +367,7 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
       <AutonomyPanel adminToken={adminToken} />
       <SocialHistoryPanel adminToken={adminToken} />
       <TravelAuditPanel adminToken={adminToken} />
+      <TravelPrivacyPanel adminToken={adminToken} />
       <details className="admin-disclosure">
         <summary>{t("Delivery & recovery diagnostics")}</summary>
         <p className="admin-muted">

@@ -1,4 +1,5 @@
 import { portableVector } from './vectorEvidence';
+import { privacyRowBelongsToResident } from './backupPrivacy';
 import { isMemoryBackupTable } from './memoryBackup';
 import { correctionHead, sourceKey } from '../agent/memorySources';
 import { v } from 'convex/values';
@@ -13,7 +14,7 @@ import {
 } from '../_generated/server';
 import { Doc, Id, TableNames } from '../_generated/dataModel';
 import { requireAdmin, sign } from './security';
-import { assertTownUnlocked } from './maintenanceLock';
+import { assertArchiveCanStart } from './maintenanceLock';
 import { selectiveColdCandidate, selectiveColdScope } from './coldSelective';
 import { load as loadColdHistory } from './coldHistory';
 import { coldExportSourcePage } from './coldExportProgress';
@@ -123,7 +124,7 @@ export const startExport = mutation({
   },
   handler: async (ctx, a) => {
     requireAdmin(a.adminToken);
-    await assertTownUnlocked(ctx);
+    await assertArchiveCanStart(ctx);
     const local = await stable(ctx);
     if (
       !a.operator.trim() ||
@@ -274,6 +275,8 @@ async function primary(db: DatabaseReader, table: string, row: BackupRow, s: Sel
       (table !== 'federationPeers' || s.includePublicPeers)
     );
   const residents = ['agent-one', 'agents-selected'].includes(s.scope);
+  if (table === 'travelPrivacyTombstones')
+    return s.owners.some(owner => privacyRowBelongsToResident(row, owner));
   if (table === 'federationIdentity') return true;
   if (residents && ['worlds', 'maps'].includes(table))
     return s.owners.some((o) => o.worldId === (table === 'worlds' ? row._id : row.worldId));
@@ -335,6 +338,9 @@ async function envelope(
   role: 'primary' | 'dependency',
 ): Promise<ArchiveEnvelope> {
   let row = sanitizeLargeValue(raw);
+  if (table === 'travelPrivacyTombstones' && row.playerIds)
+    row = { ...row, playerIds: row.playerIds.filter((id: string) =>
+      s.owners.some(owner => owner.worldId === row.worldId && owner.playerId === id)) };
   if (table === 'worlds') row = scopedWorld(row, s);
   if (table === 'memories') {
     const { embeddingId: _embeddingId, embeddingSpaceId: _embeddingSpaceId, ...canonical } = row;
@@ -404,9 +410,9 @@ async function envelope(
       });
   }
   // Public resident/profile context preserves source bindings without cloning identities.
-  if (table === 'memories' || (historyTables as readonly string[]).includes(table)) {
+  if (table === 'memories' || table === 'travelPrivacyTombstones' || (historyTables as readonly string[]).includes(table)) {
     const own = rowOwner(row, s);
-    const involved = own
+    const involved = table === 'travelPrivacyTombstones' ? s.owners.filter(owner => privacyRowBelongsToResident(row, owner)) : own
       ? [own]
       : s.owners.filter(
           (o) =>

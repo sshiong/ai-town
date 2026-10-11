@@ -1,4 +1,5 @@
 import { validateTimePolicy } from './timePolicy';
+import { validatePrivacyBackupRow, redactedFact } from './backupPrivacy';
 import {
   BackupRow,
   assertNoSecrets,
@@ -37,9 +38,10 @@ export const largeTables = [
   'federationResourceAudit',
   'coldHistoryFiles',
   'modelMemoryVectors',
+  'travelPrivacyTombstones',
 ] as const;
 export const oldTables = [
-  ...largeTables.filter((t) => !['modelMemoryVectors', 'coldHistoryFiles', 'federationIdentity', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t)),
+  ...largeTables.filter((t) => !['travelPrivacyTombstones', 'modelMemoryVectors', 'coldHistoryFiles', 'federationIdentity', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t)),
   'modelMemoryVectors',
   'memoryEmbeddings',
   'embeddingsCache',
@@ -152,7 +154,7 @@ export async function validateManifest(manifest: LargeManifest, signature: strin
     bytes += entry.bytes;
   }
   if (bytes > MAX_ARCHIVE_BYTES) throw new Error('LARGE_BACKUP_ARCHIVE_BUDGET');
-  if (largeTables.some((table) => !['modelMemoryVectors', 'modelProviderQuotas', 'coldHistoryFiles', 'federationIdentityKeyHistory', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit', 'federationTravelAudit', 'federationResidentPolicy', 'federationResidentPolicyAudit', 'federationDisclosurePolicy', 'federationDisclosureAudit', ...memoryBackupTables].includes(table) && !tables.has(table)))
+  if (largeTables.some((table) => !['travelPrivacyTombstones', 'modelMemoryVectors', 'modelProviderQuotas', 'coldHistoryFiles', 'federationIdentityKeyHistory', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit', 'federationTravelAudit', 'federationResidentPolicy', 'federationResidentPolicyAudit', 'federationDisclosurePolicy', 'federationDisclosureAudit', ...memoryBackupTables].includes(table) && !tables.has(table)))
     throw new Error('INCOMPLETE_LARGE_BACKUP_MANIFEST');
   if (manifest.chunks.filter(c => c.table === 'federationResidentPolicy').reduce((sum, c) => sum + c.count, 0) > MAX_DENIED_RESIDENTS)
     throw new Error('RESIDENT_POLICY_CAPACITY_EXCEEDED');
@@ -219,6 +221,7 @@ export function referencesFor(value: any, validator: any): { id: string; table: 
   return [];
 }
 export function validateSourceRow(table: string, row: BackupRow) {
+  if (table === 'travelPrivacyTombstones') validatePrivacyBackupRow(row);
   if (table === 'coldHistoryFiles') return [{id:row.owner.worldId,table:'worlds'},{id:row.owner.memoryId,table:'memories'}];
   if (typeof row._id !== 'string' || !row._id || !Number.isFinite(row._creationTime))
     throw new Error('INVALID_BACKUP_DOCUMENT_ID');
@@ -267,6 +270,7 @@ export function validateSourceRow(table: string, row: BackupRow) {
 
 /** Only metadata required for cross-chunk preflight; payloads remain in private storage. */
 export function rowMetadata(table: string, row: BackupRow): BackupRow {
+  if (table === 'travelPrivacyTombstones') return stripSystem(row);
   if (isMemoryBackupTable(table)) return { ...stripSystem(row), _creationTime: row._creationTime };
   if (table === 'coldHistoryFiles') return {owner:row.owner,kind:row.file.manifest.kind,digest:row.file.manifest.digest,
     ...(row.file.version === 2 ? { manifest: row.file.manifest, descriptor: row.file.descriptor,
@@ -276,6 +280,7 @@ export function rowMetadata(table: string, row: BackupRow): BackupRow {
       messageAuthors: row.file.payload.messages.map((m: BackupRow) => m.authorGlobalId ?? m.authorPlayerId) } : {})};
   const keys = [
     'worldId',
+    'id',
     'playerId',
     'agentId',
     'agentGlobalId',
@@ -302,6 +307,10 @@ export function rowMetadata(table: string, row: BackupRow): BackupRow {
   ];
   const metadata: BackupRow = {};
   for (const key of keys) if (row[key] !== undefined) metadata[key] = row[key];
+  if (redactedFact(table, row)) {
+    if (table === 'federationEventFacts') metadata.payload = row.payload;
+    else Object.assign(metadata, { action: row.action, result: row.result, receiptPayload: row.receiptPayload });
+  }
   if (table === 'memories' && row.data.type === 'travel') {
     // Cross-chunk ownership/range checks need identifiers, not transcript prose.
     // Content integrity is carried by the separately computed content digest.
@@ -314,6 +323,7 @@ export function rowMetadata(table: string, row: BackupRow): BackupRow {
   return metadata;
 }
 export function relationKey(table: string, row: BackupRow): string | undefined {
+  if (table === 'travelPrivacyTombstones') return row.key;
   if (table === 'memorySummaryProvenance') return row.summaryMemoryId;
   if (table === 'memorySourceClaims') return JSON.stringify([row.worldId, row.playerId, row.sourceKey, row.generation]);
   if (table === 'federationResidentPolicy' || table === 'federationDisclosurePolicy') return row.agentGlobalId;

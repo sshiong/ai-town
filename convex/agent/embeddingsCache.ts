@@ -1,3 +1,5 @@
+import { dataRevision } from '../models/embeddingDataRevision';
+import { privacyCacheRevisionKey } from '../federation/travelPrivacyGuard';
 import { v } from 'convex/values';
 import { ActionCtx, internalMutation, internalQuery } from '../_generated/server';
 import { internal } from '../_generated/api';
@@ -34,6 +36,7 @@ export async function fetchBatch(
   texts: string[],
   options: CacheOptions = {},
 ): Promise<{ embeddings: number[][]; hits: number; ms: number; embeddingCertificateId?: Id<'embeddingCertificates'> }> {
+  const cacheGeneration = await ctx.runQuery(selfInternal.cacheGeneration, {});
   const route = options.route ?? (await activeRoute(ctx));
   const inputMode = options.inputMode ?? 'query';
   const embeddingCertificateId = await guardEmbeddingRoute(ctx, route);
@@ -79,7 +82,7 @@ export async function fetchBatch(
   // Cached vectors need the same live serving check as a new provider response.
   await guardEmbeddingRoute(ctx, route);
   if (toWrite.length > 0) {
-    await ctx.runMutation(selfInternal.writeEmbeddings, { embeddings: toWrite, namespace,
+    await ctx.runMutation(selfInternal.writeEmbeddings, { embeddings: toWrite, namespace, cacheGeneration,
       spaceId: route.space._id, embeddingCertificateId });
   }
   return {
@@ -133,9 +136,12 @@ export const getEmbeddingsByText = internalQuery({
   },
 });
 
+export const cacheGeneration = internalQuery({ args: {}, handler: ctx => dataRevision(ctx.db, privacyCacheRevisionKey) });
+
 export const writeEmbeddings = internalMutation({
   args: {
     namespace: v.string(),
+    cacheGeneration: v.optional(v.number()),
     spaceId: v.optional(v.id('embeddingSpaces')),
     embeddingCertificateId: v.optional(v.id('embeddingCertificates')),
     embeddings: v.array(
@@ -151,7 +157,10 @@ export const writeEmbeddings = internalMutation({
       const certificate = await assertSpaceCertificate(ctx.db, args.spaceId, args.embeddingCertificateId);
       if (certificate && args.embeddingCertificateId !== certificate._id) throw new Error('EMBEDDING_GENERATION_EVIDENCE_MISSING');
     } else if (args.embeddingCertificateId) throw new Error('EMBEDDING_CERTIFICATE_FENCED');
-    if (!(await cacheWritesAllowed(ctx))) return [];
+    const privacyJob = await ctx.db.query('travelPrivacyJobs').withIndex('scope_state', q =>
+      q.eq('scope', 'SENSITIVE').eq('state', 'RUNNING')).first();
+    if (privacyJob) return [];
+    if (!(await cacheWritesAllowed(ctx)) || (args.cacheGeneration ?? 0) !== await dataRevision(ctx.db, privacyCacheRevisionKey)) return [];
     const ids = [];
     for (const embedding of args.embeddings) {
       const prior = await ctx.db

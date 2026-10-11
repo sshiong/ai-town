@@ -858,6 +858,8 @@ export const dataMessages: Record<string, string> = {
   PROFILES: '正在处理模型配置',
   PREPARE: '正在准备',
   MEMORY_PROVENANCE: '正在处理记忆溯源',
+  PRIVACY_REMAP: '正在保留隐私清理记录',
+  PRIVACY_REMAP_ROLLBACK: '正在恢复隐私清理记录的归属',
   VECTOR_RESET: '正在重置向量',
   BUILDING: '正在构建',
   CAPTURE: '正在收集',

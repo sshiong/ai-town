@@ -134,7 +134,7 @@ export const federationTables = {
     .index('priorityRetry', ['envelope.type', 'ackedAt', 'failedAt', 'nextRetryAt'])
     .index('messageId', ['messageId']).index('retry', ['ackedAt', 'failedAt', 'nextRetryAt']),
   federationInbox: defineTable({
-    messageId: v.string(), fromTownId: v.string(), payloadDigest: v.string(), envelope: v.any(),
+    messageId: v.string(), fromTownId: v.string(), payloadDigest: v.string(), privacyPayloadDigest: v.optional(v.string()), envelope: v.any(),
     status: v.string(), receivedAt: v.number(), processedAt: v.optional(v.number()), ack: v.optional(v.any()),
   }).index('audit_time', ['receivedAt']).index('audit_visit_time', ['envelope.visitId', 'receivedAt']).index('visit', ['envelope.visitId'])
     .index('visit_status', ['envelope.visitId', 'status'])

@@ -1,4 +1,5 @@
 import * as largeFunctions from './backupLarge';
+import { assertBackupPrivacy } from './backupPrivacy';
 import { seedMemoryBackupEvidence, assertMemoryBackupEvidence, useLegacyMemoryBackupDigests } from './memoryBackupTestHelpers';
 import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
@@ -337,6 +338,160 @@ async function staged(
   return jobId as Id<'backupLargeJobs'>;
 }
 
+test('large import detects a conflicting deletion record in a later chunk before touching destination data', async () => {
+  const source = await town(1);
+  await source.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', {
+    key: `memory:${source.memoryIds[0]}`, visitId: 'cleared', createdAt: 1,
+    worldId: source.worldId, playerId: 'p:0', ownerGlobalId: source.agentGlobalId,
+  }));
+  const archive = await exported(source.t);
+  expect(archive.chunks.findIndex(chunk => chunk.table === 'travelPrivacyTombstones'))
+    .toBeGreaterThan(archive.chunks.findIndex(chunk => chunk.table === 'memories'));
+  const target = convexTest(schema, modules), before = await retainedState(target);
+  const jobId = await staged(target, archive, 'clone');
+  await expect(drive(target, jobId, 'import', 'READY')).rejects.toThrow('BACKUP_PRIVACY_REDACTED');
+  expect(await retainedState(target)).toEqual(before);
+});
+
+test('large clone carries original and mapped deletion keys with destination ownership', async () => {
+  const source = await town(1);
+  await source.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', {
+    key: `conversation:${source.worldId}:c:cleared`, visitId: 'cleared', createdAt: 1,
+    worldId: source.worldId, playerIds: ['p:0'],
+  }));
+  const archive = await exported(source.t), target = convexTest(schema, modules);
+  const jobId = await staged(target, archive, 'clone');
+  await drive(target, jobId, 'import', 'READY');
+  await target.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(target, jobId, 'import', 'COMPLETE');
+  const result = await target.run(async ctx => ({
+    world: await ctx.db.query('worlds').unique(), graves: await ctx.db.query('travelPrivacyTombstones').collect(),
+  }));
+  expect(result.graves.map(row => row.key).sort()).toEqual([
+    `conversation:${source.worldId}:c:cleared`, `conversation:${result.world!._id}:c:cleared`,
+  ].filter((key, index, all) => all.indexOf(key) === index).sort());
+  expect(result.graves.every(row => row.worldId === result.world!._id)).toBe(true);
+});
+
+test('large destructive cancellation does not erase local deletion history', async () => {
+  const source = await town(1), archive = await exported(source.t);
+  const original = { key: 'memory:unrelated-cleared', visitId: 'cleared', createdAt: 1,
+    worldId: source.worldId, playerId: 'p:0', ownerGlobalId: source.agentGlobalId };
+  await source.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', original));
+  const jobId = await staged(source.t, archive);
+  await drive(source.t, jobId, 'import', 'READY');
+  await source.t.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(source.t, jobId, 'import', 'MEMORY_PROVENANCE');
+  await source.t.mutation(mutation('cancel'), { adminToken, jobId });
+  await drive(source.t, jobId, 'import', 'CANCELLED');
+  const restoredWorld = await source.t.run(ctx => ctx.db.query('worlds').unique());
+  expect(await source.t.run(ctx => ctx.db.query('travelPrivacyTombstones').unique()))
+    .toMatchObject({ ...original, worldId: restoredWorld!._id });
+  const resident = await source.t.query(makeFunctionReference<'query'>('federation/backup:getResident'), {
+    adminToken, worldId: restoredWorld!._id, playerId: 'p:0',
+  });
+  expect(resident.sections.travelPrivacyTombstones.map(decodeRow).map((row: any) => row.key)).toContain(original.key);
+});
+
+test('large local deletion ownership remaps in durable pages and remains resident-exportable', async () => {
+  const source = await town(1), archive = await exported(source.t);
+  await source.t.run(async ctx => {
+    for (let i = 0; i < 61; i++) await ctx.db.insert('travelPrivacyTombstones', {
+      key: `memory:local-cleared-${i}`, visitId: `local-cleared-${i}`, createdAt: 1,
+      worldId: source.worldId, playerId: 'p:0', ownerGlobalId: source.agentGlobalId,
+    });
+  });
+  const jobId = await staged(source.t, archive);
+  await drive(source.t, jobId, 'import', 'READY');
+  await source.t.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(source.t, jobId, 'import', 'PRIVACY_REMAP');
+  await source.t.action(action('advanceImport'), { adminToken, jobId });
+  const checkpoint = await source.t.run(async ctx => ({ job: await ctx.db.get(jobId),
+    world: await ctx.db.query('worlds').unique(), graves: await ctx.db.query('travelPrivacyTombstones').collect() }));
+  expect(checkpoint.job!.phase).toBe('PRIVACY_REMAP');
+  expect(checkpoint.job!.cursor).not.toBeNull();
+  expect(checkpoint.graves.filter(row => row.worldId === checkpoint.world!._id)).toHaveLength(20);
+  await drive(source.t, jobId, 'import', 'COMPLETE');
+  const resident = await source.t.query(makeFunctionReference<'query'>('federation/backup:getResident'), {
+    adminToken, worldId: checkpoint.world!._id, playerId: 'p:0',
+  });
+  expect(resident.sections.travelPrivacyTombstones).toHaveLength(61);
+});
+
+test('cancellation after local privacy remapping follows partial world aliases into rollback ownership', async () => {
+  const source = await town(1), archive = await exported(source.t);
+  await source.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', {
+    key: `conversation:${source.worldId}:c:removed`, visitId: 'cleared', createdAt: 1,
+    worldId: source.worldId, playerIds: ['p:0'],
+  }));
+  const jobId = await staged(source.t, archive);
+  await drive(source.t, jobId, 'import', 'READY');
+  await source.t.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(source.t, jobId, 'import', 'FINALIZE');
+  await source.t.mutation(mutation('cancel'), { adminToken, jobId });
+  await drive(source.t, jobId, 'import', 'CANCELLED');
+  const result = await source.t.run(async ctx => ({ world: await ctx.db.query('worlds').unique(),
+    graves: await ctx.db.query('travelPrivacyTombstones').collect() }));
+  expect(result.graves.every(row => row.worldId === result.world!._id)).toBe(true);
+  expect(result.graves.some(row => row.key === `conversation:${result.world!._id}:c:removed`)).toBe(true);
+});
+
+test.each(['restore', 'rollback'] as const)('local deletion ownership follows a prior large restore during a later %s', async mode => {
+  const source = await town(1), archive = await exported(source.t);
+  const first = await staged(source.t, archive);
+  await drive(source.t, first, 'import', 'READY');
+  await source.t.mutation(mutation('startApply'), { adminToken, jobId: first });
+  await drive(source.t, first, 'import', 'COMPLETE');
+  const previousWorld = await source.t.run(ctx => ctx.db.query('worlds').unique());
+  await source.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', {
+    key: `conversation:${previousWorld!._id}:c:removed`, visitId: 'cleared-after-first-restore', createdAt: 1,
+    worldId: previousWorld!._id, playerIds: ['p:0'],
+  }));
+  const second = await staged(source.t, archive);
+  await drive(source.t, second, 'import', 'READY');
+  await source.t.mutation(mutation('startApply'), { adminToken, jobId: second });
+  await drive(source.t, second, 'import', 'FINALIZE');
+  if (mode === 'rollback') await source.t.mutation(mutation('cancel'), { adminToken, jobId: second });
+  await drive(source.t, second, 'import', mode === 'rollback' ? 'CANCELLED' : 'COMPLETE');
+  const result = await source.t.run(async ctx => ({ world: await ctx.db.query('worlds').unique(),
+    graves: await ctx.db.query('travelPrivacyTombstones').collect() }));
+  expect(result.graves.every(row => row.worldId === result.world!._id)).toBe(true);
+  const resident = await source.t.query(makeFunctionReference<'query'>('federation/backup:getResident'), {
+    adminToken, worldId: result.world!._id, playerId: 'p:0',
+  });
+  expect(resident.sections.travelPrivacyTombstones.map(decodeRow).map((row: any) => row.key))
+    .toContain(`conversation:${result.world!._id}:c:removed`);
+});
+
+test('legacy large manifests may omit the optional deletion-history section', async () => {
+  const source = await town(1), archive = await exported(source.t);
+  archive.chunks = archive.chunks.filter(chunk => chunk.table !== 'travelPrivacyTombstones').map((chunk, index) => ({ ...chunk, index }));
+  archive.manifest.chunks = await Promise.all(archive.chunks.map(descriptor));
+  archive.signature = await sign(archive.manifest, source.keys.privateKeyEncrypted);
+  const target = convexTest(schema, modules), jobId = await staged(target, archive, 'clone');
+  await drive(target, jobId, 'import', 'READY');
+  await target.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(target, jobId, 'import', 'COMPLETE');
+  expect(await target.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).toEqual([]);
+});
+
+test('old source memory IDs follow durable large-clone mappings after destination clearing', async () => {
+  const source = await town(1), archive = await exported(source.t), target = convexTest(schema, modules);
+  const jobId = await staged(target, archive, 'clone');
+  await drive(target, jobId, 'import', 'READY');
+  await target.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(target, jobId, 'import', 'COMPLETE');
+  await target.run(async ctx => {
+    const memory = (await ctx.db.query('memories').unique())!;
+    await ctx.db.insert('travelPrivacyTombstones', { key: `memory:${memory._id}`, visitId: 'cleared-after-clone',
+      createdAt: 1, worldId: memory.worldId, playerId: memory.playerId, ownerGlobalId: memory.agentGlobalId });
+    await ctx.db.delete(memory._id);
+  });
+  const rows = archive.chunks.filter(chunk => chunk.table === 'memories').flatMap(chunk => chunk.rows.map(decodeRow));
+  await expect(target.run(ctx => assertBackupPrivacy(ctx.db, { memories: rows }, archive.manifest.source.townId)))
+    .rejects.toThrow('BACKUP_PRIVACY_REDACTED');
+});
+
 test.each(['current', 'changed source', 'legacy without complete evidence'])('memory provenance large-town clone retains %s evidence and drops executable claims', async variant => {
   const source = await town(1);
   await source.t.run(async ctx => {
@@ -612,7 +767,8 @@ test.each(['restore', 'clone', 'rollback'] as const)('large %s preserves capacit
     await ctx.db.insert('federationResourceAudit', { operation: 'SOURCE_QUOTA_CHANGED', previous: null, next: 3, createdAt: 1 });
     await ctx.db.insert('federationResourceMetrics', { kind: 'INBOUND_EVENT', bucketStart: Date.now(), count: 1, durationCount: 0, durationSumMs: 0, samples: [] });
   });
-  expect(largeTables.filter(t => !['coldHistoryFiles', 'modelMemoryVectors'].includes(t)).slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
+  expect(largeTables.filter(t => !['coldHistoryFiles', 'modelMemoryVectors'].includes(t)).slice(-5)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit', 'travelPrivacyTombstones']);
+  expect(oldTables).not.toContain('travelPrivacyTombstones');
   expect(oldTables.slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
   const archive = await exported(t);
   expect(archive.manifest.chunks.some(c => c.table === 'federationResourceMetrics')).toBe(false);

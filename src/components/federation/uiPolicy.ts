@@ -137,6 +137,14 @@ export function adminErrorSummary(message: string, t: MessageTranslator = englis
       'The model credential is missing on the server. Configure the referenced environment variable.',
     BACKUP_MAINTENANCE_LOCKED:
       'A checkpointed archive task is holding the town maintenance lock. Finish it or cancel and complete rollback before changing town data.',
+    TOWN_TRAVEL_PRIVACY_BUSY:
+      'A travel privacy check or cleanup is running. Wait for it to finish before starting an archive.',
+    BACKUP_PRIVACY_REDACTED:
+      'This archive contains content marked as cleared. Import a backup exported after cleanup.',
+    BACKUP_PRIVACY_HISTORY_LIMIT:
+      'Deletion-history mappings exceed the supported verification limit. This import was stopped to preserve privacy.',
+    BACKUP_PRIVACY_WORLD_HISTORY_LIMIT:
+      'World history exceeds the supported privacy verification limit. The saved checkpoint is retained.',
     DISABLE_FEDERATION_BEFORE_BACKUP:
       'Close federation visits before starting a consistent archive.',
     RESUME_BACKUP_JOB_FIRST: 'Retry the failed checkpoint before continuing this archive task.',

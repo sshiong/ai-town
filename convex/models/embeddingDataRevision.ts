@@ -1,7 +1,10 @@
+import { assertMemoryNotRedacted, assertConversationNotRedacted, isTravelRedacted } from '../federation/travelPrivacyGuard';
 import type { DatabaseReader, MutationCtx } from '../_generated/server';
 import type { Doc } from '../_generated/dataModel';
 
 export const sourceKey = 'memories';
+export const privacyRevisionKey = 'travelPrivacySources';
+const privacySourceTables = ['coldHistoryArchives', 'coldHistoryChunks', 'homeTravelTranscripts', 'memorySourceCorrections', 'federationTurns', 'federationTranscriptJobs', 'backupImports', 'residentModelBindings'] as const;
 export const vectorKey = (spaceId: string) => `vectors:${spaceId}`;
 export async function dataRevision(db: DatabaseReader, key: string) {
   return (await db.query('embeddingDataRevisions').withIndex('key', q => q.eq('key', key)).unique())?.revision ?? 0;
@@ -27,13 +30,30 @@ export function withEmbeddingRevision(ctx: MutationCtx): MutationCtx {
       if (!['insert', 'patch', 'replace', 'delete'].includes(String(property)))
         return typeof value === 'function' ? value.bind(target) : value;
       return async (...args: any[]) => {
+        const privacyTable = property === 'insert' ? args[0] : privacySourceTables.find(name => db.normalizeId(name, args[0]));
+        if ((privacySourceTables as readonly string[]).includes(privacyTable)) {
+          const result = await value.apply(target, args);
+          await bump(db, privacyRevisionKey);
+          return result;
+        }
         const table = property === 'insert' ? args[0]
           : db.normalizeId('memories', args[0]) ? 'memories'
           : db.normalizeId('modelMemoryVectors', args[0]) ? 'modelMemoryVectors' : undefined;
         if (table !== 'memories' && table !== 'modelMemoryVectors') return value.apply(target, args);
         const prior = property === 'insert' ? null : await (db.get as any)(args[0]);
+        if (property !== 'delete') {
+          if (table === 'memories') {
+            if (prior) await assertMemoryNotRedacted(db, prior._id);
+            const next = { ...prior, ...args[1] };
+            if (next.data?.type === 'travel' && await isTravelRedacted(db, next.data.visitId)) throw new Error('TRAVEL_PRIVACY_REDACTED');
+            if (next.data?.type === 'conversation' && next.worldId) await assertConversationNotRedacted(db, next.worldId, next.data.conversationId);
+            if (next.data?.type === 'reflection') for (const id of next.data.relatedMemoryIds) await assertMemoryNotRedacted(db, id);
+          } else await assertMemoryNotRedacted(db, args[1]?.memoryId ?? prior?.memoryId);
+        }
         const result = await value.apply(target, args);
         if (table === 'memories') {
+          if (property === 'patch' && Object.prototype.hasOwnProperty.call(args[1], 'data') &&
+              JSON.stringify(args[1].data) !== JSON.stringify(prior?.data)) await bump(db, privacyRevisionKey);
           const material = property !== 'patch' || ['description', 'worldId', 'playerId', 'agentGlobalId']
             .some(key => Object.prototype.hasOwnProperty.call(args[1], key) && args[1][key] !== prior?.[key]);
           if (material) await bump(db, sourceKey);

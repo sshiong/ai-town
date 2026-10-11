@@ -1083,3 +1083,44 @@ test('renewal headroom retains clock, authority and inactive deployment gates wh
   await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'CONVERSATION_ENDED', visitId: 'visit-1', payload: {} }))).rejects.toThrow('DEPLOYMENT_NOT_ACTIVE');
   await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'VISIT_RETURN', visitId: 'visit-1', payload: {} }))).resolves.toEqual(expect.any(String));
 });
+
+test('privacy tombstones commit late history without retaining bodies and drain authenticated sequences', async () => {
+  const { a, b, credentialEncrypted } = await setup();
+  await seedVisit(a, b, 'home', 'COMPLETED');
+  await a.t.run(async ctx => {
+    const ledger = await ctx.db.query('visitLedger').unique();
+    await ctx.db.patch(ledger!._id, { leaseExpiry: Date.now() - 120000, cleanupConfirmed: true });
+    await ctx.db.insert('travelPrivacyTombstones', { key: 'visit:visit-1', visitId: 'visit-1', createdAt: Date.now() });
+  });
+  const history = (sequence: number) => visitMessage(b, a, 'CONVERSATION_ENDED', sequence, 'historical', {
+    payload: { eventId: `privacy-page-${sequence}`, text: 'private-history-body', messages: [{ text: 'private-history-body' }] },
+  });
+  const second = history(2), first = history(1);
+  const secondPacket = await signPacket(second, b.keys.privateKeyEncrypted, credentialEncrypted);
+  expect((await a.t.action(actionRef('transport/receiveMessage'), { packet: secondPacket })).body.status).toBe('BUFFERED');
+  expect((await a.t.action(actionRef('transport/receiveMessage'), { packet: await signPacket(first, b.keys.privateKeyEncrypted, credentialEncrypted) })).body.status).toBe('COMMITTED');
+  await a.t.mutation(mutationRef('transport/drainStream'), { streamKey: streamKey(first, b.townId) });
+  expect((await a.t.action(actionRef('transport/receiveMessage'), { packet: secondPacket })).body.status).toBe('COMMITTED');
+  const rows = await a.t.run(ctx => ctx.db.query('federationInbox').collect());
+  expect(rows).toHaveLength(2);
+  expect(rows.every(row => row.status === 'COMMITTED' && row.envelope.payload.privacyRedacted)).toBe(true);
+  expect(JSON.stringify(rows)).not.toContain('private-history-body');
+  expect(rows.find(row => row.messageId === second.messageId)?.payloadDigest).toBe(await (await import('./transport')).messageDigest(second));
+  expect(await a.t.run(ctx => ctx.db.query('homeTravelTranscripts').collect())).toHaveLength(0);
+  expect((await a.t.run(ctx => ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', streamKey(first, b.townId))).unique()))?.nextExpectedSequence).toBe(3);
+  const forged = await signPacket({ ...first, payload: { text: 'conflicting-body' } }, b.keys.privateKeyEncrypted, credentialEncrypted);
+  await expect(a.t.action(actionRef('transport/receiveMessage'), { packet: forged })).rejects.toThrow('MESSAGE_ID_CONFLICT');
+});
+
+test('privacy erasure preserves lifecycle fencing and stream control dispatch', async () => {
+  const { a, b } = await setup(); await seedVisit(b, a, 'host', 'COMPLETED');
+  await b.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', { key: 'visit:visit-1', visitId: 'visit-1', createdAt: Date.now() }));
+  const returned = visitMessage(a, b, 'VISIT_RETURN', 1);
+  expect((await accept(b, returned)).status).toBe('COMMITTED');
+  const row = await b.t.run(ctx => ctx.db.query('federationInbox').withIndex('messageId', q => q.eq('messageId', returned.messageId)).unique());
+  expect(row?.envelope.payload.fencingToken).toBe('test-fencing-token-32bytes');
+  const request = visitMessage(a, b, 'SESSION_RESYNC', 1, 'stream-control', { sequence: undefined, streamId: undefined, payload: { mode: 'request', streamId: 'lease-control' } });
+  expect((await accept(b, request)).status).toBe('COMMITTED');
+  const snapshot = await b.t.run(ctx => ctx.db.query('federationOutbox').withIndex('visit', q => q.eq('envelope.visitId', 'visit-1')).collect());
+  expect(snapshot.some(item => item.envelope.type === 'SESSION_RESYNC' && item.envelope.payload.mode === 'snapshot')).toBe(true);
+});

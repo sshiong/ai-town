@@ -37,6 +37,21 @@ export const storagePolicyFields = {
   vectorRebuildBatchSize: v.number(),
 };
 export const storagePolicyTables = {
+  travelPrivacyTombstones: defineTable({
+    key: v.string(), visitId: v.string(), createdAt: v.number(),
+    worldId: v.optional(v.id('worlds')), ownerGlobalId: v.optional(v.string()), playerId: v.optional(v.string()), playerIds: v.optional(v.array(v.string())),
+  }).index('key', ['key']).index('world', ['worldId']).index('world_key', ['worldId', 'key']),
+  travelPrivacyJobs: defineTable({
+    visitId: v.string(), scope: v.union(v.literal('CACHE'), v.literal('SENSITIVE')),
+    state: v.string(), phase: v.string(), tableIndex: v.number(), cursor: v.union(v.string(), v.null()),
+    revision: v.number(), sourceRevision: v.number(), privacyRevision: v.number(), changed: v.boolean(),
+    worldId: v.optional(v.id('worlds')), role: v.string(), ownerGlobalId: v.string(),
+    conversationIds: v.array(v.string()), conversationOwners: v.array(v.object({ conversationId: v.string(), playerIds: v.array(v.string()) })), transcriptIds: v.array(v.string()),
+    memoryIds: v.array(v.id('memories')), memoryOwners: v.array(v.object({ memoryId: v.id('memories'), worldId: v.optional(v.id('worlds')), playerId: v.string(), ownerGlobalId: v.optional(v.string()) })), archiveIds: v.array(v.id('coldHistoryArchives')),
+    textHashes: v.array(v.string()), blockers: v.array(v.string()), externalCopies: v.number(),
+    counts: v.any(), processedRows: v.number(), createdAt: v.number(), updatedAt: v.number(),
+    finishedAt: v.optional(v.number()),
+  }).index('visit', ['visitId']).index('state', ['state']).index('scope_state', ['scope', 'state']),
   coldHistoryArchives: defineTable({
     sourceKey: v.string(),
     lookupKey: v.optional(v.string()),

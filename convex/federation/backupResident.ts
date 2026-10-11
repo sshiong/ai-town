@@ -1,4 +1,5 @@
 import { Infer, v } from 'convex/values';
+import { assertBackupPrivacy, restorePrivacyRows } from './backupPrivacy';
 import { makeFunctionReference } from 'convex/server';
 import type { QueryCtx, MutationCtx } from '../_generated/server';
 import type { Id, TableNames } from '../_generated/dataModel';
@@ -12,7 +13,7 @@ import {
 } from './backupHelpers';
 import { validateSourceRow } from './backupLargeHelpers';
 import { validateGenerationEvidence, validateVectorSource } from './vectorEvidence';
-import { assertTownUnlocked } from './maintenanceLock';
+import { assertArchiveCanStart } from './maintenanceLock';
 import { assertNoIdentityConflict } from './identityConflict';
 import { digest } from './security';
 import { identity } from './store';
@@ -36,6 +37,7 @@ type Args = {
   residentRestore?: Infer<typeof residentRestoreConfirmation>;
 };
 const supported = new Set([
+  'travelPrivacyTombstones',
   ...memoryBackupTables,
   'worlds',
   'maps',
@@ -152,7 +154,7 @@ async function existingRow(ctx: QueryCtx | MutationCtx, name: string, row: Backu
 }
 
 export async function residentRestorePlan(ctx: QueryCtx | MutationCtx, args: Args) {
-  await assertTownUnlocked(ctx);
+  await assertArchiveCanStart(ctx);
   await assertNoIdentityConflict(ctx);
   const bundle = await validateBundle(args.bundle);
   if (bundle.manifest.scope !== 'resident') throw new Error('RESIDENT_BACKUP_REQUIRED');
@@ -160,6 +162,7 @@ export async function residentRestorePlan(ctx: QueryCtx | MutationCtx, args: Arg
   const rows: Record<string, BackupRow[]> = Object.fromEntries(
     Object.entries(bundle.sections).map(([name, values]) => [name, values.map(decodeRow)]),
   );
+  await assertBackupPrivacy(ctx.db, rows, bundle.manifest.sourceTownId);
   for (const [name, values] of Object.entries(rows)) {
     if (values.length && !supported.has(name)) throw new Error('RESIDENT_BACKUP_SCOPE_MISMATCH');
     for (const row of values) validateSourceRow(name, row);
@@ -752,6 +755,7 @@ export async function applyResidentRestore(ctx: MutationCtx, args: Args) {
   for (const name of memoryBackupTables) for (const row of rows[name] ?? [])
     if (mapping[row._id]) await repairMemoryBackupRow(ctx, name, mapping[row._id], row, async id => originalMemoryRows.get(id) ?? null);
   await ctx.db.patch(importId, { mapping });
+  await restorePrivacyRows(ctx, rows.travelPrivacyTombstones ?? [], mapping);
   for (const row of rows.memories ?? [])
     await ctx.scheduler.runAfter(
       0,

@@ -1,3 +1,4 @@
+import { assertMemoryNotRedacted } from './travelPrivacyGuard';
 import { v } from 'convex/values';
 import { action, internalQuery, internalMutation, query } from '../maintenanceFunctions';
 import type { QueryCtx, ActionCtx } from '../_generated/server';
@@ -41,6 +42,7 @@ export type Manifest = {
 };
 export async function source(ctx: QueryCtx, args: OwnerArgs) {
   await requireOwner(ctx, args);
+  await assertMemoryNotRedacted(ctx.db, args.memoryId);
   const memory = await ctx.db.get(args.memoryId);
   if (!memory || !owns(memory, args)) throw new Error('COLD_HISTORY_OWNER_MISMATCH');
   if (memory.data.type === 'conversation') {

@@ -2,6 +2,7 @@ import { ObjectType, v } from 'convex/values';
 import { MutationCtx, internalMutation } from '../maintenanceFunctions';
 import { internal } from '../_generated/api';
 import { digest } from '../federation/security';
+import { isTravelRedacted } from '../federation/travelPrivacyGuard';
 import { playerId } from '../aiTown/ids';
 
 /** Only the authenticated Home receipt processor may call this internal mutation. */
@@ -27,6 +28,7 @@ type ConfirmedEvent = ObjectType<typeof confirmedEventFields> & {
   authorGlobalId?: string;
 };
 export async function persistConfirmedEvent(ctx: MutationCtx, args: ConfirmedEvent) {
+  if (await isTravelRedacted(ctx.db, args.visitId)) throw new Error('TRAVEL_PRIVACY_REDACTED');
   if (
     !args.description.trim() ||
     args.description.length > 16000 ||
@@ -145,6 +147,7 @@ const observedConversationFields = {
 export type ConfirmedObservation = ObjectType<typeof observedConversationFields>;
 /** Called inside the authenticated Inbox transaction, before scheduling a decision. */
 export async function recordConfirmedObservation(ctx: MutationCtx, args: ConfirmedObservation) {
+  if (await isTravelRedacted(ctx.db, args.visitId)) return [];
   if (
     !args.observationEventId ||
     !args.federationConversationId ||

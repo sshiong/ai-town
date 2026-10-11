@@ -293,6 +293,113 @@ async function apply(f: Fixture, jobId: Id<'backupLargeJobs'>) {
   return drive(f, jobId);
 }
 
+test('selective privacy export ignores time bounds while excluding unrelated residents and config-only scope', async () => {
+  const source = await fixture('privacy-source', 1);
+  await source.t.run(async ctx => {
+    for (const i of [0, 1]) await ctx.db.insert('travelPrivacyTombstones', {
+      key: `memory:cleared-owner-${i}`, visitId: `v-${i}`, createdAt: 1, worldId: source.worldId,
+      playerId: `p:${i}`, ownerGlobalId: source.globals[i],
+    });
+    await ctx.db.insert('travelPrivacyTombstones', { key: `conversation:${source.worldId}:c:removed`, visitId: 'shared',
+      createdAt: 1, worldId: source.worldId, playerIds: ['p:0', 'p:1'] });
+  });
+  const selected = await archive(source, { scope: 'memories-only', categories: ['reflection'], from: 100, to: 200 });
+  const records = selected.chunks.filter(chunk => chunk.table === 'travelPrivacyTombstones')
+    .flatMap(chunk => chunk.rows.map((raw: any) => decodeRow(JSON.parse(raw).record)));
+  expect(records.map(row => row.key).sort()).toEqual(['memory:cleared-owner-0', `conversation:${source.worldId}:c:removed`].sort());
+  expect(records.find(row => row.playerIds)!.playerIds).toEqual(['p:0']);
+  const config = await archive(source, { scope: 'config-only', categories: ['configuration'], agentGlobalIds: [] });
+  expect(config.chunks.filter(chunk => chunk.table === 'travelPrivacyTombstones').flatMap(chunk => chunk.rows)).toEqual([]);
+});
+
+test('selective import rejects an incoming cleared memory and leaves the destination intact', async () => {
+  const source = await fixture('privacy-source', 1), target = await fixture('privacy-target', 0);
+  await source.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', { key: `memory:${source.memories[0]}`,
+    visitId: 'cleared', createdAt: 1, worldId: source.worldId, playerId: 'p:0', ownerGlobalId: source.globals[0] }));
+  const exported = await archive(source);
+  await expectPreflightFailure(target, exported, options(target, exported), 'BACKUP_PRIVACY_REDACTED');
+});
+
+test('selective clone carries mapped deletion ownership and cancellation preserves negative evidence', async () => {
+  const source = await fixture('privacy-source', 1), target = await fixture('privacy-target', 0);
+  await source.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', { key: `conversation:${source.worldId}:c:removed`,
+    visitId: 'cleared', createdAt: 1, worldId: source.worldId, playerIds: ['p:0'] }));
+  const exported = await archive(source), jobId = await start(target, exported);
+  const result = await apply(target, jobId);
+  const graves = await target.t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect());
+  expect(graves.some(row => row.key === `conversation:${source.worldId}:c:removed`)).toBe(true);
+  expect(graves.every(row => row.worldId === target.worldId && row.playerIds?.includes(result.targetOwners[0].playerId))).toBe(true);
+  const second = await start(target, exported);
+  const ready = await drive(target, second, 'READY');
+  await target.t.mutation(am('startApply'), { adminToken, jobId: second, expectedPlanDigest: ready.planDigest,
+    expectedTargetDigest: ready.targetDigest, confirmChanges: true });
+  await drive(target, second, 'FINALIZE');
+  await target.t.mutation(am('cancel'), { adminToken, jobId: second });
+  await drive(target, second, 'CANCELLED');
+  const retained = await target.t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect());
+  for (const original of graves) expect(retained).toContainEqual(original);
+});
+
+test('skip-edge cannot hide a cleared source behind a selected reflection', async () => {
+  const source = await fixture('privacy-source', 1), target = await fixture('privacy-target', 0);
+  await source.t.run(ctx => ctx.db.patch(source.memories[0], {
+    data: { type: 'reflection', relatedMemoryIds: [source.privateMemory] },
+  }));
+  const exported = await archive(source, { scope: 'memories-only', categories: ['reflection'] });
+  await target.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', {
+    key: `memory:${source.privateMemory}`, visitId: 'cleared-source', createdAt: 1,
+  }));
+  const configured = options(target, exported, 'merge');
+  configured.externalReferences = [{ sourceId: source.privateMemory, sourceAgentGlobalId: source.globals[0], operation: 'skip-edge' }];
+  await expectPreflightFailure(target, exported, configured, 'BACKUP_PRIVACY_REDACTED');
+});
+
+test('old selective memory IDs remain blocked after an imported clone is cleared', async () => {
+  const source = await fixture('privacy-source', 1), target = await fixture('privacy-target', 0);
+  const exported = await archive(source);
+  await apply(target, await start(target, exported));
+  await target.t.run(async ctx => {
+    const memory = (await ctx.db.query('memories').collect()).find(row => row.description === 'privacy-source memory 0')!;
+    await ctx.db.insert('travelPrivacyTombstones', { key: `memory:${memory._id}`, visitId: 'cleared-clone', createdAt: 1,
+      worldId: memory.worldId, playerId: memory.playerId, ownerGlobalId: memory.agentGlobalId });
+    await ctx.db.delete(memory._id);
+  });
+  await expectPreflightFailure(target, exported, options(target, exported), 'BACKUP_PRIVACY_REDACTED');
+});
+
+test('a historical conversation key does not redact an unrelated current conversation with the same local ID', async () => {
+  const source = await fixture('privacy-source', 1), target = await fixture('privacy-target', 0);
+  await signedConversation(source);
+  await source.t.run(async ctx => {
+    const historicalWorld = await ctx.db.insert('worlds', { nextId: 1, players: [], agents: [], conversations: [] });
+    await ctx.db.insert('travelPrivacyTombstones', { key: `conversation:${historicalWorld}:c:40`, visitId: 'historical-cleared',
+      createdAt: 1, worldId: source.worldId, playerIds: ['p:0'] });
+  });
+  const exported = await archive(source);
+  await apply(target, await start(target, exported));
+  const result = await target.t.run(async ctx => ({ memories: await ctx.db.query('memories').collect(),
+    messages: await ctx.db.query('messages').collect(), graves: await ctx.db.query('travelPrivacyTombstones').collect() }));
+  const memory = result.memories.find(row => row.description === 'Signed conversation owner 0')!;
+  expect(memory.data.type).toBe('conversation');
+  if (memory.data.type !== 'conversation') throw new Error('MISSING_IMPORTED_CONVERSATION');
+  expect(result.messages.filter(row => row.conversationId === (memory.data as any).conversationId)).toHaveLength(3);
+  expect(result.graves.some(row => row.key === `conversation:${memory.worldId}:${(memory.data as any).conversationId}`)).toBe(false);
+});
+
+test('skipping a selected resident also skips their deletion records without dropping another resident records', async () => {
+  const source = await fixture('privacy-source', 1), target = await fixture('privacy-target', 0);
+  await source.t.run(async ctx => {
+    for (const i of [0, 1]) await ctx.db.insert('travelPrivacyTombstones', { key: `memory:removed-${i}`, visitId: `cleared-${i}`,
+      createdAt: 1, worldId: source.worldId, playerId: `p:${i}`, ownerGlobalId: source.globals[i] });
+  });
+  const exported = await archive(source, { scope: 'agents-selected', agentGlobalIds: source.globals });
+  const configured = options(target, exported);
+  configured.owners[1] = { sourceAgentGlobalId: source.globals[1], operation: 'skip' };
+  await apply(target, await start(target, exported, configured));
+  const graves = await target.t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect());
+  expect(graves.map(row => row.key)).toEqual(['memory:removed-0']);
+});
+
 test.each(['current', 'changed source', 'legacy digest'])('memory provenance selected reflection imports %s complete source evidence repeatably', async variant => {
   const source = await fixture('memory-source', 1);
   await source.t.run(async ctx => {

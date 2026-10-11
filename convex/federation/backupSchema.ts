@@ -25,7 +25,7 @@ export const backupTables = {
     mapping: v.any(),
     runtimeSnapshot: v.any(),
     manifest: v.any(),
-  }),
+  }).index('sourceTown', ['sourceTownId']),
   backupReconciliations: defineTable({
     importId: v.id('backupImports'),
     agentGlobalId: v.string(),

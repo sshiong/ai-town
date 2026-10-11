@@ -1,3 +1,4 @@
+import { assertConversationNotRedacted } from './federation/travelPrivacyGuard';
 import { v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
 import { internal } from './_generated/api';
@@ -71,6 +72,7 @@ async function wake(ctx: MutationCtx, at = Date.now()) {
   await ctx.db.patch(control._id, { wakeAt: at, scheduledId, generation });
 }
 async function checkedMessages(db: DatabaseReader, args: RequestArgs, allowMissing = false) {
+  await assertConversationNotRedacted(db, args.worldId, args.conversationId);
   if (
     !args.messageIds.length ||
     args.messageIds.length > 20 ||

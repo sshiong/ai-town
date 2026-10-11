@@ -1,3 +1,4 @@
+import { assertMemoryNotRedacted, assertConversationNotRedacted } from '../federation/travelPrivacyGuard';
 import { makeFunctionReference } from 'convex/server';
 import { availableSource, assertOwner, captureSource, currentMemory, currentMemories, sourceDocumentBytes, type Source } from './memorySources';
 import { commitProvenance, finishReflection } from './memoryCompression';
@@ -573,6 +574,7 @@ export const insertMemory = internalMutation({
     if (!memory.worldId) throw new Error('MEMORY_WORLD_REQUIRED');
     if (memory.data.type === 'conversation') {
       const conversationId = memory.data.conversationId;
+      await assertConversationNotRedacted(ctx.db, memory.worldId, conversationId);
       const existing = await ctx.db.query('memories').withIndex('resident_conversation', q =>
         q.eq('worldId', memory.worldId!).eq('playerId', memory.playerId).eq('data.type', 'conversation').eq('data.conversationId', conversationId)).first();
       if (existing) return;
@@ -650,6 +652,7 @@ export const insertReflectionMemories = internalMutation({
     for (const { embedding, embeddingCertificateId, relatedMemoryIds, ...rest } of reflections) {
       if (!relatedMemoryIds.length || relatedMemoryIds.length > REFLECTION_PAGE_SIZE || new Set(relatedMemoryIds).size !== relatedMemoryIds.length) throw new Error('MEMORY_REFLECTION_SOURCES_INVALID');
       for (const id of relatedMemoryIds) {
+        await assertMemoryNotRedacted(ctx.db, id);
         assertOwner(await ctx.db.get(id), { worldId, playerId, agentGlobalId: binding?.agentGlobalId });
         if (job && !job.sources.some(source => source.memoryId === id)) throw new Error('MEMORY_REFLECTION_SOURCE_NOT_CLAIMED');
       }

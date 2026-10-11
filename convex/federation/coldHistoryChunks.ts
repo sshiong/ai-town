@@ -4,7 +4,7 @@ import type { ActionCtx, MutationCtx, QueryCtx } from '../_generated/server';
 import type { Doc, Id } from '../_generated/dataModel';
 import { archiveFor, source, type Payload } from './coldHistory';
 import { ownerArgs, type OwnerArgs } from './coldHistoryOwner';
-import { assertTownUnlocked } from './maintenanceLock';
+import { assertArchiveCanStart } from './maintenanceLock';
 import { identity } from './store';
 import { digest, requireAdmin, sign, verifySignature } from './security';
 import { queryRef, mutationRef } from './refs';
@@ -53,7 +53,7 @@ export const start = mutation({
     const s = await source(ctx, args), existing = await archiveFor(ctx, s.sourceKey);
     if (existing?.state === 'VERIFIED') return { archiveId: existing._id, state: 'VERIFIED' as const, count: existing.manifest.count };
     if (existing?.jobId) return view(await owned(ctx, { ...args, jobId: existing.jobId }));
-    await assertTownUnlocked(ctx);
+    await assertArchiveCanStart(ctx);
     const local = await stable(ctx), now = Date.now(), snapshotId = crypto.randomUUID();
     const manifest = { format: 'ai-town-cold-history', version: 2, schemaVersion: 1,
       sourceTownId: local.townId, sourceKey: s.sourceKey, kind: s.kind, sourceId: s.sourceId,
@@ -221,7 +221,7 @@ export const startImport = mutation({
         throw new Error('COLD_HISTORY_JOB_IN_PROGRESS');
       return view(job);
     }
-    await assertTownUnlocked(ctx); await stable(ctx);
+    await assertArchiveCanStart(ctx); await stable(ctx);
     const now = Date.now(), fields = { sourceKey: root.manifest.sourceKey, lookupKey: s.sourceKey, sourceId: root.manifest.sourceId,
       kind: s.kind, worldId: args.worldId, ownerGlobalId: s.ownerGlobalId, state: 'PENDING' as const,
       manifest: root.manifest, signature: root.signature, publicKey: root.publicKey, authorAliases,

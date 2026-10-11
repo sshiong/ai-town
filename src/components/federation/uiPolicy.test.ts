@@ -138,6 +138,8 @@ test('localized safety summaries retain countdown values and unknown evidence', 
   expect(eventProgressSummary(71, 69, 'host', t)).toContain('还有 2 页事件等待确认');
   expect(adminErrorSummary('FEDERATION_HTTP_503', t)).toBe('远程 HTTPS 服务返回 HTTP 503。');
   expect(adminErrorSummary('HOST_CAPACITY_EXCEEDED', t)).toContain('可用访客名额');
+  expect(adminErrorSummary('TOWN_TRAVEL_PRIVACY_BUSY', t)).toBe('旅行隐私检查或清理正在运行，请等待完成后再开始归档。');
+  expect(adminErrorSummary('BACKUP_PRIVACY_REDACTED', t)).toBe('该归档包含已标记清除的内容，请使用清理完成后导出的备份。');
   expect(adminErrorSummary('Opaque evidence: town-id', t)).toBe('Opaque evidence: town-id');
   expect(safeReturnSummary('UNRECOGNIZED_EVIDENCE', t)).toBe('UNRECOGNIZED_EVIDENCE');
 });

@@ -11,7 +11,8 @@ import {
   DatabaseReader,
 } from '../_generated/server';
 import { Doc, Id, TableNames } from '../_generated/dataModel';
-import { assertTownUnlocked } from './maintenanceLock';
+import { assertArchiveCanStart } from './maintenanceLock';
+import { assertBackupPrivacy, privacyRowBelongsToResident, restorePrivacyRows } from './backupPrivacy';
 import { assertNoIdentityConflict } from './identityConflict';
 import { requireAdmin, digest } from './security';
 import { BackupRow, BackupBundle, decodeRow, encodeRow, stripSystem } from './backupHelpers';
@@ -313,7 +314,7 @@ export const createImportJob = internalMutation({
   },
   handler: async (ctx, a) => {
     requireAdmin(a.adminToken);
-    await assertTownUnlocked(ctx);
+    await assertArchiveCanStart(ctx);
     await assertNoIdentityConflict(ctx);
     const local = await stable(ctx);
     const manifest = a.manifest as SelectiveManifest;
@@ -556,6 +557,10 @@ export const saveChunk = internalMutation({
         .withIndex('job_relation', q => q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', chunk.table)
           .eq('relationKey', backupRelationKey(chunk.table, row)!)).unique())
         throw new Error('DUPLICATE_MODEL_PROVIDER_QUOTA');
+      if (row && chunk.table === 'travelPrivacyTombstones' && await ctx.db.query('backupLargeRows')
+        .withIndex('job_relation', q => q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', chunk.table)
+          .eq('relationKey', row.key)).unique())
+        throw new Error('BACKUP_DUPLICATE_RELATION');
       await ctx.db.insert('backupLargeRows', {
         jobId: j._id,
         role: 'SOURCE',
@@ -623,6 +628,8 @@ async function ownersFor(ctx: { db: DatabaseReader }, j: Job, r: Row): Promise<s
     row = data(r),
     envelope = record(r);
   const owner = rowOwner(row, m.selection);
+  if (r.table === 'travelPrivacyTombstones')
+    return m.selection.owners.filter(owner => privacyRowBelongsToResident(row, owner)).map(owner => owner.agentGlobalId);
   if (r.table === 'coldHistoryFiles') {
     const coldOwner = rowOwner(row.owner, m.selection);
     return coldOwner ? [coldOwner.agentGlobalId] : [];
@@ -657,6 +664,13 @@ async function checkRecord(ctx: { db: DatabaseReader }, j: Job, r: Row) {
     e = record(r),
     scope = m.selection.scope;
   const owners = await ownersFor(ctx, j, r);
+  if (owners.some(owner => m.targetOwners.some(target => target.sourceAgentGlobalId === owner))) {
+    const sourcePrivacy = await ctx.db.query('backupLargeRows').withIndex('job_table', q =>
+      q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', 'travelPrivacyTombstones')).first();
+    await assertBackupPrivacy(ctx.db, { [r.table]: [row] }, j.source.townId,
+      sourcePrivacy ? async negativeKey => !!(await ctx.db.query('backupLargeRows').withIndex('job_relation', q =>
+        q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', 'travelPrivacyTombstones').eq('relationKey', negativeKey)).unique()) : undefined);
+  }
   await validateMemoryBackupRelations(r.table, row, async id => {
     const target = await source(ctx, j, id);
     return target && target.state !== 'EXTERNAL' ? { table: target.table, row: data(target) } : null;
@@ -671,6 +685,7 @@ async function checkRecord(ctx: { db: DatabaseReader }, j: Job, r: Row) {
     r.table === 'coldHistoryFiles' ||
     r.table === 'modelMemoryVectors' ||
     r.table === 'memories' || isMemoryBackupTable(r.table) ||
+    r.table === 'travelPrivacyTombstones' ||
     archivalTables.has(r.table) ||
     [
       'residentModelBindings',
@@ -745,6 +760,8 @@ async function checkRecord(ctx: { db: DatabaseReader }, j: Job, r: Row) {
     if (scope === 'config-only') {
       if (!(configTables as readonly string[]).includes(r.table))
         throw new Error('SELECTIVE_IMPORT_PRIMARY_SCOPE_MISMATCH');
+    } else if (r.table === 'travelPrivacyTombstones') {
+      if (!owners.length) throw new Error('SELECTIVE_IMPORT_PRIMARY_OWNER_MISMATCH');
     } else if (r.table === 'memories' || r.table === 'modelMemoryVectors' || isMemoryBackupTable(r.table)) {
       if (r.table === 'memoryCompressionJobs') throw new Error('SELECTIVE_IMPORT_PRIMARY_SCOPE_MISMATCH');
       const primaryMemory = r.table === 'memories' ? row : data((await source(ctx, j, row.memoryId ?? row.sourceMemoryId ?? row.summaryMemoryId))!);
@@ -1126,6 +1143,7 @@ export const applyColdPage = internalMutation({
       if (!staged || staged.table !== 'coldHistoryFiles') throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
       const row = data(staged), target = m.targetOwners.find(o => o.sourceAgentGlobalId === row.owner.agentGlobalId);
       if (target) {
+        await assertBackupPrivacy(ctx.db, { coldHistoryFiles: [row] }, j.source.townId);
         if (!a.storageId) throw new Error('BACKUP_COLD_FILES_STORAGE_REQUIRED');
         const memory = await source(ctx, j, row.owner.memoryId);
         if (!memory?.newId) throw new Error('BACKUP_COLD_FILES_TARGET_MAPPING_REQUIRED');
@@ -1676,6 +1694,30 @@ export const applyPage = internalMutation({
       const owners = await ownersFor(ctx, j, r);
       const targets = m.targetOwners.filter((t) => owners.includes(t.sourceAgentGlobalId));
       const row = data(r);
+      if (targets.length)
+        await assertBackupPrivacy(ctx.db, { [r.table]: [row] }, j.source.townId);
+      if (r.table === 'travelPrivacyTombstones') {
+        if (remapping && targets.length) {
+          const targetWorld = targets[0].worldId;
+          if (!row.worldId || !targetWorld) throw new Error('SELECTIVE_IMPORT_WORLD_MAPPING_MISSING');
+          const mapping: Record<string, string> = { [row.worldId]: targetWorld };
+          for (const owner of m.selection.owners.filter(owner => owner.worldId === row.worldId)) {
+            const target = targets.find(target => target.sourceAgentGlobalId === owner.agentGlobalId);
+            if (target) { mapping[owner.playerId] = target.playerId; mapping[owner.agentGlobalId] = target.agentGlobalId; }
+          }
+          if (row.key.startsWith('conversation:')) {
+            const parts = row.key.slice('conversation:'.length), separator = parts.indexOf(':');
+            const originalWorld = parts.slice(0, separator), conversation = parts.slice(separator + 1);
+            // Historical keys can name a different source world. Keep that
+            // alias without binding its local ID to an unrelated current chat.
+            if (originalWorld === row.worldId)
+              mapping[conversation] = await localId(ctx, j, 'conversation', originalWorld, conversation);
+          }
+          await restorePrivacyRows(ctx, [row], mapping);
+        }
+        await ctx.db.patch(r._id, { state: remapping ? 'APPLIED' : 'ALLOCATED' });
+        continue;
+      }
       if (skipMemoryBackupRow(r.table, row)) {
         if (!remapping) skipped++;
         await ctx.db.patch(r._id, { state: 'APPLIED' });

@@ -161,7 +161,9 @@ async function setup(texts = ['Hello']) {
 test('the real Game archive transaction captures a durable final job even with a full Outbox', async () => {
   const { t, worldId, capture } = await setup();
   await t.run(async (ctx) => {
-    for (let i = 0; i < 900; i++)
+    // Final history pages share the recovery reserve, so full means 1,000
+    // pending envelopes rather than the ordinary traffic limit of 900.
+    for (let i = 0; i < 1000; i++)
       await ctx.db.insert('federationOutbox', {
         messageId: `full-${i}`,
         toTownId: 'home',
@@ -203,6 +205,28 @@ test('the real Game archive transaction captures a durable final job even with a
     );
   });
   expect(await t.run((ctx) => ctx.db.query('federationTranscriptJobs').collect())).toHaveLength(1);
+});
+
+test('the real Game final history page uses reserved capacity above the ordinary traffic limit', async () => {
+  const { t, capture } = await setup();
+  await t.run(async ctx => {
+    for (let i = 0; i < 900; i++) await ctx.db.insert('federationOutbox', {
+      messageId: `ordinary-${i}`, toTownId: 'home', envelope: { type: 'OBSERVATION' },
+      attempts: 0, nextRetryAt: 0,
+    });
+  });
+  const jobId = await capture();
+  await t.mutation(flush, { jobId });
+  await t.run(async ctx => {
+    const job = (await ctx.db.get(jobId))!;
+    expect(job).toMatchObject({ state: 'WAITING_ACK', pageNumber: 1 });
+    const page = await ctx.db.query('federationOutbox').withIndex('messageId', q =>
+      q.eq('messageId', job.pendingMessageId!)).unique();
+    expect(page!.envelope).toMatchObject({ type: 'CONVERSATION_ENDED',
+      payload: { finalPage: true, messages: [expect.objectContaining({ text: 'Hello' })] } });
+    expect(await ctx.db.query('federationTranscriptJobs').collect()).toHaveLength(1);
+    expect(await ctx.db.query('federationOutbox').collect()).toHaveLength(901);
+  });
 });
 
 test('bounded UTF8 pages preserve all ordered messages and require every committed ACK before completion', async () => {

@@ -1,3 +1,4 @@
+import { isTravelRedacted } from '../federation/travelPrivacyGuard';
 import { residentChatCompletion } from '../federation/resources';
 import { ObjectType, v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
@@ -55,6 +56,7 @@ export async function receiveConversationEnded(
   ledger: Doc<'visitLedger'>,
   rawPayload: Record<string, any>,
 ) {
+  if (await isTravelRedacted(ctx.db, ledger.visitId)) throw new Error('TRAVEL_PRIVACY_REDACTED');
   const payload = rawPayload as ConversationEndedPayload;
   if (ledger.role !== 'home' || !ledger.worldId || !ledger.homePlayerId)
     throw new Error('INVALID_HOME_TRANSCRIPT');
@@ -329,6 +331,7 @@ export const claimSummary = internalMutation({
     if (
       !transcript ||
       transcript.state !== 'COMPLETE' ||
+      await isTravelRedacted(ctx.db, transcript.visitId) ||
       transcript.summaryState === 'DONE' ||
       (transcript.summaryState === 'RUNNING' &&
         (transcript.summaryStartedAt ?? 0) > Date.now() - 300000)
@@ -347,7 +350,7 @@ export const summaryData = internalQuery({
   args: { transcriptDocId: v.id('homeTravelTranscripts') },
   handler: async (ctx, { transcriptDocId }) => {
     const transcript = await ctx.db.get(transcriptDocId);
-    if (!transcript || transcript.state !== 'COMPLETE') throw new Error('TRANSCRIPT_NOT_COMPLETE');
+    if (!transcript || transcript.state !== 'COMPLETE' || await isTravelRedacted(ctx.db, transcript.visitId)) throw new Error('TRANSCRIPT_NOT_COMPLETE');
     const pages = await ctx.db
       .query('homeTravelTranscriptPages')
       .withIndex('owner_transcript_page', (q) =>
@@ -391,6 +394,7 @@ export const finishSummary = internalMutation({
     if (
       !transcript ||
       transcript.state !== 'COMPLETE' ||
+      await isTravelRedacted(ctx.db, transcript.visitId) ||
       transcript.summaryState !== 'RUNNING' ||
       transcript.summaryStartedAt !== args.startedAt
     )

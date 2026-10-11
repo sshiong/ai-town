@@ -96,6 +96,7 @@ export const selectiveTables = [
   ...memoryBackupTables,
   ...historyTables,
   'modelMemoryVectors',
+  'travelPrivacyTombstones',
 ] as const;
 export type PublicParticipant = {
   worldId: string;

@@ -8,6 +8,7 @@ import { validateModelPolicyPortable } from '../models/usageSchema';
 import { validateResidentPolicyPortable } from './residentPolicySchema';
 import { validateDisclosurePolicyPortable } from './disclosurePolicySchema';
 import { memoryBackupTables } from './memoryBackup';
+import { privacyBackupTables, validatePrivacyBackupRow, privacyRowBelongsToResident } from './backupPrivacy';
 
 export const dataTables = [
   'engines',
@@ -92,6 +93,7 @@ export type BackupBundle = {
 };
 export type ImportMode = 'restore' | 'migrate' | 'clone' | 'merge';
 const allowed = new Set<string>([
+  ...privacyBackupTables,
   ...dataTables,
   ...snapshotTables,
   'federationIdentity',
@@ -230,6 +232,7 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
     count += rows.length;
     for (const row of rows) {
       const doc = decodeRow(row);
+      if (name === 'travelPrivacyTombstones') validatePrivacyBackupRow(doc);
       assertNoSecrets(doc);
       if (name === 'federationResourcePolicy') validateResourcePolicy(doc);
       validateModelPolicyPortable(name, doc);
@@ -249,6 +252,12 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
   if (bundle.manifest.scope === 'resident' &&
     ['modelProviderQuotas', 'federationResourcePolicy', 'federationResourceAudit', 'federationResidentPolicy', 'federationResidentPolicyAudit'].some(t => bundle.sections[t]?.length))
     throw new Error('RESIDENT_BACKUP_CONTAINS_TOWN_RESOURCE_POLICY');
+  if (bundle.manifest.scope === 'resident') {
+    const owners = (bundle.sections.residentModelBindings ?? []).map(decodeRow);
+    for (const grave of (bundle.sections.travelPrivacyTombstones ?? []).map(decodeRow))
+      if (!owners.some(owner => privacyRowBelongsToResident(grave, owner as { worldId: string; playerId: string; agentGlobalId: string })))
+        throw new Error('RESIDENT_BACKUP_PRIVACY_SCOPE_MISMATCH');
+  }
   const residentPolicies = bundle.sections.federationResidentPolicy?.map(decodeRow) ?? [];
   if (new Set(residentPolicies.map(row => row.agentGlobalId)).size !== residentPolicies.length)
     throw new Error('BACKUP_DUPLICATE_RESIDENT_POLICY');

@@ -1,3 +1,4 @@
+import { assertMemoryNotRedacted, privacyTombstone } from '../federation/travelPrivacyGuard';
 import type { DatabaseReader, MutationCtx } from '../maintenanceFunctions';
 import type { Doc, Id } from '../_generated/dataModel';
 import { digest } from '../federation/security';
@@ -26,6 +27,7 @@ export async function correctionHead(db: DatabaseReader, owner: Owner, key: stri
 }
 export async function captureSource(db: DatabaseReader, memory: Doc<'memories'>, owner: Owner): Promise<Source> {
   assertOwner(memory, owner);
+  await assertMemoryNotRedacted(db, memory._id);
   const key = sourceKey(memory);
   if (!key) throw new Error('MEMORY_SOURCE_NOT_EPISODIC');
   const correction = await correctionHead(db, owner, key);
@@ -97,12 +99,13 @@ export async function releaseSources(ctx: MutationCtx, jobId: Id<'memoryCompress
 }
 /** Preserve originals, but never present an obsolete derived summary as current evidence. */
 export async function currentMemory(db: DatabaseReader, memory: Doc<'memories'>) {
+  if (await privacyTombstone(db, `memory:${memory._id}`)) return null;
   if (!memory.worldId) return memory;
   const owner = { worldId: memory.worldId, playerId: memory.playerId, agentGlobalId: memory.agentGlobalId };
   const provenance = await db.query('memorySummaryProvenance').withIndex('summary', q => q.eq('summaryMemoryId', memory._id)).unique();
   if (provenance) {
     try { await validateSources(db, owner, provenance.sources); } catch (error) {
-      if (error instanceof Error && ['MEMORY_SOURCE_CHANGED', 'MEMORY_SOURCE_OWNER_MISMATCH'].includes(error.message)) return null;
+      if (error instanceof Error && ['MEMORY_SOURCE_CHANGED', 'MEMORY_SOURCE_OWNER_MISMATCH', 'TRAVEL_PRIVACY_REDACTED'].includes(error.message)) return null;
       throw error;
     }
     return { ...memory, description: `${memory.description}\n[Subjective reflection; confidence is ${provenance.confidence === undefined ? 'unknown (model estimate not supplied)' : `a model estimate (${provenance.confidence}), not verified fact`}.]` };
