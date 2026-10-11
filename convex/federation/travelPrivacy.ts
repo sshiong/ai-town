@@ -35,6 +35,7 @@ const discoveryTables: TableNames[] = [
 ];
 const checkTables: TableNames[] = [
   'backupImports',
+  'backupSelectiveHistory',
   'federationTranscriptJobs',
   'federationTurns',
   'federationInbox',
@@ -543,6 +544,14 @@ async function check(ctx: MutationCtx, job: Job, table: TableNames, row: any) {
       block(job, 'PENDING_SUMMARY');
   }
   if (job.scope === 'CACHE') return;
+  if (table === 'backupSelectiveHistory') {
+    try { await historicalFactRedaction(ctx, job, row); }
+    catch (error) {
+      if (!(error instanceof Error) || error.message !== 'TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING')
+        throw error;
+      block(job, 'IMPORTED_HISTORY_EVIDENCE_MISMATCH');
+    }
+  }
   if (table === 'backupImports' && ownsSnapshot(job, row) && snapshotInputs(job, row.runtimeSnapshot).shared)
     block(job, 'SHARED_IMPORTED_INPUT');
   if (table === 'coldHistoryArchives' && selectedArchive(job, row)) {
@@ -620,6 +629,54 @@ async function eraseStorage(ctx: MutationCtx, id: any, archiveId: any) {
     throw new Error('TRAVEL_PRIVACY_SHARED_STORAGE');
   await ctx.storage.delete(id);
 }
+function redactHistoricalFact(table: string, archived: Record<string, any>) {
+  if (table === 'federationEventFacts')
+    archived.payload = privatePayloadSummary(archived.payload);
+  else if (table === 'federationActionFacts') {
+    archived.action = { type: archived.action?.type, privacyRedacted: true };
+    archived.result = archived.result?.kind === 'ok'
+      ? { kind: 'ok', value: null }
+      : { kind: 'error', message: 'PRIVACY_REDACTED' };
+    archived.receiptPayload = privatePayloadSummary(archived.receiptPayload);
+  } else if (table === 'federationTravelAudit') {
+    for (const field of ['previous', 'next']) {
+      const summary = sanitizeTravelAuditSummary(archived[field]);
+      if (summary === undefined) delete archived[field];
+      else archived[field] = summary;
+    }
+  } else {
+    delete archived.reason;
+    delete archived.error;
+  }
+  return archived;
+}
+async function historicalFactRedaction(ctx: MutationCtx, job: Job, row: Doc<'backupSelectiveHistory'>) {
+  if (!row.agentGlobalIds.includes(job.ownerGlobalId) ||
+    !['federationEventFacts', 'federationActionFacts', 'autonomousTravelDecisions', 'federationTravelAudit'].includes(row.table))
+    return null;
+  const archived = decodeRow(row.record);
+  if (archived.visitId !== job.visitId) return null;
+  const record = encodeRow(redactHistoricalFact(row.table, archived));
+  const sources = await ctx.db.query('backupLargeRows').withIndex('job_role_source', q =>
+    q.eq('jobId', row.jobId).eq('role', 'SOURCE').eq('sourceId', row.sourceId)).take(2);
+  if (sources.length > 1) throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+  const staged = sources[0] ?? null;
+  if (staged) {
+    const imported = await ctx.db.get(row.jobId);
+    const envelope = staged.metadata.envelope;
+    if (!imported || imported.kind !== 'import' || imported.mode !== 'selective-import' ||
+      imported.state !== 'COMPLETE' || imported.source.townId !== row.sourceTownId ||
+      staged.table !== row.table || envelope?.kind !== 'record')
+      throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+    const source = decodeRow(envelope.record);
+    // Normalize both copies before comparing: an older clear may already
+    // have erased History while leaving its SOURCE body intact.
+    if (source._id !== row.sourceId || archived._id !== row.sourceId ||
+      source.visitId !== job.visitId || encodeRow(redactHistoricalFact(row.table, source)) !== record)
+      throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+  }
+  return { record, staged };
+}
 async function purge(ctx: MutationCtx, job: Job, table: TableNames, row: any): Promise<boolean> {
   const sensitive = job.scope === 'SENSITIVE',
     own = (row.visitId ?? row.envelope?.visitId) === job.visitId;
@@ -673,30 +730,16 @@ async function purge(ctx: MutationCtx, job: Job, table: TableNames, row: any): P
   if (sensitive && table === 'backupSelectiveHistory') {
     // Imported history is an inert local copy. It must not retain a second
     // message body after clearing its owner, nor confer execution authority.
-    if (!row.agentGlobalIds.includes(job.ownerGlobalId)) return false;
-    if (!['federationEventFacts', 'federationActionFacts', 'autonomousTravelDecisions', 'federationTravelAudit'].includes(row.table))
-      return false;
-    const archived = decodeRow(row.record);
-    if (archived.visitId !== job.visitId) return false;
-    if (row.table === 'federationEventFacts')
-      archived.payload = privatePayloadSummary(archived.payload);
-    else if (row.table === 'federationActionFacts') {
-      archived.action = { type: archived.action?.type, privacyRedacted: true };
-      archived.result = archived.result?.kind === 'ok'
-        ? { kind: 'ok', value: null }
-        : { kind: 'error', message: 'PRIVACY_REDACTED' };
-      archived.receiptPayload = privatePayloadSummary(archived.receiptPayload);
-    } else if (row.table === 'federationTravelAudit') {
-      for (const field of ['previous', 'next']) {
-        const summary = sanitizeTravelAuditSummary(archived[field]);
-        if (summary === undefined) delete archived[field];
-        else archived[field] = summary;
-      }
-    } else {
-      delete archived.reason;
-      delete archived.error;
+    const redaction = await historicalFactRedaction(ctx, job, row);
+    if (!redaction) return false;
+    const { record, staged } = redaction;
+    if (staged) {
+      const envelope = staged.metadata.envelope;
+      await ctx.db.patch(staged._id, {
+        metadata: { ...staged.metadata, envelope: { ...envelope, record } },
+      });
     }
-    await ctx.db.patch(row._id, { record: encodeRow(archived) });
+    await ctx.db.patch(row._id, { record });
     return true;
   }
   if (sensitive && table === 'autonomousTravelDecisions' && own) {

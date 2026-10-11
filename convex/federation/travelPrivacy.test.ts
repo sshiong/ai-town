@@ -405,25 +405,46 @@ test('cache-only clearing preserves original long-term facts, memories and cold 
     expect(preserved?.payload.text).toBe('network-secret');
   });
 });
-test.each(['CACHE', 'SENSITIVE'] as const)('imported historical bodies follow %s scope across pages without changing other owners or safety ledgers', async scope => {
+test.each([['CACHE', false], ['SENSITIVE', false], ['SENSITIVE', true]] as const)(
+  'imported historical bodies follow %s scope across pages with prior History clear=%s', async (scope, priorClear) => {
   const t = convexTest(schema, modules);
-  await fixture(t);
+  const local = await fixture(t);
   const ids = await t.run(async ctx => {
     const jobId = await ctx.db.insert('backupLargeJobs', {
-      kind: 'import', state: 'COMPLETE', phase: 'COMPLETE', tableIndex: 0,
+      kind: 'import', mode: 'selective-import', state: 'COMPLETE', phase: 'COMPLETE', tableIndex: 0,
       cursor: null, chunkCount: 1, processedChunks: 1, recordCount: 20,
-      bytes: 1000, source: {}, createdAt: 1, updatedAt: 1,
+      bytes: 1000, source: { townId: 'source-town' }, createdAt: 1, updatedAt: 1,
+      metadata: {
+        selection: { owners: [{ agentGlobalId: 'resident-global', worldId: local.worldId, playerId: 'p:0' }] },
+        targetOwners: [{ sourceAgentGlobalId: 'resident-global', agentGlobalId: 'resident-global',
+          worldId: local.worldId, playerId: 'p:0', operation: 'create' }],
+      },
     });
-    const add = (table: string, record: Record<string, any>, agentGlobalIds = ['resident-global']) =>
-      ctx.db.insert('backupSelectiveHistory', {
+    const staged: Record<string, Id<'backupLargeRows'>> = {};
+    const add = async (table: string, record: Record<string, any>, agentGlobalIds = ['resident-global']) => {
+      staged[record._id] = await ctx.db.insert('backupLargeRows', {
+        jobId, role: 'SOURCE', table, sourceId: record._id, chunkIndex: 0,
+        rowIndex: Object.keys(staged).length, state: 'APPLIED', references: [],
+        ...(table === 'visitLedger' ? { relationKey: `visit:${record.visitId}` } : {}),
+        metadata: { retainedMarker: 'mapping-metadata', envelope: {
+          kind: 'record', role: 'primary', record: encodeRow(Object.fromEntries(Object.entries(record).reverse())), references: [],
+        } },
+      });
+      return ctx.db.insert('backupSelectiveHistory', {
         jobId, sourceTownId: 'source-town', sourceId: record._id, table,
         agentGlobalIds, record: encodeRow(record),
       });
+    };
     const events: Id<'backupSelectiveHistory'>[] = [];
     for (let i = 0; i < 13; i++) events.push(await add('federationEventFacts', {
       _id: `original-event-${i}`, visitId: 'selected', messageId: `message-${i}`,
       receivedAt: i, payload: { eventId: `event-${i}`, text: `historical-secret-${i}` },
     }));
+    if (priorClear) {
+      const event = decodeRow((await ctx.db.get(events[0]))!.record);
+      await ctx.db.patch(events[0], { record: encodeRow({ ...event,
+        payload: { privacyRedacted: true, eventId: 'event-0' } }) });
+    }
     const action = await add('federationActionFacts', {
       _id: 'original-action', visitId: 'selected', actionId: 'stable-action',
       agentAuthorityEpoch: 4, visitLeaseVersion: 2, occurredAt: 3,
@@ -438,6 +459,7 @@ test.each(['CACHE', 'SENSITIVE'] as const)('imported historical bodies follow %s
     const ledger = await add('visitLedger', {
       _id: 'original-ledger', visitId: 'selected', state: 'COMPLETED',
       leaseExpiry: 1234, agentAuthorityEpoch: 4, fencingToken: 'original-fence',
+      role: 'home', agentGlobalId: 'resident-global', worldId: local.worldId, homePlayerId: 'p:0',
     });
     const audit = await add('federationTravelAudit', {
       _id: 'original-audit', visitId: 'selected', operation: 'UPDATED', at: 3,
@@ -465,10 +487,30 @@ test.each(['CACHE', 'SENSITIVE'] as const)('imported historical bodies follow %s
       agentGlobalId: 'resident-global', operationId: `operation-${visitId}`, state: 'COMPLETED',
       createdAt: 1, deadline: 2, visitId, reason: `${visitId}-reason-secret`, error: `${visitId}-error-secret`,
     });
+    await ctx.db.delete(local.ledgerId);
+    const chatProfileId = await ctx.db.insert('chatProfiles', { name: 'local-test', provider: 'ollama',
+      url: 'http://localhost:11434', model: 'test-model', stopWords: [], createdAt: 1 });
+    await ctx.db.insert('residentModelBindings', { worldId: local.worldId, playerId: 'p:0',
+      agentGlobalId: 'resident-global', chatProfileId, createdAt: 1, updatedAt: 1 });
+    await ctx.db.insert('federationAgentRuntimes', { worldId: local.worldId, playerId: 'p:0', agentId: 'a:0',
+      agentGlobalId: 'resident-global', homeTownId: 'home', state: 'HOME_ACTIVE',
+      agentAuthorityEpoch: 1, updatedAt: 1 });
+    const importId = await ctx.db.insert('backupImports', { sourceTownId: 'source-town', mode: 'selective-clone',
+      exportedAt: 1, importedAt: 2, mapping: {}, manifest: { selectiveJobId: jobId },
+      runtimeSnapshot: { selectiveJobId: jobId } });
+    const archive = (await ctx.db.get(jobId))!;
+    await ctx.db.patch(jobId, { metadata: { ...archive.metadata, importId } });
+    const originalStaged = await Promise.all(Object.values(staged).map(id => ctx.db.get(id)));
+    const originalLedger = (await ctx.db.get(ledger))!.record;
     return { events, action, decision, ledger, audit, nativeAudit, otherOwner, otherVisit, policyId,
+      staged, originalStaged, originalLedger, history: { importId, worldId: local.worldId, ownerGlobalId: 'resident-global' },
       nativeDecision: await native('selected'), otherDecision: await native('other') };
   });
-  const { jobId, report } = await preview(t, scope);
+  const jobId: Id<'travelPrivacyJobs'> = await t.mutation(mutationRef('travelPrivacy/inspect'), {
+    adminToken, visitId: 'selected', scope, history: ids.history,
+  });
+  await drain(t);
+  const report = (await t.query(queryRef('travelPrivacy/status'), { adminToken, jobId }))!;
   expect(report.state).toBe('READY');
   await t.mutation(mutationRef('travelPrivacy/start'), { adminToken, jobId });
   await drain(t);
@@ -477,6 +519,17 @@ test.each(['CACHE', 'SENSITIVE'] as const)('imported historical bodies follow %s
   expect(final!.counts.backupSelectiveHistory ?? 0).toBe(scope === 'SENSITIVE' ? 16 : 0);
   await t.run(async ctx => {
     const read = async (id: Id<'backupSelectiveHistory'>) => decodeRow((await ctx.db.get(id))!.record);
+    for (const original of ids.originalStaged) {
+      const staged = (await ctx.db.get(original!._id))!;
+      const history = (await ctx.db.query('backupSelectiveHistory').withIndex('job_source', q =>
+        q.eq('jobId', staged.jobId).eq('sourceId', staged.sourceId)).unique())!;
+      expect(staged.metadata.envelope.record).toBe(history.record);
+      expect(staged).toEqual({ ...original, metadata: { ...original!.metadata,
+        envelope: { ...original!.metadata.envelope, record: history.record } } });
+      if (scope === 'CACHE' || ['original-ledger', 'other-owner-event', 'other-visit-event'].includes(staged.sourceId))
+        expect(staged).toEqual(original);
+      else expect(JSON.stringify(staged.metadata)).not.toContain('historical-');
+    }
     for (const [i, id] of ids.events.entries()) {
       const record = await read(id);
       expect(record.messageId).toBe(`message-${i}`);
@@ -498,6 +551,7 @@ test.each(['CACHE', 'SENSITIVE'] as const)('imported historical bodies follow %s
       expect(decision.reason).toBe('historical-reason-secret');
     }
     expect(await read(ids.ledger)).toMatchObject({ state: 'COMPLETED', leaseExpiry: 1234, fencingToken: 'original-fence' });
+    expect((await ctx.db.get(ids.ledger))!.record).toBe(ids.originalLedger);
     const audit = await read(ids.audit), nativeAudit = await ctx.db.get(ids.nativeAudit);
     if (scope === 'SENSITIVE') {
       expect(audit.previous).toEqual({ state: 'RETURN_PENDING' });
@@ -517,6 +571,110 @@ test.each(['CACHE', 'SENSITIVE'] as const)('imported historical bodies follow %s
     } else expect(native!.reason).toBe('selected-reason-secret');
     expect((await ctx.db.get(ids.otherDecision))!.reason).toBe('other-reason-secret');
     expect((await ctx.db.get(ids.policyId))!.reason).toBe('Keep local policy');
+  });
+  const candidates = await t.query(queryRef('travelPrivacy/historicalCandidates'), {
+    adminToken, visitId: 'selected', paginationOpts: { cursor: null, numItems: 5 },
+  });
+  expect(candidates.page).toEqual([expect.objectContaining({ history: ids.history })]);
+  const retriedId: Id<'travelPrivacyJobs'> = await t.mutation(mutationRef('travelPrivacy/inspect'), {
+    adminToken, visitId: 'selected', scope, history: ids.history,
+  });
+  await t.mutation(mutationRef('travelPrivacy/retry'), { adminToken, jobId: retriedId });
+  await drain(t);
+  expect((await t.query(queryRef('travelPrivacy/status'), { adminToken, jobId: retriedId }))!.state).toBe('READY');
+});
+async function historicalFactFixture(t: ReturnType<typeof convexTest<typeof schema.tables>>) {
+  return t.run(async ctx => {
+    const jobId = await ctx.db.insert('backupLargeJobs', {
+      kind: 'import', mode: 'selective-import', state: 'COMPLETE', phase: 'COMPLETE',
+      tableIndex: 0, cursor: null, chunkCount: 1, processedChunks: 1, recordCount: 1,
+      bytes: 100, source: { townId: 'source-town' }, createdAt: 1, updatedAt: 1,
+    });
+    const record = encodeRow({ _id: 'source-event', visitId: 'selected', messageId: 'source-message',
+      receivedAt: 1, payload: { eventId: 'source-observation', text: 'history-evidence-body' } });
+    const metadata = { envelope: { kind: 'record', role: 'primary', record, references: [] } };
+    const stagedId = await ctx.db.insert('backupLargeRows', {
+      jobId, role: 'SOURCE', table: 'federationEventFacts', sourceId: 'source-event',
+      chunkIndex: 0, rowIndex: 0, state: 'APPLIED', references: [], metadata,
+    });
+    const oldId = await ctx.db.insert('backupLargeRows', {
+      jobId, role: 'OLD', table: 'federationEventFacts', sourceId: 'source-event',
+      chunkIndex: 1, rowIndex: 0, state: 'CAPTURED', references: [], metadata,
+    });
+    const historyId = await ctx.db.insert('backupSelectiveHistory', {
+      jobId, sourceTownId: 'source-town', sourceId: 'source-event', table: 'federationEventFacts',
+      agentGlobalIds: ['resident-global'], record,
+    });
+    return { jobId, stagedId, oldId, historyId, record, metadata };
+  });
+}
+test.each(['table', 'visit', 'envelope', 'record', 'source-town', 'unfinished-import', 'duplicate'] as const)(
+  'inconsistent selective SOURCE %s blocks before clearing facts or memories', async conflict => {
+    const t = convexTest(schema, modules), local = await fixture(t), ids = await historicalFactFixture(t);
+    await t.run(async ctx => {
+      if (conflict === 'duplicate') {
+        const { _id, _creationTime, ...fields } = (await ctx.db.get(ids.stagedId))!;
+        await ctx.db.insert('backupLargeRows', fields);
+      }
+      else if (conflict === 'table') await ctx.db.patch(ids.stagedId, { table: 'federationActionFacts' });
+      else if (conflict === 'source-town') await ctx.db.patch(ids.jobId, { source: { townId: 'other-town' } });
+      else if (conflict === 'unfinished-import') await ctx.db.patch(ids.jobId, { state: 'FAILED' });
+      else if (conflict === 'envelope') await ctx.db.patch(ids.stagedId, { metadata: { envelope: { kind: 'external-reference' } } });
+      else {
+        const record = { ...decodeRow(ids.record), ...(conflict === 'visit' ? { visitId: 'other' } : { messageId: 'other-message' }) };
+        await ctx.db.patch(ids.stagedId, { metadata: { envelope: { ...ids.metadata.envelope, record: encodeRow(record) } } });
+      }
+    });
+    const before = await t.run(async ctx => ({ source: await ctx.db.get(ids.stagedId),
+      history: await ctx.db.get(ids.historyId), old: await ctx.db.get(ids.oldId) }));
+    const { jobId, report } = await preview(t);
+    expect(report.state).toBe('BLOCKED');
+    expect(report.blockers).toContain('IMPORTED_HISTORY_EVIDENCE_MISMATCH');
+    await expect(t.mutation(mutationRef('travelPrivacy/start'), { adminToken, jobId }))
+      .rejects.toThrow('TRAVEL_PRIVACY_PREFLIGHT_BLOCKED');
+    await t.run(async ctx => {
+      expect(await ctx.db.get(ids.stagedId)).toEqual(before.source);
+      expect(await ctx.db.get(ids.historyId)).toEqual(before.history);
+      expect(await ctx.db.get(ids.oldId)).toEqual(before.old);
+      expect(await ctx.db.get(local.memoryIds[0])).not.toBeNull();
+      expect((await ctx.db.get(local.factsId))!.payload.text).toBe('fact-secret');
+      expect((await ctx.db.get(local.inboxId))!.envelope.payload.text).toBe('network-secret');
+      expect(await ctx.db.query('travelPrivacyTombstones').collect()).toEqual([]);
+    });
+  });
+test.each(['SOURCE', 'History'] as const)('a registered %s change invalidates a ready selective privacy plan', async copy => {
+  const t = convexTest(schema, modules), local = await fixture(t), ids = await historicalFactFixture(t);
+  const { jobId, report } = await preview(t);
+  expect(report.state).toBe('READY');
+  await t.run(async ctx => {
+    const record = encodeRow({ ...decodeRow(ids.record), messageId: 'changed-after-preview' });
+    if (copy === 'SOURCE') await withEmbeddingRevision(ctx).db.patch(ids.stagedId, {
+      metadata: { envelope: { ...ids.metadata.envelope, record } },
+    });
+    else await withEmbeddingRevision(ctx).db.patch(ids.historyId, { record });
+  });
+  await expect(t.mutation(mutationRef('travelPrivacy/start'), { adminToken, jobId }))
+    .rejects.toThrow('TRAVEL_PRIVACY_PREVIEW_STALE');
+  expect(await t.run(ctx => ctx.db.get(local.memoryIds[0]))).not.toBeNull();
+  expect(await t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).toEqual([]);
+});
+test('legacy History without a SOURCE row still clears while an OLD record with the same ID stays unchanged', async () => {
+  const t = convexTest(schema, modules);
+  await fixture(t);
+  const ids = await historicalFactFixture(t);
+  const old = await t.run(async ctx => {
+    await ctx.db.delete(ids.stagedId);
+    return ctx.db.get(ids.oldId);
+  });
+  const { jobId, report } = await preview(t);
+  expect(report.state).toBe('READY');
+  await t.mutation(mutationRef('travelPrivacy/start'), { adminToken, jobId });
+  await drain(t);
+  expect((await t.query(queryRef('travelPrivacy/status'), { adminToken, jobId }))!.state).toBe('COMPLETE');
+  await t.run(async ctx => {
+    expect(decodeRow((await ctx.db.get(ids.historyId))!.record).payload)
+      .toEqual({ privacyRedacted: true, eventId: 'source-observation' });
+    expect(await ctx.db.get(ids.oldId)).toEqual(old);
   });
 });
 async function snapshotFixture(t: ReturnType<typeof convexTest<typeof schema.tables>>, shared = false) {
