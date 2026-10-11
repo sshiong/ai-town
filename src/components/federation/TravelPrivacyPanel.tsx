@@ -21,6 +21,12 @@ type Report = {
   blockers: string[];
   externalCopies: number;
   processedRows: number;
+  archiveError?: string;
+  archiveCoverage?: {
+    ordinaryBundles: 'CHECKING' | 'READY' | 'RUNNING' | 'COMPLETE';
+    largeChunks: 'NOT_IMPLEMENTED';
+    orphanObjects: 'NOT_VERIFIED';
+  };
 };
 const inspectRef = makeFunctionReference<
   'mutation',
@@ -176,10 +182,24 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
             {t('Known external mirrors')}: {report.externalCopies} · {t('Cleared rows')}:{' '}
             {report.processedRows}
           </p>
+          {report.archiveCoverage && (
+            <>
+              <p>{t('Ordinary backup files')}: {t({ CHECKING: 'Checking archive copies', READY: 'Archive cleanup prepared',
+                RUNNING: 'Cleaning archive copies', COMPLETE: 'Archive cleanup complete' }[report.archiveCoverage.ordinaryBundles])}</p>
+              <p className="admin-muted">{t('Large chunk archives are not yet covered. Unreferenced storage objects have not been verified; this result does not certify removal of every local copy.')}</p>
+            </>
+          )}
+          {report.archiveError && (
+            <p role="alert">{t('Archive cleanup paused. Retry from its saved checkpoint; if validation still fails, inspect the archive before retrying.')}{' '}
+              <code>{report.archiveError}</code>
+            </p>
+          )}
           {!!report.blockers.length && (
             <ul>
               {report.blockers.map((reason) => (
-                <li key={reason}>{t(`privacy.${reason}`)}</li>
+                <li key={reason}>{reason.startsWith('ARCHIVE_')
+                  ? <>{t('Archive validation blocked clearing. No deletion has started. Check ownership, shared references and archive integrity before creating a new preview.')}{' '}<code>{reason}</code></>
+                  : t(`privacy.${reason}`)}</li>
               ))}
             </ul>
           )}

@@ -1,4 +1,13 @@
 export const federationMessages: Record<string, string> = {
+  'Ordinary backup files': '普通备份文件',
+  'Archive validation blocked clearing. No deletion has started. Check ownership, shared references and archive integrity before creating a new preview.': '归档验证已阻止清理，尚未开始删除。请检查归属、共享引用和归档完整性，再重新预检。',
+  'Checking archive copies': '正在检查归档副本',
+  'Archive cleanup prepared': '归档清理已准备',
+  'Cleaning archive copies': '正在清理归档副本',
+  'Archive cleanup complete': '归档清理已完成',
+  'ordinaryArchiveObjects': '普通归档文件',
+  'Large chunk archives are not yet covered. Unreferenced storage objects have not been verified; this result does not certify removal of every local copy.': '目前尚未覆盖大型分块归档，也未核查无引用的存储对象；此结果不能证明所有本地副本均已清除。',
+  'Archive cleanup paused. Retry from its saved checkpoint; if validation still fails, inspect the archive before retrying.': '归档清理已暂停，可从保存的进度重试；若验证仍失败，请先检查归档。',
   'Visit ID': '旅行编号',
   State: '状态',
   'privacy.IMPORTED_HISTORY_EVIDENCE_MISMATCH': '导入历史与暂存副本的安全证据不一致；已阻止清理，未删除数据。',
