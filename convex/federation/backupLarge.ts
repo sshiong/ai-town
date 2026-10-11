@@ -1226,6 +1226,7 @@ export const finalizeImport = internalMutation({
       await ctx.db.patch(local._id, {
         deploymentInstanceId: crypto.randomUUID(),
         deploymentEpoch: Math.max(local.deploymentEpoch, source.deploymentEpoch) + 1,
+        identityVersion: source.identityVersion ?? 1,
         townName: source.townName,
         maxVisitors: source.maxVisitors,
         maxVisitDurationMs: source.maxVisitDurationMs,
@@ -1235,7 +1236,7 @@ export const finalizeImport = internalMutation({
         allowPublicHttp: false,
         enabled: false,
         allowIncomingPairRequests: false,
-        mode: 'NEEDS_RECONCILIATION',
+        mode: 'MIGRATING_IN',
         activeHandoffId: undefined,
         migrationFrozenAt: undefined,
         migrationOperator: undefined,

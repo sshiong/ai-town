@@ -147,7 +147,7 @@ export default function IdentityRecoveryPanel({ adminToken }: { adminToken: stri
                 setSourceStopped(false);
                 setCloneRiskAccepted(false);
               },
-              'The server decrypted and restored this town identity. Federation stays disabled and peers must be paired again. Import the ordinary town archive separately.',
+              'Identity restored in MIGRATING_IN mode. Import the ordinary town archive, then complete the signed source-to-destination handoff in Identity migration. Admission settings cannot activate this deployment; peers receive fresh credentials after the verified handoff.',
             );
           }}
         >

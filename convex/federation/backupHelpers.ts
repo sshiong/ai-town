@@ -229,6 +229,9 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
   const identities = bundle.sections.federationIdentity?.map(decodeRow) ?? [];
   if (identities.length !== 1 || identities[0].townId !== bundle.manifest.sourceTownId)
     throw new Error('BACKUP_IDENTITY_MISMATCH');
+  if (identities[0].identityVersion !== undefined &&
+    (!Number.isSafeInteger(identities[0].identityVersion) || identities[0].identityVersion < 1))
+    throw new Error('INVALID_IDENTITY_VERSION');
   if (identities[0].resourceLimits !== undefined) validateResourceLimits(identities[0].resourceLimits);
   if (
     bundle.signature &&

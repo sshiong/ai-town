@@ -159,6 +159,7 @@ export const exportEncryptedIdentity = action({
     const secret = {
       townName: local.townName,
       privateKey: await openSecret(local.privateKeyEncrypted),
+      identityVersion: local.identityVersion ?? 1,
       maxVisitors: local.maxVisitors,
       maxVisitDurationMs: local.maxVisitDurationMs,
       ...(local.resourceLimits ? { resourceLimits: local.resourceLimits } : {}),
@@ -209,6 +210,7 @@ export const restoreEncryptedIdentity = action({
     let secret: {
       townName: string;
       privateKey: string;
+      identityVersion?: number;
       maxVisitors: number;
       maxVisitDurationMs: number;
       resourceLimits?: ResourceLimits;
@@ -231,6 +233,8 @@ export const restoreEncryptedIdentity = action({
         !secret.townName.trim() ||
         secret.townName.length > 80 ||
         typeof secret.privateKey !== 'string' ||
+        (secret.identityVersion !== undefined &&
+          (!Number.isSafeInteger(secret.identityVersion) || secret.identityVersion < 1)) ||
         !Number.isSafeInteger(secret.maxVisitors) ||
         secret.maxVisitors < 0 ||
         secret.maxVisitors > 100 ||
@@ -261,6 +265,7 @@ export const restoreEncryptedIdentity = action({
       publicKey: header.publicKey,
       fingerprint: header.fingerprint,
       privateKeyEncrypted: await sealSecret(secret.privateKey),
+      identityVersion: secret.identityVersion ?? 1,
       sourceDeploymentEpoch: header.sourceDeploymentEpoch,
       endpoint,
       maxVisitors: secret.maxVisitors,
@@ -276,6 +281,7 @@ export const installIdentity = internalMutation({
     publicKey: v.string(),
     fingerprint: v.string(),
     privateKeyEncrypted: v.string(),
+    identityVersion: v.optional(v.number()),
     sourceDeploymentEpoch: v.number(),
     endpoint: v.string(),
     maxVisitors: v.number(),
@@ -284,6 +290,9 @@ export const installIdentity = internalMutation({
   },
   handler: async (ctx, args) => {
     await assertTownUnlocked(ctx);
+    const identityVersion = args.identityVersion ?? 1;
+    if (!Number.isSafeInteger(identityVersion) || identityVersion < 1)
+      throw new Error('INVALID_IDENTITY_VERSION');
     if (
       (await identity(ctx)) ||
       (await ctx.db.query('worlds').first()) ||
@@ -298,10 +307,11 @@ export const installIdentity = internalMutation({
       createdAt = Date.now();
     await ctx.db.insert('federationIdentity', {
       ...fields,
+      identityVersion,
       deploymentInstanceId,
       deploymentEpoch,
       createdAt,
-      mode: 'ACTIVE',
+      mode: 'MIGRATING_IN',
       enabled: false,
       allowIncomingPairRequests: false,
       allowUnencryptedHttp: false,
@@ -311,7 +321,7 @@ export const installIdentity = internalMutation({
       townId: args.townId,
       deploymentInstanceId,
       deploymentEpoch,
-      mode: 'ACTIVE',
+      mode: 'MIGRATING_IN',
       createdAt,
     });
     await ctx.db.insert('identityRecoveryAudit', {

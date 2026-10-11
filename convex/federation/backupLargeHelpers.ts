@@ -214,6 +214,9 @@ export function validateSourceRow(table: string, row: BackupRow) {
   if (!definition) throw new Error('INVALID_BACKUP_SECTION');
   const validator = (definition.validator as unknown as { json: unknown }).json;
   validateFields(fields, validator);
+  if (table === 'federationIdentity' && fields.identityVersion !== undefined &&
+    (!Number.isSafeInteger(fields.identityVersion) || fields.identityVersion < 1))
+    throw new Error('INVALID_IDENTITY_VERSION');
   if (table === 'federationResourcePolicy') validateResourcePolicy(fields);
   if (table === 'federationIdentity' && fields.resourceLimits !== undefined)
     validateResourceLimits(fields.resourceLimits);

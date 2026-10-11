@@ -263,6 +263,22 @@ test('sourceStopped disaster recovery flag never supplies formal handoff authori
   );
 });
 
+test('legacy signed handoffs without identityVersion remain version 1 through peer acceptance', async () => {
+  const s = await setup(),
+    { packet } = await handoff(s);
+  const body = { ...packet.body };
+  delete body.identityVersion;
+  const legacy = { body, signature: await sign(body, s.keysA.privateKeyEncrypted) };
+  await s.a2.mutation(mutationRef('migration/activateTarget'), { adminToken, packet: legacy });
+  await s.a2.action(actionRef('migration/notifyPeer'), { adminToken, peerTownId: 'town:b' });
+  expect(
+    (await s.a2.run((ctx) => ctx.db.query('federationIdentity').unique()))?.identityVersion,
+  ).toBe(1);
+  const peer = (await s.b.run((ctx) => ctx.db.query('federationPeers').unique()))!;
+  expect(peer.identityVersion ?? 1).toBe(1);
+  expect(peer.deploymentInstanceId).toBe(s.recovered.deploymentInstanceId);
+});
+
 test('freeze drains visits before signing and refuses new authority while existing cleanup remains usable', async () => {
   const s = await setup();
   await s.a.run((ctx) =>

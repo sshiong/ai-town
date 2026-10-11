@@ -105,14 +105,17 @@ export async function verifiedIdentityKeySuccessor(
   townId: string,
   oldPublicKey: string,
   currentPublicKey: string,
+  versions?: { oldVersion: number; currentVersion: number },
 ) {
-  if (oldPublicKey === currentPublicKey) return true;
+  if (oldPublicKey === currentPublicKey)
+    return !versions || versions.oldVersion === versions.currentVersion;
   const records = await ctx.db
     .query('federationIdentityKeyHistory')
     .withIndex('town_version', (q) => q.eq('townId', townId))
     .collect();
   const seen = new Set<string>();
   let key = oldPublicKey;
+  let version = versions?.oldVersion;
   while (key !== currentPublicKey) {
     if (seen.has(key)) return false;
     seen.add(key);
@@ -129,13 +132,15 @@ export async function verifiedIdentityKeySuccessor(
         b.newPublicKey !== row.newPublicKey ||
         b.oldVersion !== row.oldVersion ||
         b.newVersion !== row.newVersion ||
+        (version !== undefined && b.oldVersion !== version) ||
         b.rotationId !== row.rotationId
       )
         return false;
       key = b.newPublicKey;
+      if (version !== undefined) version = b.newVersion;
     } catch {
       return false;
     }
   }
-  return true;
+  return !versions || version === versions.currentVersion;
 }

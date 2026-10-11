@@ -3,7 +3,15 @@ import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import { makeFunctionReference } from 'convex/server';
 import schema from '../schema';
-import { createIdentityKeys, openSecret, sign, verifySignature } from './security';
+import {
+  createIdentityKeys,
+  fromBase64,
+  openSecret,
+  sign,
+  toBase64,
+  verifySignature,
+} from './security';
+import { canonicalJson } from './protocol';
 import type { IdentityRecoveryPackage } from './identityRecovery';
 import { DEFAULT_RESOURCE_LIMITS } from './resources';
 
@@ -46,7 +54,11 @@ async function source() {
       allowPublicHttp: false,
       maxVisitors: 8,
       maxVisitDurationMs: 300_000,
-      resourceLimits: { ...DEFAULT_RESOURCE_LIMITS, maxConcurrentLocalLLM: 1, maxPendingLocalLLM: 3 },
+      resourceLimits: {
+        ...DEFAULT_RESOURCE_LIMITS,
+        maxConcurrentLocalLLM: 1,
+        maxPendingLocalLLM: 3,
+      },
       createdAt: 1,
     }),
   );
@@ -81,7 +93,12 @@ test('recovery keeps signing identity while rewrapping on an independent destina
   expect(result.deploymentInstanceId).not.toBe('old-instance');
   const restored = await destination.run((ctx) => ctx.db.query('federationIdentity').unique());
   expect(restored!.privateKeyEncrypted).not.toBe(keys.privateKeyEncrypted);
-  expect(restored!.resourceLimits).toEqual({ ...DEFAULT_RESOURCE_LIMITS, maxConcurrentLocalLLM: 1, maxPendingLocalLLM: 3 });
+  expect(restored).toMatchObject({ identityVersion: 1, mode: 'MIGRATING_IN', enabled: false });
+  expect(restored!.resourceLimits).toEqual({
+    ...DEFAULT_RESOURCE_LIMITS,
+    maxConcurrentLocalLLM: 1,
+    maxPendingLocalLLM: 3,
+  });
   const proof = { challenge: 'new deployment proof' };
   expect(
     await verifySignature(proof, await sign(proof, restored!.privateKeyEncrypted), keys.publicKey),
@@ -93,6 +110,93 @@ test('recovery keeps signing identity while rewrapping on an independent destina
     await destination.run((ctx) => ctx.db.query('identityRecoveryAudit').collect()),
   ).toHaveLength(1);
 });
+
+async function rewriteEncryptedSecret(
+  pack: IdentityRecoveryPackage,
+  privateKeyEncrypted: string,
+  update: (secret: Record<string, unknown>) => void,
+) {
+  const encode = new TextEncoder();
+  const material = await crypto.subtle.importKey(
+    'raw',
+    encode.encode(passphrase),
+    'PBKDF2',
+    false,
+    ['deriveKey'],
+  );
+  const key = await crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      hash: 'SHA-256',
+      salt: fromBase64(pack.header.salt),
+      iterations: pack.header.iterations,
+    },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+  const options = {
+    name: 'AES-GCM',
+    iv: fromBase64(pack.header.nonce),
+    additionalData: encode.encode(canonicalJson(pack.header)),
+  };
+  const plaintext = await crypto.subtle.decrypt(options, key, fromBase64(pack.ciphertext));
+  const secret = JSON.parse(new TextDecoder().decode(plaintext));
+  update(secret);
+  const ciphertext = toBase64(
+    new Uint8Array(
+      await crypto.subtle.encrypt(options, key, encode.encode(JSON.stringify(secret))),
+    ),
+  );
+  const body = { header: pack.header, ciphertext };
+  return { ...body, signature: await sign(body, privateKeyEncrypted) };
+}
+
+test('legacy encrypted packages without identityVersion restore as version 1 and remain awaiting handoff', async () => {
+  const { t, keys } = await source();
+  const current = await t.action(exportRef, { adminToken, passphrase });
+  const legacy = await rewriteEncryptedSecret(current, keys.privateKeyEncrypted, (secret) => {
+    delete secret.identityVersion;
+  });
+  const destination = convexTest(schema, modules);
+  await destination.action(restoreRef, {
+    adminToken,
+    passphrase,
+    package: legacy,
+    sourceStopped: true,
+    endpoint,
+  });
+  expect(await destination.run((ctx) => ctx.db.query('federationIdentity').unique())).toMatchObject(
+    {
+      identityVersion: 1,
+      mode: 'MIGRATING_IN',
+      enabled: false,
+    },
+  );
+});
+
+test.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+  'rejects authenticated invalid identity version %s before installing anything',
+  async (identityVersion) => {
+    const { t, keys } = await source();
+    const current = await t.action(exportRef, { adminToken, passphrase });
+    const invalid = await rewriteEncryptedSecret(current, keys.privateKeyEncrypted, (secret) => {
+      secret.identityVersion = identityVersion;
+    });
+    const destination = convexTest(schema, modules);
+    await expect(
+      destination.action(restoreRef, {
+        adminToken,
+        passphrase,
+        package: invalid,
+        sourceStopped: true,
+        endpoint,
+      }),
+    ).rejects.toThrow('RECOVERY_DECRYPTION_FAILED');
+    expect(await destination.run((ctx) => ctx.db.query('federationIdentity').first())).toBeNull();
+  },
+);
 test('wrong passphrase and modified archive cannot leave a partially installed identity', async () => {
   const { t } = await source(),
     pack = await t.action(exportRef, { adminToken, passphrase });

@@ -51,6 +51,7 @@ export type Handoff = {
   townId: string;
   publicKey: string;
   sourceDeploymentInstanceId: string;
+  identityVersion?: number;
   sourceDeploymentEpoch: number;
   target: Target;
   frozenAt: number;
@@ -75,7 +76,11 @@ function validTarget(t: Target) {
   )
     throw new Error('INVALID_MIGRATION_TARGET');
 }
-async function validateHandoff(packet: HandoffPacket, publicKey: string, historicalKeyAccepted = false) {
+async function validateHandoff(
+  packet: HandoffPacket,
+  publicKey: string,
+  historicalKeyAccepted = false,
+) {
   const b = packet?.body;
   if (
     !b ||
@@ -84,10 +89,13 @@ async function validateHandoff(packet: HandoffPacket, publicKey: string, histori
     b.purpose !== PURPOSE ||
     !boundedString(b.handoffId) ||
     !boundedString(b.townId) ||
-    !boundedString(b.publicKey) || (b.publicKey !== publicKey && !historicalKeyAccepted) ||
+    !boundedString(b.publicKey) ||
+    (b.publicKey !== publicKey && !historicalKeyAccepted) ||
     !boundedString(b.sourceDeploymentInstanceId) ||
     !Number.isSafeInteger(b.sourceDeploymentEpoch) ||
     b.sourceDeploymentEpoch < 1 ||
+    (b.identityVersion !== undefined &&
+      (!Number.isSafeInteger(b.identityVersion) || b.identityVersion < 1)) ||
     !boundedString(b.operator, 100) ||
     !Number.isFinite(b.frozenAt) ||
     !Number.isFinite(b.issuedAt) ||
@@ -119,6 +127,8 @@ async function validateHandoff(packet: HandoffPacket, publicKey: string, histori
       !['TRUSTED', 'PAUSED', 'REVOKED'].includes(p.trustState) ||
       typeof p.inboundVisitsAllowed !== 'boolean' ||
       typeof p.outboundVisitsAllowed !== 'boolean' ||
+      (p.identityVersion !== undefined &&
+        (!Number.isSafeInteger(p.identityVersion) || p.identityVersion < 1)) ||
       !Number.isFinite(p.pairedAt)
     )
       throw new Error('INVALID_MIGRATION_PEER');
@@ -319,6 +329,7 @@ export const signHandoff = mutation({
       townId: local.townId,
       publicKey: local.publicKey,
       sourceDeploymentInstanceId: local.deploymentInstanceId,
+      identityVersion: local.identityVersion ?? 1,
       sourceDeploymentEpoch: local.deploymentEpoch,
       target,
       frozenAt: local.migrationFrozenAt,
@@ -358,6 +369,10 @@ export const activateTarget = mutation({
       throw new Error('MIGRATION_TARGET_MISMATCH');
     if (local.activeHandoffId === b.handoffId && local.mode === 'ACTIVE')
       return { townId: local.townId, deploymentEpoch: local.deploymentEpoch };
+    // A signed source version repairs metadata missing from legacy private-key packages.
+    // Missing handoff versions are legacy version 1, never inferred from key equality.
+    if ((local.identityVersion ?? 1) > (b.identityVersion ?? 1))
+      throw new Error('MIGRATION_IDENTITY_VERSION_MISMATCH');
     if (local.mode !== 'MIGRATING_IN' || local.enabled || local.activeHandoffId)
       throw new Error('MIGRATION_TARGET_NOT_RECOVERED');
     await assertDrained(ctx);
@@ -366,6 +381,7 @@ export const activateTarget = mutation({
       if (
         existing &&
         (existing.publicKey !== p.publicKey ||
+          (existing.identityVersion ?? 1) !== (p.identityVersion ?? 1) ||
           existing.deploymentEpoch !== p.deploymentEpoch ||
           existing.deploymentInstanceId !== p.deploymentInstanceId)
       )
@@ -393,6 +409,7 @@ export const activateTarget = mutation({
       });
     await ctx.db.patch(local._id, {
       mode: 'ACTIVE',
+      identityVersion: b.identityVersion ?? 1,
       enabled: true,
       allowIncomingPairRequests: false,
       activeHandoffId: b.handoffId,
@@ -511,10 +528,16 @@ export const receiveExchange = internalAction({
     const data = await ctx.runQuery(queryRef('store/context'), { peerTownId: townId });
     if (!data.identity || !data.peer || data.peer.trustState !== 'TRUSTED')
       throw new Error('PEER_NOT_TRUSTED');
-    await validateHandoff(packet.body.handoff, data.peer.publicKey,
-      packet.body.handoff.body.publicKey === data.peer.publicKey || await ctx.runQuery(queryRef('identityKeyRotation/historicalKeyAccepted'), {
-        townId: data.peer.townId, oldPublicKey: packet.body.handoff.body.publicKey, currentPublicKey: data.peer.publicKey,
-      }));
+    await validateHandoff(
+      packet.body.handoff,
+      data.peer.publicKey,
+      packet.body.handoff.body.publicKey === data.peer.publicKey ||
+        (await ctx.runQuery(queryRef('identityKeyRotation/historicalKeyAccepted'), {
+          townId: data.peer.townId,
+          oldPublicKey: packet.body.handoff.body.publicKey,
+          currentPublicKey: data.peer.publicKey,
+        })),
+    );
     if (!(await verifySignature(packet.body, packet.signature, data.peer.publicKey)))
       throw new Error('INVALID_MIGRATION_EXCHANGE');
     // Convex only permits randomized key generation in actions. The transaction
@@ -552,8 +575,23 @@ export const acceptExchange = internalMutation({
       remote.trustState !== 'TRUSTED'
     )
       throw new Error('PEER_NOT_TRUSTED');
-    await validateHandoff(request.handoff, remote.publicKey,
-      await verifiedIdentityKeySuccessor(ctx, remote.townId, request.handoff.body.publicKey, remote.publicKey));
+    await validateHandoff(
+      request.handoff,
+      remote.publicKey,
+      await verifiedIdentityKeySuccessor(
+        ctx,
+        remote.townId,
+        request.handoff.body.publicKey,
+        remote.publicKey,
+      ),
+    );
+    if (
+      !(await verifiedIdentityKeySuccessor(ctx, remote.townId, b.publicKey, remote.publicKey, {
+        oldVersion: b.identityVersion ?? 1,
+        currentVersion: remote.identityVersion ?? 1,
+      }))
+    )
+      throw new Error('MIGRATION_IDENTITY_VERSION_MISMATCH');
     if (
       request.toTownId !== local.townId ||
       request.recipientDeploymentInstanceId !== local.deploymentInstanceId ||
@@ -564,7 +602,16 @@ export const acceptExchange = internalMutation({
     const descriptor = b.peers.find((p: PublicPeer) => p.townId === local.townId);
     if (
       !descriptor ||
-      !(await verifiedIdentityKeySuccessor(ctx, local.townId, descriptor.publicKey, local.publicKey)) ||
+      !(await verifiedIdentityKeySuccessor(
+        ctx,
+        local.townId,
+        descriptor.publicKey,
+        local.publicKey,
+        {
+          oldVersion: descriptor.identityVersion ?? 1,
+          currentVersion: local.identityVersion ?? 1,
+        },
+      )) ||
       descriptor.deploymentInstanceId !== local.deploymentInstanceId ||
       descriptor.deploymentEpoch !== local.deploymentEpoch ||
       descriptor.trustState !== 'TRUSTED'
