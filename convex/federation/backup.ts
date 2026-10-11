@@ -535,6 +535,10 @@ export const importBackup = action({
       acknowledged = true;
       return result;
     } finally {
+      // Before publication no database writer has received this object ID.
+      // Reclaim the complete private bundle if preparing cold files failed.
+      if (vectorArchiveStorageId && !publicationStarted)
+        await ctx.storage.delete(vectorArchiveStorageId);
       for (const {storageId} of preparedColdFiles) {
         // A lost response can leave publication in flight. A separate read cannot
         // prove that it will never commit later, so preserve every staged object.

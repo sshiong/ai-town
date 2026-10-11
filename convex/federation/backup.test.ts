@@ -1591,6 +1591,61 @@ test('a publication acknowledgement failure preserves the uploaded cold object e
   expect(deletes).toBe(0);
 });
 
+test.each(['cold-upload', 'cold-verification', 'publication-unknown'] as const)(
+  'ordinary vector archive cleanup respects the %s publication boundary', async failure => {
+    const src = await town(), owner = await nativeColdOwner(src.t, src.worldId);
+    await src.t.action(action('federation/coldHistory:archive'), owner);
+    const bundle: BackupBundle = await src.t.action(action('federation/backup:exportResident'), {
+      adminToken, worldId: owner.worldId, playerId: owner.playerId, includeVectors: true,
+    });
+    const vector = (await src.t.run(ctx => ctx.db.query('modelMemoryVectors').first()))!;
+    bundle.sections.modelMemoryVectors = [encodeRow(vector)];
+    const rows = bundle.sections.modelMemoryVectors;
+    bundle.manifest.sections.modelMemoryVectors = {
+      digest: await digest(rows), count: rows.length,
+      bytes: new TextEncoder().encode(JSON.stringify(rows)).length,
+    };
+    const identity = (await src.t.run(ctx => ctx.db.query('federationIdentity').unique()))!;
+    bundle.signature = await sign(bundle.manifest, identity.privateKeyEncrypted);
+    await expect(validateBundle(bundle)).resolves.toBeDefined();
+    const objects = new Map<string, Blob>();
+    const deleted: string[] = [];
+    let stores = 0, queries = 0, publications = 0;
+    const handler = (importBackup as unknown as {
+      _handler: (ctx: ActionCtx, args: any) => Promise<unknown>;
+    })._handler;
+    const ctx = {
+      runQuery: async () => { queries++; return queries === 1 ? {} : false; },
+      runMutation: async () => { publications++; throw new Error('PUBLICATION_ACKNOWLEDGEMENT_LOST'); },
+      storage: {
+        store: async (blob: Blob) => {
+          if (++stores === 2 && failure === 'cold-upload') throw new Error('COLD_UPLOAD_FAILED');
+          const id = `test-storage-${stores}`;
+          objects.set(id, blob);
+          return id;
+        },
+        get: async (id: string) => failure === 'cold-verification' ? null : objects.get(id),
+        delete: async (id: string) => { deleted.push(id); objects.delete(id); },
+      },
+    } as unknown as ActionCtx;
+    await expect(handler(ctx, { adminToken, bundle, mode: 'merge', targetWorldId: src.worldId }))
+      .rejects.toThrow(failure === 'cold-upload' ? 'COLD_UPLOAD_FAILED'
+        : failure === 'cold-verification' ? 'BACKUP_COLD_FILES_STORAGE_INVALID'
+          : 'PUBLICATION_ACKNOWLEDGEMENT_LOST');
+    if (failure === 'publication-unknown') {
+      expect(publications).toBe(1);
+      expect(queries).toBe(1);
+      expect(deleted).toEqual([]);
+      expect(objects.size).toBe(2);
+      expect(JSON.parse(await objects.get('test-storage-1')!.text())).toEqual(bundle);
+    } else {
+      expect(publications).toBe(0);
+      expect(deleted).toContain('test-storage-1');
+      expect(objects.size).toBe(0);
+    }
+  },
+);
+
 
 test.each(['restore', 'clone'] as const)('small %s retains resident denial policy with exact identity mapping and private audit', async mode => {
   const { t, worldId, agentGlobalId } = await town();
