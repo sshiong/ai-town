@@ -25,6 +25,14 @@ export const backupTables = {
     mapping: v.any(),
     runtimeSnapshot: v.any(),
     manifest: v.any(),
+    archivePrivacyState: v.optional(v.union(v.literal('REWRITING'), v.literal('LOCAL_SANITIZED'))),
+    archiveRevision: v.optional(v.number()),
+    localArchiveStorageId: v.optional(v.id('_storage')),
+    localArchiveDigest: v.optional(v.string()),
+    archiveSourceEvidence: v.optional(v.object({
+      manifest: v.any(), signature: v.string(), sourcePublicKey: v.string(),
+      originalStorageId: v.id('_storage'), originalDigest: v.string(),
+    })),
   }).index('sourceTown', ['sourceTownId']),
   backupReconciliations: defineTable({
     importId: v.id('backupImports'),

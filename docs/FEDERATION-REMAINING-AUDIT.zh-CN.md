@@ -316,3 +316,7 @@ D/E 实际可信 Ollama 证书的最小链均通过：权重 artifact/pipeline/p
 提交 76a721a 已推送并以冻结代码成功部署 I、J，两镇部署命令正常退出。部署后的实际接口复验通过：身份 ACTIVE、未授权被拒绝、无匹配候选返回空页、已有终态旅行 CACHE 预检均 READY、身份未改变。此复验没有执行 start 或正文删除，不替代 SENSITIVE 的测试数据库证据或完整浏览器清理验收。
 
 普通导入上传回收修复：includeVectors 的 vectorArchiveStorageId 实际保存完整私密 bundle。此前冷档上传/校验在发布前失败时，finally 只回收冷档对象，没有回收这份完整 bundle。现在只有 publicationStarted=false、尚未把对象 ID 交给数据库发布事务时回收该对象；发布结果未知仍保留，避免删掉可能已提交的内容。覆盖冷档上传失败、校验失败、发布回执丢失三种边界，确认前两种没有调用发布且对象全部回收，第三种不做后续引用查询且两份对象保留。原回执丢失用例与新增用例定向四项通过；普通备份/向量界面策略/语言完整三套 69 项通过。未知发布结果和无法分类的孤立存储扫描仍未完成，不能把此修复当作已有归档的正文清理完成。
+
+归档向量复用保护：普通及分块导入记录新增独立的可选隐私状态和版本，不改变导入任务 COMPLETE。REWRITING/LOCAL_SANITIZED 归档在 prepare 阶段明确要求从文本重建，不调用 provider、不创建新空间；createJob/pageData/sourceMappings/copyPage 都拒绝复用。新任务保存 archiveRevision，旧归档及旧任务缺字段按零兼容，读页和事务写入再次比较，防止 action 读出旧 entries 后归档清理仍写回向量。advance 即使在 pageData 阶段失败，也会标对应任务 REBUILD_REQUIRED，并只使匹配模型且仍 BUILDING 的空间 FAILED，保留 ACTIVE/READY/其它空间。
+
+GPT-6.1-sol high 子代理后端两套 47 项通过；根代理冻结仅待发布的前置保护代码（不包含另一子代理正在开发的 archive worker），向量/来源证明/界面策略/语言四套 55 项通过，前端构建通过。新增中英文说明要求从当前保留文本重建。此检查点仅建立归档状态、版本和复用保护，实际 bundle 重建、旧对象删除、共享对象迁移及 chunk/孤立对象覆盖尚未交付。

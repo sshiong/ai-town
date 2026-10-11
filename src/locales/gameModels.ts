@@ -1,4 +1,6 @@
 export const gameModelMessages: Record<string, string> = {
+  'This archive is being cleaned or has been locally sanitized. Rebuild from retained text; its original vector snapshot cannot be reused.': '该归档正在清理或已在本地脱敏，原始向量快照不可复用，请从保留的文本重建。',
+  'The archive changed after this vector task started. Rebuild from the current retained text.': '归档在此向量任务启动后发生了变化，请从当前保留的文本重建。',
   "Saving profile": "正在保存配置",
   "Models & resident bindings": "模型与居民绑定",
   "Chat and Embedding use independent providers. Test a Chat connection successfully before selecting main. The first successfully tested profile becomes main automatically. Changing main only affects new residents; existing bindings remain fixed. A failed main profile pauses new resident creation until it passes a test or you select another validated main.": "对话和嵌入模型使用独立的服务商。对话连接测试成功后才能设为主模型；首个测试成功的配置会自动成为主模型。更换主模型只影响新居民，已有绑定保持不变。主模型故障时将暂停创建新居民，直到测试通过或选择另一个已验证的主模型。",

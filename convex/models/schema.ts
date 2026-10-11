@@ -42,6 +42,7 @@ export const modelTables = {
   }).index('profile', ['profileId']),
   embeddingRestoreJobs: defineTable({
     importId: v.id('backupImports'), targetProfileId: v.id('embeddingProfiles'), spaceId: v.id('embeddingSpaces'),
+    archiveRevision: v.optional(v.number()),
     state: v.union(v.literal('COPYING'), v.literal('PENDING_VALIDATION'), v.literal('REBUILD_REQUIRED')),
     cursor: v.union(v.string(), v.null()), offset: v.number(), copied: v.number(), skipped: v.number(),
     reason: v.optional(v.string()), createdAt: v.number(), updatedAt: v.number(),

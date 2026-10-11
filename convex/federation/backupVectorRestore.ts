@@ -25,7 +25,14 @@ async function importContext(db: DatabaseReader, importId: Id<'backupImports'>) 
   if (jobId && (!archive || archive.kind !== 'import' || archive.state !== 'COMPLETE' ||
     archive.metadata.importId !== importId || archive.source.townId !== imported.sourceTownId))
     throw new Error('BACKUP_VECTOR_IMPORT_NOT_COMPLETE');
-  return { imported, archive, trusted: archive?.metadata.vectorSourceTrusted ?? imported.manifest.vectorSourceTrusted ?? false };
+  return { imported, archive, trusted: archive?.metadata.vectorSourceTrusted ?? imported.manifest.vectorSourceTrusted ?? false,
+    privacyBlocked: !!(imported.archivePrivacyState || archive?.archivePrivacyState || archive?.metadata.archivePrivacyState),
+    archiveRevision: archive?.archiveRevision ?? archive?.metadata.archiveRevision ?? imported.archiveRevision ?? 0 };
+}
+function assertReusableArchive(context: Awaited<ReturnType<typeof importContext>>, expectedRevision?: number) {
+  if (context.privacyBlocked) throw new Error('VECTOR_ARCHIVE_PRIVACY_REDACTED');
+  if (expectedRevision !== undefined && expectedRevision !== context.archiveRevision)
+    throw new Error('VECTOR_ARCHIVE_REVISION_CHANGED');
 }
 export const importData = internalQuery({
   args: { importId: v.id('backupImports') }, handler: (ctx, a) => importContext(ctx.db, a.importId),
@@ -34,11 +41,12 @@ export const createJob = internalMutation({
   args: { importId: v.id('backupImports'), targetProfileId: v.id('embeddingProfiles'), spaceId: v.id('embeddingSpaces') },
   handler: async (ctx, a) => {
     const context = await importContext(ctx.db, a.importId);
+    assertReusableArchive(context);
     if (!context.trusted) throw new Error('VECTOR_SOURCE_NOT_TRUSTED');
     const certificate = await assertSpaceCertificate(ctx.db, a.spaceId);
     const space = await ctx.db.get(a.spaceId);
     if (!certificate || space?.profileId !== a.targetProfileId || space.status !== 'BUILDING') throw new Error('VECTOR_TARGET_NOT_VERIFIED');
-    return ctx.db.insert('embeddingRestoreJobs', { ...a, state: 'COPYING', cursor: null, offset: 0,
+    return ctx.db.insert('embeddingRestoreJobs', { ...a, archiveRevision: context.archiveRevision, state: 'COPYING', cursor: null, offset: 0,
       copied: 0, skipped: 0, createdAt: Date.now(), updatedAt: Date.now() });
   },
 });
@@ -47,6 +55,7 @@ export const prepareVectorReuse = action({
   handler: async (ctx, a): Promise<{ vectorPolicy: 'REBUILD'; reason: string } | { vectorPolicy: 'PENDING_VALIDATION'; jobId: Id<'embeddingRestoreJobs'>; spaceId: Id<'embeddingSpaces'> }> => {
     requireAdmin(a.adminToken);
     const context: Awaited<ReturnType<typeof importContext>> = await ctx.runQuery(qref('importData'), { importId: a.importId });
+    if (context.privacyBlocked) return { vectorPolicy: 'REBUILD', reason: 'VECTOR_ARCHIVE_PRIVACY_REDACTED' };
     if (!context.trusted) return { vectorPolicy: 'REBUILD', reason: 'SOURCE_KEY_WAS_NOT_LOCALLY_TRUSTED_AT_IMPORT' };
     if (context.archive ? !context.archive.metadata.includeVectors : !context.imported.manifest.vectorArchiveStorageId)
       return { vectorPolicy: 'REBUILD', reason: 'ARCHIVE_HAS_NO_PROVEN_VECTOR_SNAPSHOT' };
@@ -69,6 +78,7 @@ export const pageData = internalQuery({
     const job = await ctx.db.get(a.jobId);
     if (!job) throw new Error('VECTOR_RESTORE_JOB_NOT_FOUND');
     const context = await importContext(ctx.db, job.importId);
+    assertReusableArchive(context, job.archiveRevision ?? 0);
     if (!context.trusted) throw new Error('VECTOR_SOURCE_NOT_TRUSTED');
     if (!context.archive) return { job, ...context, chunk: null, nextCursor: null, done: true };
     const page = await ctx.db.query('backupLargeChunks').withIndex('job_index', q => q.eq('jobId', context.archive!._id))
@@ -77,12 +87,14 @@ export const pageData = internalQuery({
   },
 });
 export const sourceMappings = internalQuery({
-  args: { importId: v.id('backupImports'), memoryIds: v.array(v.string()) },
-  handler: (ctx, a) => resolveSourceMappings(ctx.db, a.importId, a.memoryIds),
+  args: { importId: v.id('backupImports'), memoryIds: v.array(v.string()), archiveRevision: v.optional(v.number()) },
+  handler: (ctx, a) => resolveSourceMappings(ctx.db, a.importId, a.memoryIds, a.archiveRevision),
 });
-async function resolveSourceMappings(db: DatabaseReader, importId: Id<'backupImports'>, memoryIds: string[]) {
+async function resolveSourceMappings(db: DatabaseReader, importId: Id<'backupImports'>, memoryIds: string[], archiveRevision?: number) {
     if (memoryIds.length > 20) throw new Error('VECTOR_RESTORE_PAGE_BUDGET');
-    const { imported, archive } = await importContext(db, importId);
+    const context = await importContext(db, importId);
+    assertReusableArchive(context, archiveRevision);
+    const { imported, archive } = context;
     const mappings = [];
     for (const memoryId of memoryIds) {
       if (!archive) { mappings.push({ memoryId, targetId: imported.mapping[memoryId], mapping: imported.mapping }); continue; }
@@ -118,6 +130,7 @@ export const copyPage = internalMutation({
     if (!job || job.state !== 'COPYING' || job.cursor !== a.expectedCursor || job.offset !== a.expectedOffset) throw new Error('VECTOR_RESTORE_CHECKPOINT_CHANGED');
     if (a.entries.length > 20) throw new Error('VECTOR_RESTORE_PAGE_BUDGET');
     const context = await importContext(ctx.db, job.importId);
+    assertReusableArchive(context, job.archiveRevision ?? 0);
     if (!context.trusted) throw new Error('VECTOR_SOURCE_NOT_TRUSTED');
     const targetCertificate = await assertSpaceCertificate(ctx.db, job.spaceId);
     const targetProfile = await ctx.db.get(job.targetProfileId);
@@ -169,17 +182,21 @@ export const fail = internalMutation({
   args: { jobId: v.id('embeddingRestoreJobs'), reason: v.string() },
   handler: async (ctx, a) => {
     const job = await ctx.db.get(a.jobId);
-    if (job) await ctx.db.patch(job._id, { state: 'REBUILD_REQUIRED', reason: a.reason.slice(0, 200), updatedAt: Date.now() });
+    if (!job) return;
+    const reason = a.reason.slice(0, 200);
+    await ctx.db.patch(job._id, { state: 'REBUILD_REQUIRED', reason, updatedAt: Date.now() });
+    const space = await ctx.db.get(job.spaceId);
+    if (space?.status === 'BUILDING' && space.profileId === job.targetProfileId)
+      await ctx.db.patch(space._id, { status: 'FAILED', failure: reason });
   },
 });
 export const advance = internalAction({
   args: { jobId: v.id('embeddingRestoreJobs') },
   handler: async (ctx, a): Promise<void> => {
-    let spaceId: Id<'embeddingSpaces'> | undefined;
     try {
       const page = await ctx.runQuery(qref('pageData'), a);
       if (page.job.state !== 'COPYING') return;
-      spaceId = page.job.spaceId;
+      const spaceId = page.job.spaceId;
       const route = await ctx.runQuery(modelQ('getRoute'), { spaceId });
       await guardEmbeddingRoute(ctx, route);
       let vectors: BackupRow[], normal: BackupBundle | null = null, done = page.done, nextOffset = 0;
@@ -204,7 +221,8 @@ export const advance = internalAction({
           ? (await validateSelectiveChunk(chunk, page.chunk)).filter(e => e.kind === 'record').map(e => decodeRow((e as {record: string}).record))
           : await validateChunk(chunk, page.chunk);
       }
-      const mappings = await ctx.runQuery(qref('sourceMappings'), { importId: page.job.importId, memoryIds: vectors.map(row => row.memoryId) });
+      const mappings = await ctx.runQuery(qref('sourceMappings'), { importId: page.job.importId,
+        memoryIds: vectors.map(row => row.memoryId), archiveRevision: page.job.archiveRevision ?? 0 });
       const entries = [];
       const chunkCache = new Map<string, BackupRow[]>();
       for (const [index, vector] of vectors.entries()) {
@@ -231,7 +249,6 @@ export const advance = internalAction({
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'VECTOR_RESTORE_FAILED';
       await ctx.runMutation(mref('fail'), { ...a, reason });
-      if (spaceId) await ctx.runMutation(modelM('failBuild'), { spaceId, failure: reason });
     }
   },
 });

@@ -30,6 +30,8 @@ export function canActivateEmbeddingSpace(space: EmbeddingActivationSpace | unde
 
 export function vectorRecoveryReason(reason: string) {
   const reasons: Record<string, string> = {
+    VECTOR_ARCHIVE_PRIVACY_REDACTED: 'This archive is being cleaned or has been locally sanitized. Rebuild from retained text; its original vector snapshot cannot be reused.',
+    VECTOR_ARCHIVE_REVISION_CHANGED: 'The archive changed after this vector task started. Rebuild from the current retained text.',
     SOURCE_KEY_WAS_NOT_LOCALLY_TRUSTED_AT_IMPORT: 'The source signing key was not locally trusted when this archive was imported. Rebuild from retained text; an archive cannot grant itself trust.',
     ARCHIVE_HAS_NO_PROVEN_VECTOR_SNAPSHOT: 'This archive has no proven vector snapshot. Rebuild from retained text.',
     NO_AUTHORIZED_PROVIDER_EVIDENCE: 'The target provider has no server-authorized identity evidence. Configure an authorized provider or rebuild from retained text.',

@@ -43,6 +43,8 @@ export const backupLargeTables = {
     newTownId: v.optional(v.string()),
     keys: v.optional(v.any()),
     metadata: v.optional(v.any()),
+    archivePrivacyState: v.optional(v.union(v.literal('REWRITING'), v.literal('LOCAL_SANITIZED'))),
+    archiveRevision: v.optional(v.number()),
   }),
   backupLargeChunks: defineTable({
     jobId: v.id('backupLargeJobs'),
@@ -52,7 +54,7 @@ export const backupLargeTables = {
     bytes: v.number(),
     digest: v.string(),
     storageId: v.id('_storage'),
-  }).index('job_index', ['jobId', 'index']),
+  }).index('job_index', ['jobId', 'index']).index('storage', ['storageId']),
   backupLargeRows: defineTable({
     jobId: v.id('backupLargeJobs'),
     role: v.union(v.literal('SOURCE'), v.literal('OLD')),
