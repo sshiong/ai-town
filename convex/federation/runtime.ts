@@ -1,3 +1,4 @@
+import { assertClock, canResume, readClock } from './timePolicy';
 import { MAX_REPLY_TIMEOUT_MS, replyTimeoutMs } from './replyPolicy';
 import { v } from 'convex/values';
 import { configuredResourceLimits, pendingDecisionCount } from './resources';
@@ -107,7 +108,8 @@ export const worldPresence = query({
         visitId: r.visitId,
         hostTownId: ledger?.hostTownId,
         leaseExpiry: ledger?.leaseExpiry,
-        lastError: r.lastError,
+        // Provider failures may contain prompts, credentials or private memory.
+        lastError: r.lastError ? 'TRAVEL_OPERATION_FAILED' : undefined,
       });
     }
     return {
@@ -174,6 +176,7 @@ export const freezeHome = internalMutation({
     if (!ledger || ledger.role !== 'home' || !ledger.worldId || !ledger.homePlayerId)
       throw new Error('INVALID_HOME_VISIT');
     if (ledger.state !== 'FREEZING') return;
+    await assertClock(ctx.db, await identity(ctx));
     const runtime = await ctx.db
       .query('federationAgentRuntimes')
       .withIndex('globalId', (q) => q.eq('agentGlobalId', ledger.agentGlobalId))
@@ -197,6 +200,7 @@ export const createHostPresence = internalMutation({
     const ledger = await visit(ctx, visitId);
     if (!ledger || ledger.role !== 'host') throw new Error('INVALID_HOST_VISIT');
     if (ledger.state !== 'CREATING' || ledger.leaseExpiry <= Date.now()) return;
+    await assertClock(ctx.db, await identity(ctx));
     const worldStatus = await ctx.db
       .query('worldStatus')
       .filter((q) => q.eq(q.field('isDefault'), true))
@@ -243,6 +247,7 @@ export const updateHostLease = internalMutation({
     const ledger = await visit(ctx, visitId);
     if (!ledger || ledger.role !== 'host' || ledger.state !== 'ACTIVE' || !ledger.worldId)
       throw new Error('VISIT_NOT_ACTIVE');
+    await assertClock(ctx.db, await identity(ctx));
     await insertInput(ctx, ledger.worldId, 'federationUpdateLease', {
       visitId,
       agentAuthorityEpoch: ledger.agentAuthorityEpoch,
@@ -257,7 +262,7 @@ export const resumeHome = internalMutation({
     const ledger = await visit(ctx, visitId);
     if (!ledger || ledger.role !== 'home') throw new Error('INVALID_HOME_VISIT');
     if (ledger.state !== 'RETURN_PENDING') return;
-    if (!ledger.cleanupConfirmed && ledger.leaseExpiry + 60_000 > Date.now())
+    if (!await canResume(ctx.db, ledger))
       throw new Error('HOST_LEASE_STILL_VALID');
     const runtime = await ctx.db
       .query('federationAgentRuntimes')
@@ -268,7 +273,7 @@ export const resumeHome = internalMutation({
       // A delayed return for an older authority must not resume the current
       // body. Once its lease is certainly dead, close only the old ledger.
       if (runtime.agentAuthorityEpoch > ledger.agentAuthorityEpoch &&
-          ledger.leaseExpiry + 60_000 <= Date.now())
+          await canResume(ctx.db, { ...ledger, cleanupConfirmed: false }))
         await homeResumed(ctx, visitId);
       return;
     }
@@ -329,6 +334,7 @@ export async function commitPresenceJobs(ctx: MutationCtx) {
 }
 
 export async function collectObservations(ctx: MutationCtx, worldId: Id<'worlds'>) {
+  if (!(await readClock(ctx.db, await identity(ctx))).healthy) return;
   const world = await ctx.db.get(worldId);
   if (!world) return;
   const now = Date.now();
@@ -448,6 +454,7 @@ export async function dispatchRuntimeMessage(ctx: MutationCtx, message: Federati
     if (ledger.role !== 'home') throw new Error('INVALID_HISTORY_RECIPIENT');
     return receiveConversationEnded(ctx, ledger, message.payload);
   }
+  if (message.type !== 'ACTION_RESULT') await assertClock(ctx.db, await identity(ctx));
   if (ledger.state !== 'ACTIVE' || ledger.leaseExpiry <= Date.now())
     throw new Error('VISIT_NOT_ACTIVE');
   const payload = message.payload;
@@ -603,7 +610,7 @@ export async function commitRemoteActions(ctx: MutationCtx) {
     const accepted = result.kind === 'ok';
     if (
       accepted &&
-      (ledger.state !== 'ACTIVE' ||
+      (!(await readClock(ctx.db, await identity(ctx))).healthy || ledger.state !== 'ACTIVE' ||
         ledger.leaseExpiry <= Date.now() ||
         ledger.agentAuthorityEpoch !== job.agentAuthorityEpoch ||
         ledger.visitLeaseVersion !== job.visitLeaseVersion)

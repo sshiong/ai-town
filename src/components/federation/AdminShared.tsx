@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode, type MouseEventHandler } from 'react';
 import { useConvexConnectionState } from 'convex/react';
 import { adminErrorSummary } from './uiPolicy';
 
@@ -11,7 +11,7 @@ export function AdminButton({
 }: {
   children: ReactNode;
   disabled?: boolean;
-  onClick?: () => void;
+  onClick?: MouseEventHandler<HTMLButtonElement>;
   type?: 'button' | 'submit';
   danger?: boolean;
 }) {

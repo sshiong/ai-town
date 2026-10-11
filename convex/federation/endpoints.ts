@@ -14,13 +14,16 @@ import {
 import type { Doc } from '../_generated/dataModel';
 import { identity, peer, session } from './store';
 import { actionRef, mutationRef, queryRef } from './refs';
-import { directRequest, readRequest } from './direct';
+import { directRequest, directPeerRequest, endpointContextKey, requestCandidates, readRequest } from './direct';
+import { endpointCandidates } from './endpointsSchema';
+import { configuredTimePolicy } from './timePolicy';
 import {
   FederationMessage,
   normalizeEndpoint,
   PROTOCOL,
   SignedPacket,
   validateEnvelope,
+  normalizeEndpointCandidates, endpointGeneration, nextEndpointGeneration, EndpointCandidate,
 } from './protocol';
 import { digest, requireAdmin, signPacket, verifyPacket } from './security';
 import { assertNoIdentityConflict, observeSignedIdentity } from './identityConflict';
@@ -40,6 +43,7 @@ type Update = {
   credentialId: string;
   previousEndpoint: string;
   newEndpoint: string;
+  newEndpoints?: EndpointCandidate[];
   sequence: number;
   operator: string;
   reason: string;
@@ -63,6 +67,8 @@ type ProbeAck = {
   expiresAt: number;
   endpoint?: string;
   endpointSequence?: number;
+  endpointCandidates?: EndpointCandidate[];
+  endpointGeneration?: number;
 };
 const updateRow = async (ctx: MutationCtx, direction: string, townId: string, updateId: string) =>
   ctx.db
@@ -123,6 +129,7 @@ function validateUpdate(packet: UpdatePacket) {
   )
     throw new Error('INVALID_ENDPOINT_UPDATE');
   validateDetails(b.operator, b.reason);
+  normalizeEndpointCandidates(b.newEndpoint, b.newEndpoints);
   if (
     normalizeEndpoint(b.newEndpoint) !== b.newEndpoint ||
     normalizeEndpoint(b.previousEndpoint) !== b.previousEndpoint
@@ -178,7 +185,7 @@ function assertCurrent(b: Update, local: Local, remote: Peer) {
 /** Endpoint changes retain the pair credential; identity, credentials and addresses are separate. */
 export async function commitLocalEndpoint(
   ctx: MutationCtx,
-  args: { endpoint: string; operator: string; reason: string },
+  args: { endpoint: string; endpointCandidates?: EndpointCandidate[]; operator: string; reason: string },
 ) {
   validateDetails(args.operator, args.reason);
   await assertNoIdentityConflict(ctx);
@@ -186,12 +193,13 @@ export async function commitLocalEndpoint(
   if (!local) throw new Error('INITIALIZE_IDENTITY_FIRST');
   if (local.mode !== 'ACTIVE') throw new Error('DEPLOYMENT_NOT_ACTIVE');
   const endpoint = normalizeEndpoint(args.endpoint);
-  if (endpoint === local.endpoint)
+  const candidates = normalizeEndpointCandidates(endpoint, args.endpointCandidates ?? (endpoint === local.endpoint ? local.endpointCandidates : undefined));
+  if (endpoint === local.endpoint && JSON.stringify(candidates) === JSON.stringify(normalizeEndpointCandidates(local.endpoint, local.endpointCandidates)))
     return { townId: local.townId, endpoint, sequence: local.endpointSequence ?? 0 };
   const sequence = (local.endpointSequence ?? 0) + 1;
   if (!Number.isSafeInteger(sequence) || sequence >= Number.MAX_SAFE_INTEGER)
     throw new Error('ENDPOINT_SEQUENCE_EXHAUSTED');
-  await ctx.db.patch(local._id, { endpoint, endpointSequence: sequence });
+  await ctx.db.patch(local._id, { endpoint, endpointSequence: sequence, endpointGeneration: nextEndpointGeneration(local), endpointCandidates: candidates });
   await ctx.db.insert('federationEndpointAudit', {
     operation: 'LOCAL_CHANGED',
     previousEndpoint: local.endpoint,
@@ -214,6 +222,7 @@ export async function commitLocalEndpoint(
       sequence,
       previousEndpoint: local.endpoint,
       newEndpoint: endpoint,
+      newEndpoints: candidates,
       credentialId: remote.credentialId,
       operator: args.operator.trim(),
       reason: args.reason.trim(),
@@ -230,7 +239,7 @@ export async function commitLocalEndpoint(
   return { townId: local.townId, endpoint, sequence };
 }
 export const changeAddress = mutation({
-  args: { adminToken: v.string(), endpoint: v.string(), ...details },
+  args: { adminToken: v.string(), endpoint: v.string(), endpointCandidates: v.optional(endpointCandidates), ...details },
   handler: async (ctx, args) => {
     requireAdmin(args.adminToken);
     return commitLocalEndpoint(ctx, args);
@@ -271,6 +280,7 @@ export const prepareDelivery = internalMutation({
       credentialId: remote.credentialId,
       previousEndpoint: row.previousEndpoint,
       newEndpoint: row.newEndpoint,
+      newEndpoints: row.newEndpoints,
       sequence: row.sequence,
       operator: row.operator,
       reason: row.reason,
@@ -286,7 +296,7 @@ export const prepareDelivery = internalMutation({
       requestDigest: await digest(packet),
       nextRetryAt: Date.now() + 30000,
     });
-    return { packet, endpoint: remote.endpoint, attempt: row.attempts + 1 };
+    return { packet, endpoint: remote.endpoint, local, remote, attempt: row.attempts + 1 };
   },
 });
 export const deliveryFailed = internalMutation({
@@ -314,7 +324,7 @@ export const deliveryFailed = internalMutation({
   },
 });
 export const acceptAck = internalMutation({
-  args: { peerTownId: v.string(), updateId: v.string(), attempt: v.number(), response: v.any() },
+  args: { peerTownId: v.string(), updateId: v.string(), attempt: v.number(), response: v.any(), endpointContextKey: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const row = await updateRow(ctx, 'OUTBOUND', args.peerTownId, args.updateId);
     const local = await identity(ctx),
@@ -331,6 +341,7 @@ export const acceptAck = internalMutation({
     )
       throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
     await assertNoIdentityConflict(ctx);
+    if (args.endpointContextKey !== undefined && endpointContextKey(local, remote) !== args.endpointContextKey) throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
     const request = row.packet as UpdatePacket;
     if (
       local.mode !== 'ACTIVE' ||
@@ -384,16 +395,18 @@ export const deliver = internalAction({
     const prepared = (await ctx.runMutation(mutationRef('endpoints/prepareDelivery'), args)) as {
       packet: UpdatePacket;
       endpoint: string;
+      local: Local; remote: Peer;
       attempt: number;
     } | null;
     if (!prepared) return;
     try {
-      const response = await directRequest(prepared.endpoint, '/peers/endpoints', prepared.packet);
+      const response = (await directPeerRequest(ctx, prepared.local, prepared.remote, '/peers/endpoints', prepared.packet)).value;
       await observeSignedIdentity(ctx, response, 'ENDPOINT');
       await ctx.runMutation(mutationRef('endpoints/acceptAck'), {
         ...args,
         attempt: prepared.attempt,
         response,
+        endpointContextKey: endpointContextKey(prepared.local, prepared.remote),
       });
     } catch (error) {
       await ctx.runMutation(mutationRef('endpoints/deliveryFailed'), {
@@ -422,6 +435,7 @@ export const stageUpdate = internalMutation({
       existing &&
       (existing.sequence !== b.sequence ||
         existing.newEndpoint !== b.newEndpoint ||
+        JSON.stringify(existing.newEndpoints) !== JSON.stringify(b.newEndpoints) ||
         existing.senderDeploymentInstanceId !== b.senderDeploymentInstanceId ||
         existing.senderDeploymentEpoch !== b.senderDeploymentEpoch)
     )
@@ -430,7 +444,7 @@ export const stageUpdate = internalMutation({
       return { response: existing.response };
     if (
       b.sequence < acceptedSequence(remote) ||
-      (b.sequence === acceptedSequence(remote) && b.newEndpoint !== remote.endpoint)
+      (b.sequence === acceptedSequence(remote) && (b.newEndpoint !== remote.endpoint || JSON.stringify(normalizeEndpointCandidates(b.newEndpoint, b.newEndpoints)) !== JSON.stringify(normalizeEndpointCandidates(remote.endpoint, remote.endpointCandidates))))
     )
       throw new Error('STALE_ENDPOINT_SEQUENCE');
     const higher = await ctx.db
@@ -474,6 +488,7 @@ export const stageUpdate = internalMutation({
       sequence: b.sequence,
       previousEndpoint: remote.endpoint,
       newEndpoint: b.newEndpoint,
+      newEndpoints: b.newEndpoints,
       credentialId: b.credentialId,
       operator: b.operator,
       reason: b.reason,
@@ -493,6 +508,7 @@ export const stageUpdate = internalMutation({
       requestDigest,
       expectedLocalEndpoint: local.endpoint,
       expectedPeerEndpoint: remote.endpoint,
+      expectedLocalEndpointGeneration: endpointGeneration(local), expectedPeerEndpointGeneration: endpointGeneration(remote),
     };
   },
 });
@@ -524,7 +540,7 @@ async function challengeEndpoint(
     local.privateKeyEncrypted,
     remote.credentialEncrypted,
   );
-  const ack = (await directRequest(endpoint, '/probe', probePacket)) as SignedPacket<ProbeAck>;
+  const ack = (await directRequest(endpoint, '/probe', probePacket, configuredTimePolicy(local).requestTimeoutMs)) as SignedPacket<ProbeAck>;
   await observeSignedIdentity(ctx, ack, 'ACK');
   await validateProbeProof(local, remote, probePacket, ack);
   return { probe: probePacket, ack };
@@ -573,6 +589,7 @@ export const commitUpdate = internalMutation({
     ack: v.any(),
     expectedLocalEndpoint: v.string(),
     expectedPeerEndpoint: v.string(),
+    expectedLocalEndpointGeneration: v.optional(v.number()), expectedPeerEndpointGeneration: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const packet = args.packet as UpdatePacket,
@@ -592,8 +609,9 @@ export const commitUpdate = internalMutation({
       row.requestDigest !== (await digest(packet)) ||
       local.endpoint !== args.expectedLocalEndpoint ||
       remote.endpoint !== args.expectedPeerEndpoint ||
+      endpointGeneration(local) !== (args.expectedLocalEndpointGeneration ?? 0) || endpointGeneration(remote) !== (args.expectedPeerEndpointGeneration ?? 0) ||
       b.sequence < acceptedSequence(remote) ||
-      (b.sequence === acceptedSequence(remote) && remote.endpoint !== b.newEndpoint)
+      (b.sequence === acceptedSequence(remote) && (remote.endpoint !== b.newEndpoint || JSON.stringify(normalizeEndpointCandidates(b.newEndpoint, b.newEndpoints)) !== JSON.stringify(normalizeEndpointCandidates(remote.endpoint, remote.endpointCandidates))))
     )
       throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
     const probe = args.probe as SignedPacket<FederationMessage>,
@@ -601,6 +619,8 @@ export const commitUpdate = internalMutation({
     await validateProbeProof(local, remote, probe, ack);
     if (ack.body.endpoint !== b.newEndpoint || ack.body.endpointSequence !== b.sequence)
       throw new Error('ENDPOINT_SOURCE_CHANGED');
+    const candidates = normalizeEndpointCandidates(b.newEndpoint, b.newEndpoints);
+    if (JSON.stringify(normalizeEndpointCandidates(b.newEndpoint, ack.body.endpointCandidates)) !== JSON.stringify(candidates)) throw new Error('ENDPOINT_SOURCE_CHANGED');
     const higher = await ctx.db
       .query('federationEndpointUpdates')
       .withIndex('sender_sequence', (q) =>
@@ -615,6 +635,7 @@ export const commitUpdate = internalMutation({
     if (higher) throw new Error('STALE_ENDPOINT_SEQUENCE');
     await ctx.db.patch(remote._id, {
       endpoint: b.newEndpoint,
+      endpointCandidates: candidates, endpointGeneration: nextEndpointGeneration(remote),
       endpointSequence: b.sequence,
       endpointSequenceDeploymentInstanceId: remote.deploymentInstanceId,
       endpointSequenceDeploymentEpoch: remote.deploymentEpoch,
@@ -673,15 +694,17 @@ export const receiveUpdate = internalAction({
       remote: Peer;
       expectedLocalEndpoint: string;
       expectedPeerEndpoint: string;
+      expectedLocalEndpointGeneration: number; expectedPeerEndpointGeneration: number;
     };
     if (staged.response) return staged.response;
     try {
-      const proof = await challengeEndpoint(ctx, staged.local, staged.remote, b.newEndpoint);
+      const proof = (await requestCandidates({ endpoint: b.newEndpoint, endpointCandidates: b.newEndpoints }, endpoint => challengeEndpoint(ctx, staged.local, staged.remote, endpoint))).value;
       return await ctx.runMutation(mutationRef('endpoints/commitUpdate'), {
         packet,
         ...proof,
         expectedLocalEndpoint: staged.expectedLocalEndpoint,
         expectedPeerEndpoint: staged.expectedPeerEndpoint,
+        expectedLocalEndpointGeneration: staged.expectedLocalEndpointGeneration, expectedPeerEndpointGeneration: staged.expectedPeerEndpointGeneration,
       });
     } catch (error) {
       await ctx.runMutation(mutationRef('endpoints/verificationFailed'), {
@@ -729,6 +752,7 @@ export const commitManualVerification = internalMutation({
     ack: v.any(),
     expectedLocalEndpoint: v.string(),
     expectedPeerEndpoint: v.string(),
+    expectedLocalEndpointGeneration: v.optional(v.number()), expectedPeerEndpointGeneration: v.optional(v.number()),
     ...details,
   },
   handler: async (ctx, args) => {
@@ -740,7 +764,7 @@ export const commitManualVerification = internalMutation({
       throw new Error('PEER_NOT_TRUSTED');
     if (
       local.endpoint !== args.expectedLocalEndpoint ||
-      remote.endpoint !== args.expectedPeerEndpoint
+      remote.endpoint !== args.expectedPeerEndpoint || endpointGeneration(local) !== (args.expectedLocalEndpointGeneration ?? 0) || endpointGeneration(remote) !== (args.expectedPeerEndpointGeneration ?? 0)
     )
       throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
     const endpoint = normalizeEndpoint(args.endpoint),
@@ -754,14 +778,15 @@ export const commitManualVerification = internalMutation({
     )
       throw new Error('INVALID_ENDPOINT_SEQUENCE');
     const sequence = ack.body.endpointSequence!;
-    if (ack.body.endpoint !== endpoint) throw new Error('ENDPOINT_SOURCE_CHANGED');
+    const candidates = normalizeEndpointCandidates(ack.body.endpoint ?? endpoint, ack.body.endpointCandidates);
+    if (!candidates.some(candidate => candidate.url === endpoint)) throw new Error('ENDPOINT_SOURCE_CHANGED');
     if (
       sequence < acceptedSequence(remote) ||
-      (sequence === acceptedSequence(remote) && sequence > 0 && endpoint !== remote.endpoint)
+      (sequence === acceptedSequence(remote) && sequence > 0 && ((ack.body.endpoint ?? endpoint) !== remote.endpoint || JSON.stringify(candidates) !== JSON.stringify(normalizeEndpointCandidates(remote.endpoint, remote.endpointCandidates))))
     )
       throw new Error('STALE_ENDPOINT_SEQUENCE');
     await ctx.db.patch(remote._id, {
-      endpoint,
+      endpoint: ack.body.endpoint ?? endpoint, endpointCandidates: candidates, endpointGeneration: nextEndpointGeneration(remote),
       endpointSequence: sequence,
       endpointSequenceDeploymentInstanceId: remote.deploymentInstanceId,
       endpointSequenceDeploymentEpoch: remote.deploymentEpoch,
@@ -803,6 +828,7 @@ export const verifyPeerEndpoint = action({
       ...proof,
       expectedLocalEndpoint: local.endpoint,
       expectedPeerEndpoint: remote.endpoint,
+      expectedLocalEndpointGeneration: endpointGeneration(local), expectedPeerEndpointGeneration: endpointGeneration(remote),
     });
   },
 });
@@ -872,6 +898,7 @@ export const history = query({
       rows = await ctx.db.query('federationEndpointUpdates').order('desc').take(100);
     return {
       endpoint: local?.endpoint,
+      endpointCandidates: local ? normalizeEndpointCandidates(local.endpoint, local.endpointCandidates) : [],
       sequence: local?.endpointSequence ?? 0,
       updates: rows.map(
         ({

@@ -1,5 +1,6 @@
 import { defineTable } from 'convex/server';
 import { v } from 'convex/values';
+export const endpointCandidates = v.array(v.object({ url: v.string(), priority: v.number() }));
 
 export const endpointTables = {
   federationEndpointUpdates: defineTable({
@@ -11,6 +12,7 @@ export const endpointTables = {
     sequence: v.number(),
     previousEndpoint: v.string(),
     newEndpoint: v.string(),
+    newEndpoints: v.optional(endpointCandidates),
     credentialId: v.string(),
     operator: v.string(),
     reason: v.string(),

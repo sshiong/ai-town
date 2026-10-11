@@ -14,6 +14,7 @@ import { identityRecoveryTables } from './federation/identityRecoverySchema';
 import { storagePolicyTables } from './federation/storageSchema';
 import { endpointTables } from './federation/endpointsSchema';
 import { coldHistoryTables } from './federation/coldHistorySchema';
+import { residentPolicyTables } from './federation/residentPolicySchema';
 
 export default defineSchema({
   music: defineTable({
@@ -44,4 +45,5 @@ export default defineSchema({
   ...storagePolicyTables,
   ...endpointTables,
   ...coldHistoryTables,
+  ...residentPolicyTables,
 });

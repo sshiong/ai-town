@@ -33,6 +33,7 @@ const modules = {
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../federation/backup.ts': () => import('./backup'),
+  '../federation/admin.ts': () => import('./admin'),
   '../federation/backupExportAudit.ts': () => import('./backupExportAudit'),
   '../models/embeddings.ts': () => import('../models/embeddings'),
   '../engine/abstractGame.ts': () => import('../engine/abstractGame'),
@@ -394,7 +395,11 @@ test('resident restore requires confirmation, detects changed target and rolls b
 
 test('full-town export is signed, versioned, binary-safe and excludes private keys and peer credentials', async () => {
   const { t } = await town();
+  const sourceMemories = await t.run(ctx => ctx.db.query('memories').collect());
+  expect(await t.run(ctx => ctx.db.query('modelMemoryVectors').collect())).not.toHaveLength(0);
   const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(bundle.sections.modelMemoryVectors).toEqual([]);
+  expect(bundle.sections.memories.map(decodeRow).map((row: { description: string }) => row.description)).toEqual(sourceMemories.map(row => row.description));
   expect(bundle.manifest).toMatchObject({
     version: 1,
     schemaVersion: 1,
@@ -559,7 +564,12 @@ test.each(['chatProfiles', 'embeddingProfiles', 'residentModelBindings', 'modelP
 
 test('restore atomically remaps core data while preserving identities, profiles, maps, conversations and reflection pointers', async () => {
   const { t, agentGlobalId, worldId } = await town();
+  await t.run(async ctx => {
+    await ctx.db.insert('federationTravelAudit', { visitId: 'historical', source: 'visitLedger', operation: 'UPDATED', at: 7, next: { state: 'COMPLETED' } });
+    await ctx.db.insert('federationOutbox', { messageId: 'historical-message', toTownId: 'host', envelope: { visitId: 'historical', type: 'VISIT_CLEANED' }, attempts: 1, nextRetryAt: 7, ackedAt: 7 });
+  });
   const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(bundle.sections.federationTravelAudit.map(decodeRow)).toEqual([expect.objectContaining({ at: 7, visitId: 'historical', operation: 'UPDATED' })]);
   const before = await t.query((ctx) => ctx.db.query('federationIdentity').unique());
   await t.run(ctx => ctx.db.patch(before!._id, { resourceLimits: DEFAULT_RESOURCE_LIMITS }));
   const result = await t.action(action('federation/backup:importBackup'), {
@@ -581,7 +591,9 @@ test('restore atomically remaps core data while preserving identities, profiles,
     settings: await ctx.db.query('modelSettings').unique(),
     embeddingSpaces: await ctx.db.query('embeddingSpaces').collect(),
     embeddingProfiles: await ctx.db.query('embeddingProfiles').collect(),
+    travelAudit: await ctx.db.query('federationTravelAudit').collect(),
   }));
+  expect(snapshot.travelAudit).toEqual([expect.objectContaining({ at: 7, visitId: 'historical', operation: 'UPDATED', next: { state: 'COMPLETED' } })]);
   expect(snapshot.identity?.townId).toBe(before?.townId);
   expect(snapshot.identity?.resourceLimits).toEqual(before?.resourceLimits);
   expect(snapshot.identity?.publicKey).toBe(before?.publicKey);
@@ -658,6 +670,10 @@ test('preflight rejects corrupt structure and foreign restore; failed import lea
 
 test('clone has fresh town/key/global ownership and merge allocates local IDs without importing old authorizations', async () => {
   const source = await town();
+  await source.t.run(async ctx => {
+    const local = (await ctx.db.query('federationIdentity').unique())!;
+    await ctx.db.patch(local._id, { endpointCandidates: [{ url: local.endpoint, priority: 10 }, { url: 'https://source-backup.example/federation/v1', priority: 20 }], endpointGeneration: 4, endpointSequence: 4 });
+  });
   const bundle = await source.t.action(action('federation/backup:exportTown'), { adminToken });
   const clone = convexTest(schema, modules);
   await clone.action(action('federation/backup:importBackup'), {
@@ -677,6 +693,8 @@ test('clone has fresh town/key/global ownership and merge allocates local IDs wi
     decodeRow(bundle.sections.federationIdentity[0]).publicKey,
   );
   expect(copied.identity?.endpoint).toBe('https://clone.example/federation/v1');
+  expect(copied.identity?.endpointCandidates).toEqual([{ url: 'https://clone.example/federation/v1', priority: 10 }]);
+  expect(copied.identity?.endpointGeneration).toBe(0);
   expect(copied.bindings[0].agentGlobalId?.startsWith(copied.identity!.townId + '/')).toBe(true);
   expect(copied.ledger).toHaveLength(0);
   expect(copied.memories[0].data).toMatchObject({
@@ -773,7 +791,7 @@ test('restored travelers wait for old lease proposals plus source-stop margin, t
       hostDeploymentEpoch: 2,
       agentAuthorityEpoch: 3,
       visitLeaseVersion: 1,
-      leaseExpiry: stoppedAt - 10000,
+      leaseExpiry: stoppedAt - 10000, leaseSafetyMs: 180000,
       state: 'ACTIVE',
       role: 'home',
       worldId,
@@ -861,7 +879,7 @@ test('restored travelers wait for old lease proposals plus source-stop margin, t
   expect(pending).toHaveLength(1);
   expect(pending[0]).toMatchObject({
     agentGlobalId,
-    safeAfter: pendingLease + 60000,
+    safeAfter: pendingLease + 180000,
     canResume: false,
     reason: 'OLD_HOST_LEASE_STILL_VALID',
   });
@@ -871,14 +889,16 @@ test('restored travelers wait for old lease proposals plus source-stop margin, t
   await expect(
     t.mutation(reconcile, { adminToken, agentGlobalId, sourceStopped: false }),
   ).rejects.toThrow('RESTORE_SOURCE_STOP_REQUIRED');
-  jest.setSystemTime(pendingLease + 59999);
+  jest.setSystemTime(pendingLease + 179999);
   await expect(
     t.mutation(reconcile, { adminToken, agentGlobalId, sourceStopped: true }),
   ).rejects.toThrow('OLD_HOST_LEASE_STILL_VALID');
   expect(
     (await t.query((ctx) => ctx.db.get(result.mapping[worldId] as Id<'worlds'>)))?.players,
   ).toHaveLength(0);
-  jest.setSystemTime(pendingLease + 60000);
+  jest.setSystemTime(pendingLease + 180000);
+  await expect(t.mutation(reconcile, { adminToken, agentGlobalId, sourceStopped: true })).rejects.toThrow('CLOCK_UNCERTAIN');
+  await t.mutation(makeFunctionReference<'mutation'>('federation/admin:confirmClockRecovery'), { adminToken, synchronizedUtcConfirmed: true });
   const restoredEngineId = await t.run(async (ctx) => {
     const status = await ctx.db.query('worldStatus').unique();
     await ctx.db.patch(status!.engineId, { running: true });
@@ -1136,7 +1156,7 @@ test('small town archives restore source quota and its audit, exclude rolling me
   expect(await t.query(ctx => ctx.db.query('federationResourceAudit').collect())).toMatchObject([{ next: 3 }]);
   const legacy = structuredClone(full);
   delete legacy.signature;
-  for (const name of ['federationResourcePolicy', 'federationResourceAudit']) {
+  for (const name of ['federationResourcePolicy', 'federationResourceAudit', 'federationTravelAudit']) {
     delete legacy.sections[name];
     delete legacy.manifest.sections[name];
   }
@@ -1369,4 +1389,69 @@ test('a publication acknowledgement failure preserves the uploaded cold object e
   await expect(handler(ctx,{adminToken,bundle,mode:'merge',targetWorldId:src.worldId})).rejects.toThrow('PUBLICATION_ACKNOWLEDGEMENT_LOST');
   expect(queries).toBe(1);
   expect(deletes).toBe(0);
+});
+
+
+test.each(['restore', 'clone'] as const)('small %s retains resident denial policy with exact identity mapping and private audit', async mode => {
+  const { t, worldId, agentGlobalId } = await town();
+  await t.run(async ctx => {
+    for (const globalId of [agentGlobalId, 'town:foreign/agent:visitor'])
+      await ctx.db.insert('federationResidentPolicy', { agentGlobalId: globalId, createdAt: 1, updatedAt: 2 });
+    await ctx.db.insert('federationResidentPolicyAudit', { agentGlobalId, operation: 'DENY', previousDenied: false,
+      denied: true, operator: 'Host reviewer', authenticatedBy: 'FEDERATION_ADMIN_TOKEN', reason: 'Private policy note', createdAt: 1 });
+  });
+  const full = await t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(full.sections.federationResidentPolicy).toHaveLength(2);
+  expect(full.sections.federationResidentPolicyAudit).toHaveLength(1);
+  const resident = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  expect(resident.sections.federationResidentPolicy).toEqual([]);
+  expect(resident.sections.federationResidentPolicyAudit).toEqual([]);
+  const target = mode === 'clone' ? convexTest(schema, modules) : t;
+  const result = await target.action(action('federation/backup:importBackup'), { adminToken, bundle: full, mode,
+    sourceStopped: true, ...(mode === 'clone' ? { targetEndpoint: 'https://copy.example/federation/v1' } : {}) });
+  const policies = await target.run(ctx => ctx.db.query('federationResidentPolicy').collect());
+  const expectedGlobalId = mode === 'clone' ? result.mapping[agentGlobalId] : agentGlobalId;
+  expect(policies.map(row => row.agentGlobalId).sort()).toEqual([expectedGlobalId, 'town:foreign/agent:visitor'].sort());
+  if (mode === 'clone') expect(policies.some(row => row.agentGlobalId === agentGlobalId)).toBe(false);
+  const audit = await target.run(ctx => ctx.db.query('federationResidentPolicyAudit').unique());
+  expect(audit).toMatchObject({ agentGlobalId: expectedGlobalId, operator: 'Host reviewer', reason: 'Private policy note' });
+});
+
+test('older small archives may omit resident policy sections and duplicate identities fail preflight', async () => {
+  const { t } = await town();
+  const full = await t.action(action('federation/backup:exportTown'), { adminToken });
+  const legacy = structuredClone(full);
+  delete legacy.signature;
+  for (const name of ['federationResidentPolicy', 'federationResidentPolicyAudit']) {
+    delete legacy.sections[name]; delete legacy.manifest.sections[name];
+  }
+  expect(await validateBundle(legacy)).toBeDefined();
+  const bad = structuredClone(full);
+  delete bad.signature;
+  bad.sections.federationResidentPolicy = ['one', 'two'].map(id => encodeRow({ _id: id, _creationTime: 1,
+    agentGlobalId: 'town:foreign/agent:visitor', createdAt: 1, updatedAt: 1 }));
+  const rows = bad.sections.federationResidentPolicy;
+  bad.manifest.sections.federationResidentPolicy = { digest: await digest(rows), count: rows.length,
+    bytes: new TextEncoder().encode(JSON.stringify(rows)).length };
+  await expect(validateBundle(bad)).rejects.toThrow('BACKUP_DUPLICATE_RESIDENT_POLICY');
+});
+
+
+test('signed small packages cannot import more resident restrictions than the management list bound', async () => {
+  const { t } = await town();
+  const archive = await t.action(action('federation/backup:exportTown'), { adminToken });
+  archive.sections.federationResidentPolicy = Array.from({ length: 1001 }, (_, index) => encodeRow({
+    _id: `denial-${index}`, _creationTime: 1, agentGlobalId: `town:foreign/agent:${index}`, createdAt: 1, updatedAt: 1,
+  }));
+  const rows = archive.sections.federationResidentPolicy;
+  archive.manifest.sections.federationResidentPolicy = { digest: await digest(rows), count: rows.length,
+    bytes: new TextEncoder().encode(JSON.stringify(rows)).length };
+  const identity = (await t.run(ctx => ctx.db.query('federationIdentity').unique()))!;
+  archive.signature = await sign(archive.manifest, identity.privateKeyEncrypted);
+  // The stricter total-record cap protects small imports independently of the source API.
+  await expect(t.action(action('federation/backup:preflight'), {
+    adminToken, bundle: archive, mode: 'restore', sourceStopped: true,
+  })).rejects.toThrow('BACKUP_ATOMIC_RECORD_LIMIT');
+  expect(await t.run(ctx => ctx.db.query('federationResidentPolicy').collect())).toEqual([]);
+  expect(await t.run(ctx => ctx.db.query('backupImports').collect())).toEqual([]);
 });

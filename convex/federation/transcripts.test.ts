@@ -30,6 +30,7 @@ async function setup(texts = ['Hello']) {
   const keys = await createIdentityKeys(),
     credentialEncrypted = await sealSecret(randomSecret());
   const ids = await t.run(async (ctx) => {
+    await ctx.db.insert('federationClock', { observedAt: Date.now(), uncertain: false });
     const player = {
       id: 'p:1',
       lastInput: 1,
@@ -147,7 +148,9 @@ async function setup(texts = ['Hello']) {
     t.run(async (ctx) => {
       const world = (await ctx.db.get(ids.worldId))!;
       await Game.saveDiff(ctx, ids.worldId, {
-        world: { ...world, conversations: [], historicalLocations: [] },
+        // The completed Host visit has removed its body; archival evidence uses
+        // the previous world's participants, never a still-executable visitor.
+        world: { ...world, players: world.players.filter(player => !player.remoteVisitor), conversations: [], historicalLocations: [] },
         agentOperations: [],
       });
       return (await ctx.db.query('federationTranscriptJobs').unique())!._id;

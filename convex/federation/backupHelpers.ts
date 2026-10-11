@@ -1,9 +1,11 @@
+import { validateTimePolicy } from './timePolicy';
 import { validateColdAttachments, type ColdBackupAttachment } from './coldBackup';
 import { convexToJson, jsonToConvex, Value } from 'convex/values';
 import { digest, verifySignature } from './security';
 import { validateResourceLimits } from './resources';
 import { validateHostResourceThresholds } from './resourceValidators';
 import { validateModelPolicyPortable } from '../models/usageSchema';
+import { validateResidentPolicyPortable } from './residentPolicySchema';
 
 export const dataTables = [
   'engines',
@@ -26,6 +28,7 @@ export const dataTables = [
   'memories',
   'modelMemoryVectors',
   'modelAudits',
+  'federationTravelAudit',
   'federationAgentRuntimes',
   'deploymentRecords',
   'migrationHandoffRecords',
@@ -35,6 +38,8 @@ export const dataTables = [
   'federationEventFacts',
   'homeTravelTranscripts',
   'homeTravelTranscriptPages',
+  'federationResidentPolicy',
+  'federationResidentPolicyAudit',
   'autonomousTravelPolicies',
   'autonomousTravelDecisions',
   'federationResourcePolicy',
@@ -220,6 +225,7 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
       assertNoSecrets(doc);
       if (name === 'federationResourcePolicy') validateResourcePolicy(doc);
       validateModelPolicyPortable(name, doc);
+      validateResidentPolicyPortable(name, doc);
       if (typeof doc._id !== 'string' || ids.has(doc._id))
         throw new Error('INVALID_BACKUP_DOCUMENT_ID');
       ids.add(doc._id);
@@ -227,13 +233,16 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
   }
   count += bundle.coldHistoryFiles?.length ?? 0;
   if (count > 500) throw new Error('BACKUP_ATOMIC_RECORD_LIMIT');
-  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['modelProviderQuotas', 'federationIdentityKeyHistory', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t) && !bundle.sections[t]))
+  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['modelProviderQuotas', 'federationIdentityKeyHistory', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit', 'federationTravelAudit', 'federationResidentPolicy', 'federationResidentPolicyAudit'].includes(t) && !bundle.sections[t]))
     throw new Error('INCOMPLETE_TOWN_BACKUP');
   if ((bundle.sections.federationResourcePolicy?.length ?? 0) > 1)
     throw new Error('BACKUP_SINGLETON_MISMATCH');
   if (bundle.manifest.scope === 'resident' &&
-    ['modelProviderQuotas', 'federationResourcePolicy', 'federationResourceAudit'].some(t => bundle.sections[t]?.length))
+    ['modelProviderQuotas', 'federationResourcePolicy', 'federationResourceAudit', 'federationResidentPolicy', 'federationResidentPolicyAudit'].some(t => bundle.sections[t]?.length))
     throw new Error('RESIDENT_BACKUP_CONTAINS_TOWN_RESOURCE_POLICY');
+  const residentPolicies = bundle.sections.federationResidentPolicy?.map(decodeRow) ?? [];
+  if (new Set(residentPolicies.map(row => row.agentGlobalId)).size !== residentPolicies.length)
+    throw new Error('BACKUP_DUPLICATE_RESIDENT_POLICY');
   const providerQuotas = bundle.sections.modelProviderQuotas?.map(decodeRow) ?? [];
   if (new Set(providerQuotas.map(row => JSON.stringify([row.kind, row.providerKey]))).size !== providerQuotas.length)
     throw new Error('DUPLICATE_MODEL_PROVIDER_QUOTA');
@@ -243,6 +252,10 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
   if (identities[0].identityVersion !== undefined &&
     (!Number.isSafeInteger(identities[0].identityVersion) || identities[0].identityVersion < 1))
     throw new Error('INVALID_IDENTITY_VERSION');
+  if (identities[0].timePolicy !== undefined) validateTimePolicy(identities[0].timePolicy, identities[0].maxVisitDurationMs);
+  for (const row of bundle.sections.visitLedger?.map(decodeRow) ?? [])
+    if (row.leaseSafetyMs !== undefined && (!Number.isSafeInteger(row.leaseSafetyMs) || row.leaseSafetyMs < 60_000 || row.leaseSafetyMs > 1_260_000))
+      throw new Error('INVALID_RESTORED_LEASE_MARGIN');
   if (identities[0].resourceLimits !== undefined) validateResourceLimits(identities[0].resourceLimits);
   if (
     bundle.signature &&

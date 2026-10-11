@@ -205,6 +205,29 @@ async function archive(f: Fixture, overrides: Record<string, unknown> = {}) {
   return { manifest, signature: result.signature as string, chunks };
 }
 type Archive = Awaited<ReturnType<typeof archive>>;
+test('selected travel audit history uses event time and imports only as read-only historical records', async () => {
+  const f = await fixture();
+  await f.t.run(async ctx => {
+    for (const [index, agentGlobalId] of f.globals.entries()) {
+      await ctx.db.insert('visitLedger', { visitId: `historical-${index}`, agentGlobalId, homeTownId: 'town:source', hostTownId: 'town:host',
+        homeDeploymentEpoch: 1, hostDeploymentEpoch: 1, agentAuthorityEpoch: 1, visitLeaseVersion: 1, leaseExpiry: 1,
+        fencingToken: 'private-fence', state: 'COMPLETED', role: 'home', profile: {}, createdAt: 1, updatedAt: 1 });
+      for (const at of [100, 200]) await ctx.db.insert('federationTravelAudit', { visitId: `historical-${index}`, source: 'visitLedger',
+        operation: 'UPDATED', at, next: { state: 'COMPLETED' } });
+    }
+  });
+  const exported = await archive(f, { scope: 'history', categories: ['travel'], from: 100, to: 200 });
+  const audits = exported.chunks.filter(c => c.table === 'federationTravelAudit').flatMap(c => c.rows.map(decodeRow));
+  expect(audits).toHaveLength(1);
+  expect(decodeRow(audits[0].record)).toMatchObject({ visitId: 'historical-0', at: 100 });
+  const before = await f.t.run(ctx => ctx.db.query('federationTravelAudit').collect());
+  const jobId = await start(f, exported, options(f, exported, 'merge'));
+  await apply(f, jobId);
+  expect(await f.t.run(ctx => ctx.db.query('federationTravelAudit').collect())).toEqual(before);
+  const retained = await f.t.run(ctx => ctx.db.query('backupSelectiveHistory').collect());
+  expect(retained.filter(row => row.table === 'federationTravelAudit').map(row => decodeRow(row.record))).toEqual([
+    expect.objectContaining({ visitId: 'historical-0', at: 100 })]);
+});
 function options(
   target: Fixture,
   source: Archive,
@@ -1200,4 +1223,31 @@ test('repeated cancellation and failed rollback cancellation preserve the curren
   expect(recovered!.processedChunks).toBe(checkpoint!.processedChunks);
   await drive(dst,jobId,'CANCELLED');
   expect(await dst.t.run(async ctx=>({memories:await ctx.db.query('memories').collect(),worlds:await ctx.db.query('worlds').collect(),bindings:await ctx.db.query('residentModelBindings').collect()}))).toEqual(before);
+});
+
+
+test('configuration-only explicitly merges resident denials while resident clones exclude Host policy', async () => {
+  const src = await fixture('denial-source');
+  await src.t.run(async ctx => {
+    await ctx.db.insert('federationResidentPolicy', { agentGlobalId: src.globals[0], createdAt: 1, updatedAt: 1 });
+    await ctx.db.insert('federationResidentPolicy', { agentGlobalId: 'town:foreign/agent:visitor', createdAt: 1, updatedAt: 1 });
+  });
+  const residents = await archive(src);
+  expect(residents.chunks.some(c => c.table === 'federationResidentPolicy')).toBe(false);
+  const exported = await archive(src, { scope: 'config-only', agentGlobalIds: [], categories: ['configuration'] });
+  expect(exported.chunks.filter(c => c.table === 'federationResidentPolicy').reduce((n, c) => n + c.rows.length, 0)).toBe(2);
+  expect(exported.chunks.some(c => c.table === 'federationResidentPolicyAudit')).toBe(false);
+  for (const include of [false, true]) {
+    const dst = await fixture(`denial-target-${include}`);
+    await dst.t.run(ctx => ctx.db.insert('federationResidentPolicy', {
+      agentGlobalId: 'town:foreign/agent:existing', createdAt: 1, updatedAt: 1 }));
+    const configured: Options = { mode: 'merge', owners: [], profiles: [], externalReferences: [],
+      configuration: include ? ['federationResidentPolicy'] : [], worlds: [], sourceStopped: false,
+      operator: 'Host reviewer', reason: 'Explicit policy transfer' };
+    await apply(dst, await start(dst, exported, configured));
+    expect((await dst.t.run(ctx => ctx.db.query('federationResidentPolicy').collect())).map(row => row.agentGlobalId).sort())
+      .toEqual(['town:foreign/agent:existing', ...(include ? [src.globals[0], 'town:foreign/agent:visitor'] : [])].sort());
+    expect((await dst.t.run(ctx => ctx.db.query('residentModelBindings').collect())).map(row => row.agentGlobalId).sort())
+      .toEqual([...dst.globals].sort());
+  }
 });

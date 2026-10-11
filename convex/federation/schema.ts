@@ -4,8 +4,14 @@ import { resourceLimits, resourceMetricKind, hostResourceThresholds } from './re
 import { hostResourceTables } from './hostResourceSchema';
 import { credentialRotationTables } from './credentialRotationSchema';
 import { identityKeyRotationTables } from './identityKeyRotationSchema';
+import { timePolicy } from './timePolicy';
+import { endpointCandidates } from './endpointsSchema';
 
 export const federationTables = {
+  federationTravelAudit: defineTable({ visitId: v.string(), source: v.string(), at: v.number(),
+    operation: v.string(), previous: v.optional(v.any()), next: v.optional(v.any())
+  }).index('time', ['at']).index('visit_time', ['visitId', 'at']),
+  federationClock: defineTable({ observedAt: v.number(), uncertain: v.boolean(), reason: v.optional(v.string()), returnClockConfirmedAt: v.optional(v.number()) }),
   ...hostResourceTables,
   ...credentialRotationTables,
   ...identityKeyRotationTables,
@@ -70,6 +76,7 @@ export const federationTables = {
   }).index('transcript', ['transcriptId']).index('state', ['state', 'createdAt'])
     .index('retry', ['state', 'nextRetryAt']).index('pendingMessage', ['pendingMessageId']),
   federationIdentity: defineTable({
+    timePolicy: v.optional(timePolicy),
     identityVersion: v.optional(v.number()),
     townId: v.string(), townName: v.string(), publicKey: v.string(), privateKeyEncrypted: v.string(),
     fingerprint: v.string(), deploymentInstanceId: v.string(), deploymentEpoch: v.number(),
@@ -80,6 +87,7 @@ export const federationTables = {
     activeHandoffId: v.optional(v.string()),
     quarantinePreviousMode: v.optional(v.string()),
     endpointSequence: v.optional(v.number()),
+    endpointCandidates: v.optional(endpointCandidates), endpointGeneration: v.optional(v.number()),
   }),
   deploymentRecords: defineTable({ townId: v.string(), deploymentInstanceId: v.string(), deploymentEpoch: v.number(), mode: v.string(), createdAt: v.number() }).index('townId', ['townId']),
   pairRequests: defineTable({
@@ -100,21 +108,25 @@ export const federationTables = {
     endpointSequence: v.optional(v.number()),
     endpointSequenceDeploymentInstanceId: v.optional(v.string()),
     endpointSequenceDeploymentEpoch: v.optional(v.number()),
+    endpointCandidates: v.optional(endpointCandidates), endpointGeneration: v.optional(v.number()),
   }).index('townId', ['townId']),
   transportSessions: defineTable({
     peerTownId: v.string(), channelState: v.string(), transportType: v.string(),
     localDeploymentEpoch: v.number(), verifiedPeerDeploymentEpoch: v.number(),
     outboundVerifiedAt: v.optional(v.number()), inboundVerifiedAt: v.optional(v.number()),
     lastReadyAt: v.optional(v.number()), lastError: v.optional(v.string()),
+    outboundEndpoint: v.optional(v.string()),
+    localEndpointGeneration: v.optional(v.number()), peerEndpointGeneration: v.optional(v.number()),
   }).index('peerTownId', ['peerTownId']),
   federationOutbox: defineTable({
+    committedAck: v.optional(v.boolean()),
     messageId: v.string(), toTownId: v.string(), envelope: v.any(), attempts: v.number(),
     nextRetryAt: v.number(), ackedAt: v.optional(v.number()), failedAt: v.optional(v.number()), lastError: v.optional(v.string()),
-  }).index('visit', ['envelope.visitId']).index('messageId', ['messageId']).index('retry', ['ackedAt', 'failedAt', 'nextRetryAt']),
+  }).index('visit', ['envelope.visitId']).index('historySequence', ['envelope.visitId', 'envelope.streamId', 'envelope.sequence']).index('messageId', ['messageId']).index('retry', ['ackedAt', 'failedAt', 'nextRetryAt']),
   federationInbox: defineTable({
     messageId: v.string(), fromTownId: v.string(), payloadDigest: v.string(), envelope: v.any(),
     status: v.string(), receivedAt: v.number(), processedAt: v.optional(v.number()), ack: v.optional(v.any()),
-  }).index('visit', ['envelope.visitId']).index('messageId', ['messageId']).index('status', ['status', 'receivedAt']),
+  }).index('audit_time', ['receivedAt']).index('audit_visit_time', ['envelope.visitId', 'receivedAt']).index('visit', ['envelope.visitId']).index('messageId', ['messageId']).index('status', ['status', 'receivedAt']),
   messageStreamCursors: defineTable({
     streamKey: v.string(), peerTownId: v.string(), visitIdOrPairSessionId: v.string(), streamId: v.string(),
     senderTownId: v.string(), senderDeploymentEpoch: v.number(), direction: v.string(),
@@ -122,6 +134,9 @@ export const federationTables = {
     resyncState: v.string(), gapSince: v.optional(v.number()),
   }).index('streamKey', ['streamKey']),
   visitLedger: defineTable({
+    leaseSafetyMs: v.optional(v.number()), tripDeadline: v.optional(v.number()),
+    communicationState: v.optional(v.string()), suspectSince: v.optional(v.number()),
+    lastDurableEventSeq: v.optional(v.number()), lastAckedEventSeq: v.optional(v.number()),
     visitId: v.string(), agentGlobalId: v.string(), homeTownId: v.string(), hostTownId: v.string(),
     homeDeploymentEpoch: v.number(), hostDeploymentEpoch: v.number(), agentAuthorityEpoch: v.number(),
     visitLeaseVersion: v.number(), leaseExpiry: v.number(), fencingToken: v.string(), state: v.string(),
@@ -133,7 +148,7 @@ export const federationTables = {
     allowQueue: v.optional(v.boolean()),
     requestOrigin: v.optional(v.union(v.literal('manual'), v.literal('autonomous'))),
     autonomousPolicyRevision: v.optional(v.number()),
-  }).index('visitId', ['visitId']).index('agentGlobalId', ['agentGlobalId']).index('state', ['state'])
+  }).index('audit_time', ['createdAt']).index('audit_visit_time', ['visitId', 'createdAt']).index('visitId', ['visitId']).index('agentGlobalId', ['agentGlobalId']).index('state', ['state'])
     .index('role_state_queued', ['role', 'state', 'queuedAt'])
     .index('role_state_queueExpiry', ['role', 'state', 'queueExpiresAt'])
     .index('role_source_state_queued', ['role', 'homeTownId', 'state', 'queuedAt'])

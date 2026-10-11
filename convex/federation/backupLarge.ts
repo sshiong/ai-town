@@ -20,7 +20,7 @@ import {
 import { Doc, Id, TableNames } from '../_generated/dataModel';
 import { requireAdmin, digest, sign, createIdentityKeys } from './security';
 import { identity } from './store';
-import { normalizeEndpoint } from './protocol';
+import { normalizeEndpoint, normalizeEndpointCandidates, endpointGeneration, nextEndpointGeneration } from './protocol';
 import {
   BackupRow,
   decodeRow,
@@ -1267,6 +1267,7 @@ export const finalizeImport = internalMutation({
         ...job.keys,
         townId: job.newTownId!,
         endpoint: normalizeEndpoint(job.targetEndpoint!),
+        endpointCandidates: normalizeEndpointCandidates(job.targetEndpoint!), endpointSequence: 0, endpointGeneration: 0,
         deploymentInstanceId: crypto.randomUUID(),
         deploymentEpoch: 1,
         enabled: false,
@@ -1292,6 +1293,7 @@ export const finalizeImport = internalMutation({
         maxVisitDurationMs: source.maxVisitDurationMs,
         resourceLimits: source.resourceLimits,
         endpoint: job.targetEndpoint ? normalizeEndpoint(job.targetEndpoint) : local.endpoint,
+        endpointCandidates: normalizeEndpointCandidates(job.targetEndpoint ?? local.endpoint), endpointSequence: 0, endpointGeneration: nextEndpointGeneration(local),
         allowUnencryptedHttp: false,
         allowPublicHttp: false,
         enabled: false,

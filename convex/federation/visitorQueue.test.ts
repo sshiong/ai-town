@@ -15,7 +15,8 @@ import {
   hostCreated,
   hostRemoved,
 } from './ledger';
-import { drainVisitorQueue, visitorQueueSummary } from './visitorQueue';
+import { drainVisitorQueue, reserveHostVisit, visitorQueueSummary } from './visitorQueue';
+import { residentAdmissionReason } from './residentPolicy';
 import { DEFAULT_RESOURCE_LIMITS } from './resources';
 import { enqueueMessage } from './queue';
 
@@ -26,6 +27,7 @@ const modules = {
   '../federation/transport.ts': () => import('./transport'),
   '../federation/runtime.ts': () => import('./runtime'),
   '../federation/resourceMonitoring.ts': () => import('./resourceMonitoring'),
+  '../federation/residentPolicy.ts': () => import('./residentPolicy'),
 };
 const adminToken = 'visitor-queue-test-admin-token';
 const token = 'visitor-queue-fencing-token-32bytes';
@@ -45,6 +47,8 @@ async function setup(
   const t = convexTest(schema, modules);
   const townId = options.townId ?? 'b';
   await t.run(async (ctx) => {
+    // Seeded live visits represent grants issued after a healthy UTC observation.
+    await ctx.db.insert('federationClock', { observedAt: Date.now(), uncertain: false });
     await ctx.db.insert('federationIdentity', {
       townId,
       townName: townId,
@@ -220,6 +224,97 @@ async function assertNoVisitorWork(t: TestDb) {
 beforeEach(() => {
   jest.useFakeTimers({ doNotFake: ['nextTick'] });
   jest.setSystemTime(baseTime);
+});
+
+test('resident policies require admin access, persist exact IDs and audit private reasons locally', async () => {
+  const t = await setup();
+  const args = { adminToken, agentGlobalId: 'a/agent:denied', denied: true,
+    operator: 'Host administrator', reason: 'Private review note' };
+  await expect(t.mutation(mutationRef('residentPolicy/set'), { ...args, adminToken: 'unauthorized' }))
+    .rejects.toThrow('ADMIN_UNAUTHORIZED');
+  await expect(t.query(queryRef('residentPolicy/status'), { adminToken: 'unauthorized' }))
+    .rejects.toThrow('ADMIN_UNAUTHORIZED');
+  for (const agentGlobalId of ['Alice', 'a/agent:', ' a/agent:denied', 'a/agent:denied/other', 'a/agent:' + 'x'.repeat(300)])
+    await expect(t.mutation(mutationRef('residentPolicy/set'), { ...args, agentGlobalId }))
+      .rejects.toThrow('INVALID_RESIDENT_GLOBAL_ID');
+  for (const changes of [{ operator: ' ' }, { reason: ' ' }])
+    await expect(t.mutation(mutationRef('residentPolicy/set'), { ...args, ...changes }))
+      .rejects.toThrow('RESIDENT_POLICY_REVIEW_DETAILS_REQUIRED');
+  await t.mutation(mutationRef('residentPolicy/set'), args);
+  await t.mutation(mutationRef('residentPolicy/set'), args);
+  expect(await t.run(ctx => residentAdmissionReason(ctx.db, args.agentGlobalId))).toBe('RESIDENT_VISITS_DENIED');
+  expect(await t.run(ctx => residentAdmissionReason(ctx.db, 'c/agent:denied'))).toBeNull();
+  const status = await t.query(queryRef('residentPolicy/status'), { adminToken });
+  expect(status.denied).toHaveLength(1);
+  expect(status.audit).toHaveLength(2);
+  expect(status.audit[0]).toMatchObject({ authenticatedBy: 'FEDERATION_ADMIN_TOKEN', operator: args.operator,
+    reason: args.reason, previousDenied: true });
+  await t.mutation(mutationRef('residentPolicy/set'), { ...args, denied: false });
+  expect(await t.run(ctx => residentAdmissionReason(ctx.db, args.agentGlobalId))).toBeNull();
+  expect((await t.query(queryRef('residentPolicy/status'), { adminToken })).audit).toHaveLength(3);
+});
+
+test.each([0, 1])('resident refusal is terminal even when Host capacity is %s and waiting is allowed', async maxVisitors => {
+  const t = await setup({ maxVisitors });
+  await t.mutation(mutationRef('residentPolicy/set'), { adminToken, agentGlobalId: 'a/agent:denied',
+    denied: true, operator: 'Host administrator', reason: 'Private review note' });
+  const request = reserve('denied');
+  await accept(t, request);
+  expect(await ledger(t, 'denied')).toMatchObject({ state: 'REJECTED', cleanupConfirmed: true,
+    lastError: 'RESIDENT_VISITS_DENIED' });
+  expect(await outbox(t, 'denied', 'VISIT_QUEUED')).toHaveLength(0);
+  const messages = await outbox(t, 'denied', 'VISIT_REJECT');
+  expect(messages).toHaveLength(1);
+  expect(messages[0].envelope.payload.reason).toBe('RESIDENT_VISITS_DENIED');
+  expect(JSON.stringify(await t.run(ctx => ctx.db.query('federationOutbox').collect())))
+    .not.toContain('Private review note');
+  await assertNoVisitorWork(t);
+  await t.mutation(mutationRef('residentPolicy/set'), { adminToken, agentGlobalId: 'a/agent:denied',
+    denied: false, operator: 'Host administrator', reason: 'Reviewed' });
+  // Removing a restriction never resurrects a previously rejected visit ID.
+  await t.run(ctx => dispatchLedgerMessage(ctx, request));
+  expect(await ledger(t, 'denied')).toMatchObject({ state: 'REJECTED' });
+  await accept(t, { ...reserve('new-request'), agentGlobalId: 'a/agent:denied', agentAuthorityEpoch: 3 });
+  expect(await ledger(t, 'new-request')).toMatchObject({ state: maxVisitors ? 'RESERVED' : 'QUEUED' });
+});
+
+test('policy changes reject paused queue entries before promotion without blocking another resident', async () => {
+  const t = await setup({ maxVisitors: 0 });
+  await accept(t, reserve('denied'));
+  await accept(t, reserve('eligible', 'c'));
+  await t.mutation(mutationRef('ledger/manageQueuedVisit'), { adminToken, visitId: 'denied', operation: 'PAUSE' });
+  await t.mutation(mutationRef('residentPolicy/set'), { adminToken, agentGlobalId: 'a/agent:denied',
+    denied: true, operator: 'Host administrator', reason: 'Private review note' });
+  await patchIdentity(t, { maxVisitors: 1 });
+  expect(await drain(t)).toEqual({ promoted: ['eligible'], terminated: ['denied'] });
+  expect(await ledger(t, 'denied')).toMatchObject({ state: 'REJECTED', cleanupConfirmed: true,
+    queueReason: 'RESIDENT_VISITS_DENIED' });
+  expect(await outbox(t, 'denied', 'VISIT_RESERVED')).toHaveLength(0);
+  expect(await outbox(t, 'denied', 'VISIT_CLEANED')).toHaveLength(1);
+  expect(await ledger(t, 'eligible')).toMatchObject({ state: 'RESERVED' });
+});
+
+test.each(['RESERVED', 'ACTIVE'] as const)('resident policy preserves accepted %s retries and safe return', async state => {
+  const t = await setup();
+  await seed(t, 'accepted', { state, queueExpiresAt: undefined, queuedAt: undefined });
+  await t.mutation(mutationRef('residentPolicy/set'), { adminToken, agentGlobalId: 'a/agent:accepted',
+    denied: true, operator: 'Host administrator', reason: 'Private review note' });
+  await t.run(ctx => dispatchLedgerMessage(ctx, reserve('accepted')));
+  expect(await ledger(t, 'accepted')).toMatchObject({ state });
+  await t.mutation(mutationRef('ledger/returnVisit'), { adminToken, visitId: 'accepted' });
+  expect(await ledger(t, 'accepted')).toMatchObject({ state: state === 'RESERVED' ? 'COMPLETED' : 'REMOVING' });
+  if (state === 'RESERVED') expect(await outbox(t, 'accepted', 'VISIT_CLEANED')).toHaveLength(1);
+});
+
+test('the reservation helper fails closed for a denied queued resident before allocating a slot', async () => {
+  const t = await setup();
+  await seed(t, 'denied');
+  await t.mutation(mutationRef('residentPolicy/set'), { adminToken, agentGlobalId: 'a/agent:denied',
+    denied: true, operator: 'Host administrator', reason: 'Reviewed' });
+  const row = (await ledger(t, 'denied'))!;
+  await expect(t.run(ctx => reserveHostVisit(ctx, row))).rejects.toThrow('RESIDENT_VISITS_DENIED');
+  expect(await ledger(t, 'denied')).toMatchObject({ state: 'QUEUED' });
+  await assertNoVisitorWork(t);
 });
 afterEach(() => jest.useRealTimers());
 

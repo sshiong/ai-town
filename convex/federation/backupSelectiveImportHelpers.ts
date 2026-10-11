@@ -33,6 +33,7 @@ export const importOptions = {
     v.union(
       v.literal('storagePolicies'),
       v.literal('federationResourcePolicy'),
+      v.literal('federationResidentPolicy'),
       v.literal('visitorPolicy'),
       v.literal('mainChatProfile'),
       v.literal('embeddingProfiles'),
@@ -57,6 +58,7 @@ export type Options = {
   configuration: (
     | 'storagePolicies'
     | 'federationResourcePolicy'
+    | 'federationResidentPolicy'
     | 'visitorPolicy'
     | 'mainChatProfile'
     | 'embeddingProfiles'

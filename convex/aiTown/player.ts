@@ -86,7 +86,7 @@ export class Player {
   }
 
   tick(game: Game, now: number) {
-    if (this.remoteVisitor && this.remoteVisitor.leaseExpiry <= Math.max(now, Date.now())) {
+    if (this.remoteVisitor && (!game.federationClockHealthy || this.remoteVisitor.leaseExpiry <= Math.max(now, Date.now()))) {
       this.leave(game, now);
       return;
     }

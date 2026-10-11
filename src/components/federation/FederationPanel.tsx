@@ -7,7 +7,9 @@ import EndpointHistory from './EndpointHistory';
 import CredentialRotationPanel from './CredentialRotationPanel';
 import IdentityKeyRotationPanel from './IdentityKeyRotationPanel';
 import VisitorQueuePanel from './VisitorQueuePanel';
+import ResidentPolicyPanel from './ResidentPolicyPanel';
 import HostResourcePanel from './HostResourcePanel';
+import { adminErrorSummary } from './uiPolicy';
 import {
   AdminButton,
   EmptyState,
@@ -105,7 +107,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
             </dl>
             <form
               className="admin-inline-form"
-              key={data.identity.endpoint}
+              key={`${data.identity.endpoint}:${data.identity.endpointGeneration}`}
               onSubmit={(event) => {
                 event.preventDefault();
                 const fields = new FormData(event.currentTarget);
@@ -115,6 +117,13 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     await convex.mutation(api.federation.admin.updateLocalEndpoint, {
                       adminToken,
                       endpoint: String(fields.get('endpoint')).trim(),
+                      endpointCandidates: [
+                        { url: String(fields.get('endpoint')).trim(), priority: Number(fields.get('primaryPriority')) },
+                        ...String(fields.get('backupEndpoints')).split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+                          const [priority, ...url] = line.split(/\s+/);
+                          return { priority: Number(priority), url: url.join(' ') };
+                        }),
+                      ],
                       operator: String(fields.get('operator')).trim(),
                       reason: String(fields.get('reason')).trim(),
                     });
@@ -135,6 +144,14 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                   type="text"
                   inputMode="url"
                 />
+              </Field>
+              <Field label="Primary address priority" hint="Lower numbers are tried first. The primary address must have the highest priority.">
+                <input name="primaryPriority" type="number" min={0} max={1000} step={1} required
+                  defaultValue={data.identity.endpointCandidates?.find(candidate => candidate.url === data.identity!.endpoint)?.priority ?? 10} />
+              </Field>
+              <Field label="Backup HTTPS addresses" hint="Up to three backups, one per line: priority followed by HTTPS URL (for example: 20 https://backup.example.com). Each route must prove the same trusted identity; travel still requires both directions.">
+                <textarea name="backupEndpoints" rows={3} maxLength={6000}
+                  defaultValue={(data.identity.endpointCandidates ?? []).filter(candidate => candidate.url !== data.identity!.endpoint).map(candidate => `${candidate.priority} ${candidate.url}`).join('\n')} />
               </Field>
               <Field label="Operator">
                 <input name="operator" required maxLength={100} />
@@ -222,6 +239,7 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
             {data.resources && (
               <>
                 <VisitorQueuePanel adminToken={adminToken} configurationOnly />
+                <ResidentPolicyPanel adminToken={adminToken} />
                 <h3>Town capacity</h3>
                 <p className="admin-muted">
                   Admission: <strong>{data.resources.admissionState}</strong> ·{' '}
@@ -465,13 +483,17 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                     <code>{peer.townId}</code>
                     <code>{peer.fingerprint}</code>
                     <p>{peer.endpoint}</p>
+                    {(peer.endpointCandidates?.length ?? 0) > 1 && <ul className="admin-muted">
+                      {peer.endpointCandidates!.map(candidate => <li key={candidate.url}>Priority {candidate.priority} · {candidate.url}</li>)}
+                    </ul>}
+                    {peer.outboundEndpoint && <p className="admin-muted">Verified outbound route: {peer.outboundEndpoint}</p>}
                     <p className="admin-muted">
                       {peer.transportType} ·{' '}
                       {peer.channelState === 'TRANSPORT_READY'
                         ? 'Both directions verified'
                         : 'Travel blocked until both directions are verified'}
                     </p>
-                    {peer.lastError && <p className="admin-error">{peer.lastError}</p>}
+                    {peer.lastError && <p className="admin-error">{adminErrorSummary(peer.lastError)} <code>{peer.lastError}</code></p>}
                     <div className="admin-toolbar">
                       <AdminButton
                         disabled={!!task.pending || peer.trustState !== 'TRUSTED'}

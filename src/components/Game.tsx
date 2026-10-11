@@ -9,7 +9,7 @@ import { api } from '../../convex/_generated/api';
 import { useWorldHeartbeat } from '../hooks/useWorldHeartbeat.ts';
 import { useHistoricalTime } from '../hooks/useHistoricalTime.ts';
 import { DebugTimeManager } from './DebugTimeManager.tsx';
-import { GameId } from '../../convex/aiTown/ids.ts';
+import { GameId, parseGameId } from '../../convex/aiTown/ids.ts';
 import { useServerGame } from '../hooks/serverGame.ts';
 
 export const SHOW_DEBUG_UI = !!import.meta.env.VITE_SHOW_DEBUG_UI;
@@ -54,6 +54,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
                 <ConvexProvider client={convex}>
                   <PixiGame
                     game={game}
+                    travelingPlayerIds={presence?.travelers.map(resident => resident.playerId)}
                     worldId={worldId}
                     engineId={engineId}
                     width={width}
@@ -71,7 +72,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           className="flex flex-col overflow-y-auto shrink-0 px-4 py-6 sm:px-6 lg:w-96 xl:pr-6 border-t-8 sm:border-t-0 sm:border-l-8 border-brown-900  bg-brown-800 text-brown-100"
           ref={scrollViewRef}
         >
-          {!!presence?.travelers.length && <section className="admin-map-presence" aria-label="Traveling residents"><h3>Residents away</h3><ul>{presence.travelers.map(resident => <li key={resident.agentGlobalId}><strong>{resident.name}</strong> · {resident.state}{resident.lastError && <p>{resident.lastError}</p>}</li>)}</ul></section>}
+          {!!presence?.travelers.length && <section className="admin-map-presence" aria-label="Traveling residents"><h3>Residents away</h3><ul>{presence.travelers.map(resident => <li key={resident.agentGlobalId}><button type="button" className="underline underline-offset-2" onClick={() => setSelectedElement({ kind: 'player', id: parseGameId('players', resident.playerId) })}><strong>{resident.name}</strong></button> · {resident.state}{resident.hostTownId && <small> · Traveling in {resident.hostTownId}</small>}</li>)}</ul></section>}
           <PlayerDetails
             worldId={worldId}
             engineId={engineId}
@@ -79,6 +80,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
             playerId={selectedElement?.id}
             setSelectedElement={setSelectedElement}
             scrollViewRef={scrollViewRef}
+            awayResident={presence?.travelers.find(resident => resident.playerId === selectedElement?.id)}
           />
         </div>
       </div>

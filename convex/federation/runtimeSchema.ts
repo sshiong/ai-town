@@ -72,6 +72,8 @@ export const runtimeTables = {
     receiptPayload: v.optional(v.any()),
     receiptRetryAt: v.optional(v.number()),
   })
+    .index('audit_time', ['createdAt'])
+    .index('audit_visit_time', ['visitId', 'createdAt'])
     .index('input', ['inputId'])
     .index('action', ['actionId'])
     .index('state', ['state'])

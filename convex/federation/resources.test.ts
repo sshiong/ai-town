@@ -39,6 +39,8 @@ const map = {
 async function setup(overrides: Partial<ResourceLimits> = {}) {
   process.env.FEDERATION_ADMIN_TOKEN = adminToken;
   const t = convexTest(schema, modules);
+  // Resource tests model an already authorized, UTC-synchronized deployment.
+  await t.run(ctx => ctx.db.insert('federationClock', { observedAt: Date.now(), uncertain: false }));
   const identityId = await t.run((ctx) =>
     ctx.db.insert('federationIdentity', {
       townId: 'host',

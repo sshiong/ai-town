@@ -4,6 +4,8 @@ import { configuredResourceLimits, pendingDecisionCount } from './resources';
 import { hostResourceHealth, remoteEventRate, sourceVisitorQuota } from './resourceMonitoring';
 import { enqueueMessage } from './queue';
 import { identity, peer, ready, session, visit } from './store';
+import { assertClock, configuredTimePolicy, readClock } from './timePolicy';
+import { residentAdmissionReason } from './residentPolicy';
 
 export const MAX_VISITOR_QUEUE = 1000;
 export const VISIT_RESERVATION_MS = 30_000;
@@ -88,6 +90,7 @@ export async function visitorAdmissionSnapshot(ctx: MutationCtx) {
   const hardware = await hostResourceHealth(ctx.db, now);
   let reason: string | undefined;
   if (!local?.enabled || local.mode !== 'ACTIVE') reason = 'VISITS_NOT_ALLOWED';
+  else if (!(await readClock(ctx.db, local, now)).healthy) reason = 'CLOCK_UNCERTAIN';
   else if (maintenance) reason = 'HOST_MAINTENANCE';
   else if (conflict) reason = 'TOWN_CLONE_CONFLICT';
   else if (slots.length > MAX_VISITOR_QUEUE || pendingChat.length > MAX_VISITOR_QUEUE || runningChat.length > 32) reason = 'HOST_CAPACITY_SAMPLE_LIMIT';
@@ -106,8 +109,12 @@ export function sourceAdmissionReason(snapshot: VisitorAdmissionSnapshot, townId
 
 export async function reserveHostVisit(ctx: MutationCtx, ledger: Doc<'visitLedger'>) {
   const now = Date.now();
+  const refusal = await residentAdmissionReason(ctx.db, ledger.agentGlobalId);
+  if (refusal) throw new Error(refusal);
   if (ledger.leaseExpiry <= now) throw new Error('VISIT_LEASE_EXPIRED');
-  const reservedUntil = Math.min(now + VISIT_RESERVATION_MS, ledger.leaseExpiry);
+  const local = await identity(ctx);
+  await assertClock(ctx.db, local);
+  const reservedUntil = Math.min(now + configuredTimePolicy(local).reservationMs, ledger.leaseExpiry);
   await ctx.db.patch(ledger._id, { state: 'RESERVED', queuePaused: false, updatedAt: now });
   await ctx.db.insert('visitReservations', {
     visitId: ledger.visitId, hostTownId: ledger.hostTownId, reservedSlot: true, expiresAt: reservedUntil,
@@ -170,6 +177,7 @@ export async function drainVisitorQueue(ctx: MutationCtx, transitionLimit = VISI
     const remote = peers.get(row.homeTownId);
     let ended: string | undefined;
     if ((row.queueExpiresAt ?? 0) <= now || row.leaseExpiry <= now) ended = 'VISITOR_QUEUE_EXPIRED';
+    else if (await residentAdmissionReason(ctx.db, row.agentGlobalId)) ended = 'RESIDENT_VISITS_DENIED';
     else if (!policy.enabled) ended = 'VISITOR_QUEUE_DISABLED';
     else if (local?.mode === 'QUARANTINED' || conflict) ended = 'VISITOR_QUEUE_IDENTITY_FENCED';
     else if (!local || local.townId !== row.hostTownId || local.deploymentEpoch !== row.hostDeploymentEpoch ||
@@ -201,7 +209,7 @@ export async function drainVisitorQueue(ctx: MutationCtx, transitionLimit = VISI
       let blocked: string | undefined;
       if (row.queuePaused) continue;
       if (remote?.trustState !== 'TRUSTED' || !remote.inboundVisitsAllowed) blocked = 'VISITS_NOT_ALLOWED';
-      else if (!ready(connection ?? null, now) || connection!.localDeploymentEpoch !== local!.deploymentEpoch ||
+      else if (!ready(connection ?? null, now, configuredTimePolicy(local)) || connection!.localDeploymentEpoch !== local!.deploymentEpoch ||
         connection!.verifiedPeerDeploymentEpoch !== remote.deploymentEpoch) blocked = 'DIRECT_PEER_NOT_MUTUALLY_REACHABLE';
       else blocked = sourceAdmissionReason(snapshot, row.homeTownId);
       if (blocked) {

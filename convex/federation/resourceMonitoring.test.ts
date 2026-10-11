@@ -220,6 +220,7 @@ test.each(['COMMITTED', 'FAILED', 'EXPIRED'] as const)(
   'remote decision terminal %s records actual elapsed duration exactly once', async state => {
     const t = convexTest(schema, modules);
     const jobId = await t.run(async ctx => {
+      await ctx.db.insert('federationClock', { observedAt: Date.now(), uncertain: false });
       const worldId = await ctx.db.insert('worlds', { nextId: 2, players: [], agents: [], conversations: [] });
       await ctx.db.insert('federationIdentity', {
         townId: 'home', townName: 'Home', endpoint: 'https://home.example/federation/v1',

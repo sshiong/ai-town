@@ -1,7 +1,7 @@
 import { action, httpAction, internalMutation, mutation } from '../maintenanceFunctions';
 import { v } from 'convex/values';
 import { constantTimeEqual, deriveCredential, digest, ephemeralKeys, mac, openSecret, requireAdmin, sealSecret, sign, validatePairingSecret, verifyMac, verifySignature } from './security';
-import { PROTOCOL, normalizeEndpoint } from './protocol';
+import { PROTOCOL, normalizeEndpoint, normalizeEndpointCandidates, endpointGeneration, nextEndpointGeneration } from './protocol';
 import { actionRef, mutationRef, queryRef } from './refs';
 import { directRequest, readRequest } from './direct';
 import { identity, peer, session } from './store';
@@ -22,7 +22,7 @@ export const requestPair = action({ args: { adminToken: v.string(), endpoint: v.
   await observeSignedIdentity(ctx, discovery, 'HEALTH');
   if (discovery.body.townId === local.townId) throw new Error('TOWN_ID_CONFLICT');
   const keys = await ephemeralKeys(); const pairRequestId = crypto.randomUUID();
-  const request = { protocol: PROTOCOL, pairRequestId, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint, identityVersion: local.identityVersion ?? 1, deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, targetTownId: discovery.body.townId, endpoint: local.endpoint, ephemeralPublicKey: keys.publicKey, nonce: crypto.randomUUID(), sentAt: Date.now(), expiresAt: Date.now() + 10 * 60_000 };
+  const request = { protocol: PROTOCOL, pairRequestId, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint, identityVersion: local.identityVersion ?? 1, deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, targetTownId: discovery.body.townId, endpoint: local.endpoint, endpointCandidates: normalizeEndpointCandidates(local.endpoint, local.endpointCandidates), endpointSequence: local.endpointSequence ?? 0, ephemeralPublicKey: keys.publicKey, nonce: crypto.randomUUID(), sentAt: Date.now(), expiresAt: Date.now() + 10 * 60_000 };
   const packet = { body: request, signature: await sign(request, local.privateKeyEncrypted), proof: await mac({ direction: 'offer', request }, args.pairingSecret) };
   const targetIdentity = { townId: discovery.body.townId, townName: discovery.body.townName, publicKey: discovery.body.publicKey, fingerprint: discovery.body.fingerprint, protocol: discovery.body.protocol };
   await ctx.runMutation(mutationRef('peers/storeOutbound'), { request, endpoint, targetIdentity, secretEncrypted: await sealSecret(args.pairingSecret), ephemeralPrivateEncrypted: keys.privateKeyEncrypted });
@@ -42,7 +42,7 @@ export const receiveRequest = internalMutation({ args: { request: v.any(), proof
   const local = await identity(ctx); const request = args.request;
   if (!local?.enabled || !local.allowIncomingPairRequests || local.mode !== 'ACTIVE') throw new Error('PAIR_REQUESTS_DISABLED');
   if (request.targetTownId !== local.townId || request.townId === local.townId || request.protocol !== PROTOCOL || !request.pairRequestId || request.pairRequestId.length > 100 || !request.townId || request.townId.length > 200 || typeof request.townName !== 'string' || request.townName.length > 80 || typeof request.nonce !== 'string' || !request.nonce || request.nonce.length > 200 || request.expiresAt <= Date.now() || request.expiresAt > Date.now() + 10 * 60_000 || !Number.isSafeInteger(request.deploymentEpoch) || request.deploymentEpoch < 1) throw new Error('INVALID_PAIR_REQUEST');
-  normalizeEndpoint(request.endpoint);
+  normalizeEndpointCandidates(request.endpoint, request.endpointCandidates);
   const existing = await pairById(ctx, request.pairRequestId);
   if (existing) {
     if (existing.request.publicKey !== request.publicKey || existing.request.nonce !== request.nonce) throw new Error('PAIR_REQUEST_CONFLICT');
@@ -64,7 +64,7 @@ export const approvePair = action({ args: { adminToken: v.string(), pairRequestI
     throw new Error('AUTH_FAILED');
   }
   const keys = await ephemeralKeys();
-  const response = { protocol: PROTOCOL, pairRequestId: args.pairRequestId, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint, identityVersion: local.identityVersion ?? 1, deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, endpoint: local.endpoint, ephemeralPublicKey: keys.publicKey, nonce: crypto.randomUUID(), sentAt: Date.now(), expiresAt: pair.expiresAt };
+  const response = { protocol: PROTOCOL, pairRequestId: args.pairRequestId, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint, identityVersion: local.identityVersion ?? 1, deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, endpoint: local.endpoint, endpointCandidates: normalizeEndpointCandidates(local.endpoint, local.endpointCandidates), endpointSequence: local.endpointSequence ?? 0, ephemeralPublicKey: keys.publicKey, nonce: crypto.randomUUID(), sentAt: Date.now(), expiresAt: pair.expiresAt };
   const transcript = { request, response };
   const credential = await deriveCredential(keys.privateKeyEncrypted, request.ephemeralPublicKey, args.pairingSecret, transcript);
   const packet = { body: response, signature: await sign(response, local.privateKeyEncrypted), proof: await mac({ direction: 'response', transcript }, args.pairingSecret) };
@@ -178,9 +178,10 @@ export const finalizePair = internalMutation({ args: { pairRequestId: v.string()
   if (!pair || !local?.enabled || local.mode !== 'ACTIVE' || pair.expiresAt < Date.now() || !['PENDING_APPROVAL', 'PENDING_BOTH_CONFIRM', 'TRUSTED'].includes(pair.state)) throw new Error('PAIR_NOT_CONFIRMABLE');
   if (pair.state === 'TRUSTED') return;
   const remote = args.remote; const previous = await peer(ctx, remote.townId);
+  if (!Number.isSafeInteger(remote.endpointSequence ?? 0) || (remote.endpointSequence ?? 0) < 0) throw new Error('INVALID_ENDPOINT_SEQUENCE');
   if (!Number.isSafeInteger(remote.identityVersion ?? 1) || (remote.identityVersion ?? 1) < 1) throw new Error('INVALID_IDENTITY_VERSION');
   if (remote.townId === local.townId || previous && (previous.publicKey !== remote.publicKey || previous.deploymentInstanceId !== remote.deploymentInstanceId || previous.deploymentEpoch !== remote.deploymentEpoch)) throw new Error('IDENTITY_OR_DEPLOYMENT_CONFLICT');
-  const record = { townId: remote.townId, townName: remote.townName, publicKey: remote.publicKey, fingerprint: remote.fingerprint, identityVersion: remote.identityVersion ?? 1, deploymentInstanceId: remote.deploymentInstanceId, deploymentEpoch: remote.deploymentEpoch, endpoint: normalizeEndpoint(remote.endpoint), credentialId: `peer:${args.pairRequestId}`, credentialEncrypted: args.credentialEncrypted, trustState: 'TRUSTED', inboundVisitsAllowed: true, outboundVisitsAllowed: true, pairedAt: Date.now() };
+  const record = { townId: remote.townId, townName: remote.townName, publicKey: remote.publicKey, fingerprint: remote.fingerprint, identityVersion: remote.identityVersion ?? 1, deploymentInstanceId: remote.deploymentInstanceId, deploymentEpoch: remote.deploymentEpoch, endpoint: normalizeEndpoint(remote.endpoint), endpointCandidates: normalizeEndpointCandidates(remote.endpoint, remote.endpointCandidates), endpointGeneration: nextEndpointGeneration(previous ?? {}), endpointSequence: remote.endpointSequence ?? 0, endpointSequenceDeploymentInstanceId: remote.deploymentInstanceId, endpointSequenceDeploymentEpoch: remote.deploymentEpoch, credentialId: `peer:${args.pairRequestId}`, credentialEncrypted: args.credentialEncrypted, trustState: 'TRUSTED', inboundVisitsAllowed: true, outboundVisitsAllowed: true, pairedAt: Date.now() };
   if (previous) {
     await retireCredentialRotations(ctx, remote.townId);
     await ctx.db.patch(previous._id, record);
@@ -226,7 +227,7 @@ export function registerPairingRoutes(http: import('convex/server').HttpRouter) 
     const data = await ctx.runQuery(queryRef('store/context'), {}), local = data.identity;
     if (!local || local.mode !== 'ACTIVE') return new Response(JSON.stringify({ error: 'FEDERATION_UNAVAILABLE' }), { status: 503 });
     const body = { protocol: PROTOCOL, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint, identityVersion: local.identityVersion ?? 1,
-      deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, endpoint: local.endpoint, sentAt: Date.now(), expiresAt: Date.now() + 30_000 };
+      deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, endpoint: local.endpoint, endpointCandidates: normalizeEndpointCandidates(local.endpoint, local.endpointCandidates), endpointSequence: local.endpointSequence ?? 0, sentAt: Date.now(), expiresAt: Date.now() + 30_000 };
     return jsonResponse({ body, signature: await sign(body, local.privateKeyEncrypted) });
   }) });
   http.route({ path: '/federation/v1/pair', method: 'POST', handler: httpAction(async (ctx, request) => {

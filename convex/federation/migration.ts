@@ -15,7 +15,9 @@ import { Doc } from '../_generated/dataModel';
 import { identity, peer, session } from './store';
 import { actionRef, mutationRef, queryRef } from './refs';
 import { beginReturn } from './ledger';
-import { directRequest, readRequest } from './direct';
+import { directRequest, endpointContextKey, sameEndpointContext, requestCandidates, readRequest } from './direct';
+import { normalizeEndpointCandidates, endpointGeneration, nextEndpointGeneration, EndpointCandidate } from './protocol';
+import { configuredTimePolicy } from './timePolicy';
 import { normalizeEndpoint, canonicalJson, PROTOCOL } from './protocol';
 import {
   digest,
@@ -40,6 +42,7 @@ type Target = {
   deploymentInstanceId: string;
   deploymentEpoch: number;
   endpoint: string;
+  endpointCandidates?: EndpointCandidate[];
 };
 type PublicPeer = Omit<
   Doc<'federationPeers'>,
@@ -75,6 +78,7 @@ function validTarget(t: Target) {
     normalizeEndpoint(t.endpoint) !== t.endpoint
   )
     throw new Error('INVALID_MIGRATION_TARGET');
+  normalizeEndpointCandidates(t.endpoint, t.endpointCandidates);
 }
 async function validateHandoff(
   packet: HandoffPacket,
@@ -253,6 +257,7 @@ export const prepareTarget = action({
       deploymentInstanceId: local.deploymentInstanceId,
       deploymentEpoch: local.deploymentEpoch,
       endpoint: local.endpoint,
+      endpointCandidates: local.endpointCandidates,
     };
     return { body, signature: await sign(body, local.privateKeyEncrypted) };
   },
@@ -273,8 +278,9 @@ export const prepareTargetInternal = internalMutation({
       enabled: false,
       allowIncomingPairRequests: false,
       endpoint: normalizeEndpoint(args.endpoint),
+      endpointCandidates: normalizeEndpointCandidates(args.endpoint), endpointSequence: 0, endpointGeneration: nextEndpointGeneration(local),
     });
-    return { ...local, endpoint: normalizeEndpoint(args.endpoint) };
+    return { ...local, endpoint: normalizeEndpoint(args.endpoint), endpointCandidates: normalizeEndpointCandidates(args.endpoint), endpointSequence: 0, endpointGeneration: nextEndpointGeneration(local) };
   },
 });
 export const signHandoff = mutation({
@@ -306,6 +312,7 @@ export const signHandoff = mutation({
       deploymentInstanceId: t.deploymentInstanceId,
       deploymentEpoch: t.deploymentEpoch,
       endpoint: t.endpoint,
+      endpointCandidates: t.endpointCandidates,
     };
     if (local.activeHandoffId) {
       const old = await record(ctx, local.activeHandoffId);
@@ -364,7 +371,7 @@ export const activateTarget = mutation({
       b.townId !== local.townId ||
       b.target.deploymentInstanceId !== local.deploymentInstanceId ||
       b.target.deploymentEpoch !== local.deploymentEpoch ||
-      b.target.endpoint !== local.endpoint
+      b.target.endpoint !== local.endpoint || JSON.stringify(normalizeEndpointCandidates(b.target.endpoint, b.target.endpointCandidates)) !== JSON.stringify(normalizeEndpointCandidates(local.endpoint, local.endpointCandidates))
     )
       throw new Error('MIGRATION_TARGET_MISMATCH');
     if (local.activeHandoffId === b.handoffId && local.mode === 'ACTIVE')
@@ -674,6 +681,9 @@ export const acceptExchange = internalMutation({
       deploymentInstanceId: b.target.deploymentInstanceId,
       deploymentEpoch: b.target.deploymentEpoch,
       endpoint: b.target.endpoint,
+      endpointCandidates: normalizeEndpointCandidates(b.target.endpoint, b.target.endpointCandidates),
+      endpointGeneration: nextEndpointGeneration(remote), endpointSequence: 0,
+      endpointSequenceDeploymentInstanceId: b.target.deploymentInstanceId, endpointSequenceDeploymentEpoch: b.target.deploymentEpoch,
       credentialId: request.credentialId,
       credentialEncrypted,
       verifiedHandoffId: b.handoffId,
@@ -713,6 +723,7 @@ export const finishExchange = internalMutation({
     response: v.any(),
     credentialEncrypted: v.string(),
     requestDigest: v.string(),
+    endpointContextKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const local = await identity(ctx),
@@ -726,6 +737,7 @@ export const finishExchange = internalMutation({
     )
       throw new Error('MIGRATION_EXCHANGE_NOT_ALLOWED');
     const e = await exchange(ctx, local.activeHandoffId, remote.townId, 'OUTBOUND');
+    if (args.endpointContextKey !== undefined && endpointContextKey(local, remote) !== args.endpointContextKey) throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
     if (
       !e ||
       (await digest(e.request)) !== args.requestDigest ||
@@ -786,7 +798,11 @@ export const notifyPeer = action({
       });
     }
     if (e.state !== 'ACCEPTED') {
-      const response = await directRequest(remote.endpoint, '/migration', e.request),
+      const response = (await requestCandidates(remote, async endpoint => {
+        const current = await ctx.runQuery(queryRef('store/context'), { peerTownId: remote.townId });
+        if (!sameEndpointContext(local, remote, current)) throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
+        return directRequest(endpoint, '/migration', e.request, configuredTimePolicy(local).requestTimeoutMs);
+      })).value,
         b = response?.body;
       if (
         !b ||
@@ -817,6 +833,7 @@ export const notifyPeer = action({
         response,
         credentialEncrypted,
         requestDigest: await digest(e.request),
+        endpointContextKey: endpointContextKey(local, remote),
       });
     }
     return ctx.runAction(actionRef('transport/probeInternal'), { peerTownId: remote.townId });

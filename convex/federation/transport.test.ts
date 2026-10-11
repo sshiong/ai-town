@@ -31,6 +31,8 @@ const adminToken = 'federation-test-admin-token-32-bytes';
 type Town = Awaited<ReturnType<typeof town>>;
 async function town(townId: string, keys: Awaited<ReturnType<typeof createIdentityKeys>>) {
   const t = convexTest(schema, modules);
+  // Normal protocol fixtures include the UTC observation preceding their grants.
+  await t.run(ctx => ctx.db.insert('federationClock', { observedAt: Date.now(), uncertain: false }));
   await t.run(async ctx => { await ctx.db.insert('federationIdentity', { ...keys, townId, townName: townId, endpoint: `https://${townId}.example/federation/v1`, deploymentInstanceId: `${townId}-instance`, deploymentEpoch: 1,
     enabled: true, allowIncomingPairRequests: true, allowUnencryptedHttp: false, allowPublicHttp: false, maxVisitors: 1, maxVisitDurationMs: 300000, mode: 'ACTIVE', createdAt: Date.now() }); });
   return { t, townId, keys };
@@ -329,7 +331,7 @@ test('real TLS sockets carry signed independent probes and reject an untrusted c
     });
     globalThis.fetch = tlsFetch(cert);
     const probeResult = await a.t.action(actionRef('transport/probeInternal'), { peerTownId: b.townId });
-    expect((await a.t.run(ctx => ctx.db.query('transportSessions').unique()))?.lastError).toBeUndefined();
+    expect((await a.t.run(ctx => ctx.db.query('transportSessions').unique()))?.lastError).toBe('NO_BIDIRECTIONAL_PATH');
     expect(probeResult).toEqual({ channelState: 'TRANSPORT_TESTING' });
     expect(await b.t.action(actionRef('transport/probeInternal'), { peerTownId: a.townId })).toEqual({ channelState: 'TRANSPORT_READY' });
     expect((await a.t.run(ctx => ctx.db.query('transportSessions').unique()))?.channelState).toBe('TRANSPORT_READY');
@@ -493,7 +495,7 @@ test('outbound cancellation survives a lost acknowledgement, cannot be resurrect
     if (init?.body && JSON.parse(init.body).operation === 'cancel') throw new Error('lost cancel acknowledgement');
     return result;
   }) as typeof fetch;
-  await expect(towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('lost cancel acknowledgement');
+  await expect(towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('NETWORK_UNREACHABLE');
   const local = (await towns.a.t.run(ctx => ctx.db.query('pairRequests').unique()))!;
   expect(local.state).toBe('CANCEL_PENDING');
   expect(local.secretEncrypted).toBeUndefined(); expect(local.ephemeralPrivateEncrypted).toBeUndefined();
@@ -551,7 +553,7 @@ test('both-confirm waiting and a lost final response recover from persisted reco
     if (init?.body && JSON.parse(init.body).operation === 'confirm') throw new Error('lost final acknowledgement');
     return result;
   }) as typeof fetch;
-  await expect(towns.a.t.action(actionRef('peers/continuePair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('lost final acknowledgement');
+  await expect(towns.a.t.action(actionRef('peers/continuePair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('NETWORK_UNREACHABLE');
   expect((await towns.a.t.run(ctx => ctx.db.query('pairRequests').unique()))?.state).toBe('PENDING_BOTH_CONFIRM');
   expect((await towns.b.t.run(ctx => ctx.db.query('pairRequests').unique()))?.state).toBe('TRUSTED');
   await expect(towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('PAIR_NOT_CANCELLABLE');
@@ -601,7 +603,7 @@ test('an unreachable cancelled request can close locally after its shared deadli
   const towns = await freshPairingTowns();
   const pair = await towns.a.t.action(actionRef('peers/requestPair'), { adminToken, endpoint: 'https://town-b.example', pairingSecret: randomSecret() });
   globalThis.fetch = (async () => { throw new Error('offline peer'); }) as typeof fetch;
-  await expect(towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('offline peer');
+  await expect(towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).rejects.toThrow('NETWORK_UNREACHABLE');
   jest.setSystemTime(Date.now() + 600_001);
   expect((await towns.a.t.action(actionRef('peers/cancelPair'), { adminToken, pairRequestId: pair.pairRequestId })).state).toBe('CANCELLED');
   const local = (await towns.a.t.run(ctx => ctx.db.query('pairRequests').unique()))!;
@@ -786,4 +788,89 @@ test('failed audit rows no longer consume pending Outbox capacity', async () => 
   });
   await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'DECISION', visitId: 'visit-1', payload: {} }))).resolves.toEqual(expect.any(String));
   expect(await a.t.query(queryRef('transport/pendingDeliveries'), {})).toHaveLength(1);
+});
+
+test('backup delivery challenges the trusted identity and reuses the event ID after a lost primary ACK', async () => {
+  const { a, b } = await setup();
+  await seedVisit(a, b, 'home', 'CONFIRMING'); await seedVisit(b, a, 'host');
+  const primary = 'https://town-b.example/federation/v1', backup = 'https://town-b-backup.example/federation/v1';
+  await a.t.run(async ctx => {
+    const remote = (await ctx.db.query('federationPeers').first())!;
+    await ctx.db.patch(remote._id, { endpointCandidates: [{ url: primary, priority: 10 }, { url: backup, priority: 20 }], endpointGeneration: 3 });
+  });
+  const id = await a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'VISIT_CONFIRM', visitId: 'visit-1', payload: { fencingToken: 'test-fencing-token-32bytes' } }));
+  const attempts: { url: string; messageId: string; type: string }[] = [];
+  globalThis.fetch = jest.fn<typeof fetch>().mockImplementation(async (url, init) => {
+    const packet = JSON.parse(init!.body as string);
+    attempts.push({ url: String(url), messageId: packet.body.messageId, type: packet.body.type });
+    const result = await b.t.action(actionRef(String(url).endsWith('/probe') ? 'transport/receiveProbe' : 'transport/receiveMessage'), { packet });
+    if (String(url) === `${primary}/messages`) throw new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } });
+    return new Response(JSON.stringify(result));
+  });
+  await a.t.action(actionRef('transport/deliver'), { messageId: id });
+  expect(attempts.map(attempt => attempt.url)).toEqual([`${primary}/messages`, `${backup}/probe`, `${backup}/messages`]);
+  expect(attempts.filter(attempt => attempt.type === 'VISIT_CONFIRM').map(attempt => attempt.messageId)).toEqual([id, id]);
+  expect((await a.t.run(ctx => ctx.db.query('federationOutbox').first()))?.ackedAt).toBeDefined();
+  expect(await b.t.run(ctx => ctx.db.query('federationInbox').collect())).toHaveLength(1);
+  expect((await a.t.run(ctx => ctx.db.query('federationPeers').first()))?.endpointGeneration).toBe(3);
+});
+
+test('clock lock accepts expired signed cleanup only under the original identity and authority fences', async () => {
+  const { a, b, credentialEncrypted } = await setup();
+  await seedVisit(a, b, 'home', 'RETURN_PENDING');
+  await a.t.run(async ctx => {
+    const clock = (await ctx.db.query('federationClock').unique())!;
+    await ctx.db.patch(clock._id, { observedAt: Date.now(), uncertain: true, reason: 'CLOCK_MOVED_BACKWARDS' });
+  });
+  const cleaned = visitMessage(b, a, 'VISIT_CLEANED', 1, 'lease-control', { sentAt: Date.now() - 100000, expiresAt: Date.now() - 50000 });
+  const packet = await signPacket(cleaned, b.keys.privateKeyEncrypted, credentialEncrypted);
+  const forged = { ...packet, mac: 'forged' };
+  await expect(a.t.action(actionRef('transport/receiveMessage'), { packet: forged })).rejects.toThrow('MESSAGE_AUTH_FAILED');
+  for (const [field, error] of [['senderDeploymentEpoch', 'SENDER_DEPLOYMENT_MISMATCH'], ['expectedRecipientDeploymentEpoch', 'RECIPIENT_DEPLOYMENT_MISMATCH'], ['agentAuthorityEpoch', 'STALE_AGENT_AUTHORITY'], ['visitLeaseVersion', 'STALE_VISIT_LEASE']] as const) {
+    await expect(accept(a, { ...cleaned, [field]: 99 })).rejects.toThrow(error);
+  }
+  const ack = await a.t.action(actionRef('transport/receiveMessage'), { packet });
+  expect(ack.body.status).toBe('COMMITTED');
+  expect((await a.t.run(ctx => ctx.db.query('visitLedger').unique()))?.cleanupConfirmed).toBe(true);
+  expect((await a.t.action(actionRef('transport/receiveMessage'), { packet })).body.status).toBe('COMMITTED');
+  expect(await a.t.run(ctx => ctx.db.query('federationInbox').collect())).toHaveLength(1);
+  const changed = await signPacket({ ...cleaned, payload: { ...cleaned.payload, reason: 'changed' } }, b.keys.privateKeyEncrypted, credentialEncrypted);
+  await expect(a.t.action(actionRef('transport/receiveMessage'), { packet: changed })).rejects.toThrow('MESSAGE_ID_CONFLICT');
+  const action = visitMessage(b, a, 'DECISION', 1, 'home-actions', { sentAt: cleaned.sentAt, expiresAt: cleaned.expiresAt });
+  await expect(a.t.action(actionRef('transport/receiveMessage'), { packet: await signPacket(action, b.keys.privateKeyEncrypted, credentialEncrypted) })).rejects.toThrow('MESSAGE_EXPIRED');
+});
+
+test('durable history progress distinguishes an issued page from confirmed remote commitment', async () => {
+  const { a, b } = await setup(); await seedVisit(b, a, 'host', 'COMPLETED');
+  const id = await b.t.run(ctx => enqueueMessage(ctx, { peerTownId: a.townId, type: 'CONVERSATION_ENDED', visitId: 'visit-1', payload: {} }));
+  let ledger = (await b.t.run(ctx => ctx.db.query('visitLedger').unique()))!;
+  expect(ledger.lastDurableEventSeq).toBe(1); expect(ledger.lastAckedEventSeq).toBeUndefined();
+  await b.t.mutation(mutationRef('transport/markDelivery'), { messageId: id, status: 'BUFFERED' });
+  expect((await b.t.run(ctx => ctx.db.query('visitLedger').unique()))?.lastAckedEventSeq).toBeUndefined();
+  await b.t.mutation(mutationRef('transport/markDelivery'), { messageId: id, status: 'COMMITTED' });
+  ledger = (await b.t.run(ctx => ctx.db.query('visitLedger').unique()))!;
+  expect(ledger.lastDurableEventSeq).toBe(1); expect(ledger.lastAckedEventSeq).toBe(1);
+});
+
+test('an alternate host with an invalid identity proof receives no business message and does not trigger further fallback', async () => {
+  const { a, b } = await setup();
+  await seedVisit(a, b, 'home', 'CONFIRMING'); await seedVisit(b, a, 'host');
+  const primary = 'https://town-b.example/federation/v1', backup = 'https://town-b-backup.example/federation/v1', third = 'https://town-b-third.example/federation/v1';
+  await a.t.run(async ctx => {
+    const remote = (await ctx.db.query('federationPeers').first())!;
+    await ctx.db.patch(remote._id, { endpointCandidates: [{ url: primary, priority: 10 }, { url: backup, priority: 20 }, { url: third, priority: 30 }] });
+  });
+  const id = await a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'VISIT_CONFIRM', visitId: 'visit-1', payload: { fencingToken: 'test-fencing-token-32bytes' } }));
+  const urls: string[] = [];
+  globalThis.fetch = jest.fn<typeof fetch>().mockImplementation(async (url, init) => {
+    urls.push(String(url));
+    if (String(url) === `${primary}/messages`) throw new TypeError('fetch failed');
+    const ack = await b.t.action(actionRef('transport/receiveProbe'), { packet: JSON.parse(init!.body as string) });
+    return new Response(JSON.stringify({ ...ack, signature: await sign(ack.body, a.keys.privateKeyEncrypted) }));
+  });
+  await a.t.action(actionRef('transport/deliver'), { messageId: id });
+  expect(urls).toEqual([`${primary}/messages`, `${backup}/probe`]);
+  const outbox = (await a.t.run(ctx => ctx.db.query('federationOutbox').first()))!;
+  expect(outbox.ackedAt).toBeUndefined(); expect(outbox.lastError).toBe('ENDPOINT_IDENTITY_UNVERIFIED');
+  expect(await b.t.run(ctx => ctx.db.query('federationInbox').collect())).toHaveLength(0);
 });

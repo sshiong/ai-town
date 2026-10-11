@@ -159,3 +159,15 @@ C06 增加 Chat/Embedding 停用、引用保护删除、受影响居民确认、
 C11 的整镇大导出新增 operator/reason 并在签名发布事务写成功审计，记录实际清单 digest、各表计数与字节数，重试完成不重复记审计。旧客户端明确 legacy-admin-token，UI 要求填写声明标签和原因；operator 是共享管理员令牌下的自报标签，不能当成独立认证用户身份。
 
 P02 的 v2 冷档独立恢复和浏览器完整链路实际通过：隔离 D/E 的 1207 条合成原文、49 个带原签名分块，重复首块幂等，上传过程中重启目标后继续并发布；再导出 root/所有分块与源一致，全部原文匹配，两端热副本保留。浏览器在另一个匹配原文且无冷档目标中选 root、核验指纹、显式映射审阅、49 文件上传和验证发布后，再以独立 API 验证原签名/原文和锁释放。320px 窄屏没有横向溢出。归档本身不截断、不删除热原文、也尚未实现 C10 的压缩或外部存储适配；真实完整/选择性大包搬运、所有故障阶段及长期增长仍按 V08/V09/V10 继续验收。
+
+## C04 时间策略与安全返乡实现检查点（2026-10-11）
+
+时间参数已采用有界配置：reservation、lease、允许 UTC skew、双向 probe freshness/interval、stream gap、请求 timeout、return margin 与持久 clock observation gap。每趟保存 maximum trip deadline 和实际 return margin `max(configuredMargin, 2 * observationGap + 60s)`；默认新访问实际 margin 为 300s，legacy 缺字段仍保留原 60s 边界。配置修改、续租、普通/大型恢复都不得缩小保存边界。Home 在投递前持久保存最大可能有效 lease；probe 只更新通信就绪，不能延长 lease。
+
+持久 clock 记录在 transport maintenance、ledger reconcile 和成功的 world saveDiff 事务观察墙钟。回拨/超出 observation gap 时锁存 uncertain；之后时间前进、普通 probe 或重试不会自行解锁。锁定阻止新访问、队列晋升、续租、Host 创建/动作/物理活动及单凭未确认墙钟返乡。runtime 排队、engine loadInputs、纯 input、saveDiff 与动作/实体提交都有相应门禁，提交前异常会回滚 side effects 和 engine cursor；重新加载会拒绝旧输入，推进正常本地模拟。
+
+签名清理和已提交历史页可继续补传。时钟锁定下只对无新动作授权的清理/历史类型放宽墙钟 TTL，时间仍须安全整数且 envelope TTL 长度有上限；消息继续验证可信签名、MAC、部署实例、部署/角色/租约代数、visit/fencing/stream、原 canonical digest 与幂等 ID。普通 DECISION/OBSERVATION/续租/创建不能借恢复豁免进入。每趟显示通信 SUSPECT/最后双向 probe、安全返乡条件/实际 safeAfter、保存 margin/deadline，以及 Host durable history page seq / Home ACK seq；Home 的 ACK issued 是本地持久回执，不冒充 Host 已收到回执或未收到原文。
+
+管理员恢复分两步：显式确认服务器已重新同步 UTC 后，只允许已保存 lease+margin 的期限返乡（returnClockConfirmedAt），新准入/续租/Host 动作仍锁定；等所有访问结束后才允许完整解锁。后续回拨或 observation gap 会撤销 return-only 证明。这避免 Home 时钟锁定且 Host 永久离线时，必须先结束访问才能证明安全期限的互等。确认 UTC 不是 Host 清理证明，不能把 checkbox 写成签名 cleanup。缺本地 clock 观察的旧旅行灾备恢复要求先明确 UTC 确认；resident 选择性同镇恢复既有 source/target HOME_ACTIVE、无 visit 门禁继续保留。
+
+首轮核心检查最终 5 套件、159 项通过，Convex TypeScript 检查通过。之后补入保守 margin 的新访问/改配置/续租、普通/大型备份 saved margin 与缺 clock 证明、以及两阶段恢复组合测试；这些新增检查的最终结果待追加。没有部署或真实校时/进程故障演练。本策略仍依赖可信节点正确同步 UTC（误差上限 30s）；墙钟自观察和保守单次跳变 margin 不能证明持续漂移或任意错误时钟的上限。V03/V04 的真实时钟/分区/宕机组合与长期运行仍未据此关闭。

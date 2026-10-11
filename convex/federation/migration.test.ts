@@ -66,6 +66,8 @@ async function setup() {
     [a, 'town:a', keysA, 'source-a'],
     [b, 'town:b', keysB, 'peer-b'],
   ] as const) {
+    // These are live authorized source towns, rather than recovered legacy grants.
+    await t.run(ctx => ctx.db.insert('federationClock', { observedAt: Date.now(), uncertain: false }));
     await t.run((ctx) =>
       ctx.db.insert('federationIdentity', {
         ...keys,
@@ -638,4 +640,21 @@ test('action-generated ECDH material cannot bypass a peer fencing change before 
   );
   expect(await s.b.run((ctx) => ctx.db.query('migrationPeerExchanges').collect())).toEqual([]);
   expect(await s.b.run((ctx) => ctx.db.query('migrationHandoffRecords').collect())).toEqual([]);
+});
+
+test('migration preparation removes restored source backups before the target advertises its signed routes', async () => {
+  const s = await setup();
+  await s.a2.run(async ctx => {
+    const local = (await ctx.db.query('federationIdentity').unique())!;
+    await ctx.db.patch(local._id, { endpoint: 'https://source-a.example/federation/v1', endpointCandidates: [
+      { url: 'https://source-a.example/federation/v1', priority: 10 }, { url: 'https://source-a-backup.example/federation/v1', priority: 20 },
+    ], endpointGeneration: 7, endpointSequence: 5 });
+  });
+  const packet = await s.a2.action(actionRef('migration/prepareTarget'), { adminToken, endpoint: 'https://target-a.example/federation/v1' });
+  expect(packet.body.endpointCandidates).toEqual([{ url: 'https://target-a.example/federation/v1', priority: 10 }]);
+  const local = (await s.a2.run(ctx => ctx.db.query('federationIdentity').unique()))!;
+  expect(local.endpointCandidates).toEqual(packet.body.endpointCandidates);
+  expect(local.endpointGeneration).toBe(8);
+  expect(local.endpointSequence).toBe(0);
+  expect(local.mode).toBe('MIGRATING_IN');
 });

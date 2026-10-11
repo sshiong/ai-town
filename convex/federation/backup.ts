@@ -1,3 +1,4 @@
+import { readClock } from './timePolicy';
 import { packColdFiles, restoreColdFiles, type PreparedColdFile } from './coldBackup';
 import { fileStorageDescriptor } from './coldHistoryFiles';
 import { queryRef } from './refs';
@@ -7,6 +8,7 @@ import {
   action,
   mutation,
   internalMutation,
+  importInternalMutation,
   internalQuery,
   query,
   DatabaseReader,
@@ -21,7 +23,7 @@ import { Point } from '../util/types';
 import { playerId } from '../aiTown/ids';
 import { requireAdmin, createIdentityKeys, sign, digest } from './security';
 import { attribution, exportAttribution } from './backupExportAudit';
-import { LEASE_SAFETY_MS, normalizeEndpoint } from './protocol';
+import { LEASE_SAFETY_MS, normalizeEndpoint, normalizeEndpointCandidates, validateEndpointRecord, nextEndpointGeneration } from './protocol';
 import { identity } from './store';
 import {
   BackupBundle,
@@ -79,6 +81,7 @@ function sanitize(value: any): any {
     Object.entries(value)
       .filter(
         ([key]) =>
+          !['embeddingCertificateId', 'coverageJobId', 'validationJobId'].includes(key) &&
           !/(privateKey|secretEncrypted|credentialEncrypted|ephemeralPrivate|apiKey$|adminToken|fencingToken)/i.test(
             key,
           ),
@@ -89,6 +92,9 @@ function sanitize(value: any): any {
 async function collect(db: DatabaseReader): Promise<Record<string, BackupRow[]>> {
   const rows: Record<string, BackupRow[]> = {};
   for (const name of [...dataTables, ...snapshotTables, 'federationIdentity', 'federationPeers']) {
+    // Default archives preserve canonical memories; vectors require separately
+    // verified compatibility before an explicit optional snapshot can be reused.
+    if (name === 'modelMemoryVectors') { rows[name] = []; continue; }
     rows[name] = (await db.query(table(name)).take(501)).map(sanitize);
   }
   for (const memory of rows.memories)
@@ -319,6 +325,9 @@ async function checkImport(
     { ...stripSystem(rows.federationIdentity[0]), privateKeyEncrypted: '' },
     (schema.tables.federationIdentity.validator as unknown as { json: unknown }).json,
   );
+  for (const row of [...rows.federationIdentity, ...(rows.federationPeers ?? [])]) {
+    validateEndpointRecord(row as never);
+  }
   for (const peer of rows.federationPeers ?? [])
     validateFields(
       { ...stripSystem(peer), credentialEncrypted: '' },
@@ -563,6 +572,7 @@ export async function applyBackupData(
         ...args.keys,
         townId,
         endpoint: normalizeEndpoint(args.targetEndpoint!),
+        endpointCandidates: normalizeEndpointCandidates(args.targetEndpoint!), endpointSequence: 0, endpointGeneration: 0,
         deploymentInstanceId: crypto.randomUUID(),
         deploymentEpoch: 1,
         enabled: false,
@@ -582,6 +592,7 @@ export async function applyBackupData(
         maxVisitors: source.maxVisitors,
         maxVisitDurationMs: source.maxVisitDurationMs,
         resourceLimits: source.resourceLimits,
+        endpointCandidates: normalizeEndpointCandidates(local!.endpoint), endpointSequence: 0, endpointGeneration: nextEndpointGeneration(local!),
         allowUnencryptedHttp: false,
         allowPublicHttp: false,
         enabled: false,
@@ -665,7 +676,7 @@ export async function applyBackupData(
     'modelSettings',
     'federationAgentRuntimes',
     ...(args.mode === 'merge'
-      ? ['engines', 'worlds', 'worldStatus', 'maps', 'deploymentRecords', 'modelAudits', 'modelProviderQuotas', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'federationResourcePolicy', 'federationResourceAudit']
+      ? ['engines', 'worlds', 'worldStatus', 'maps', 'deploymentRecords', 'modelAudits', 'modelProviderQuotas', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'federationResourcePolicy', 'federationResourceAudit', 'federationResidentPolicy', 'federationResidentPolicyAudit']
       : []),
   ]);
   for (const name of dataTables) {
@@ -827,7 +838,7 @@ export async function applyBackupData(
     rebuildRequired: true as const,
   };
 }
-export const applyImport = internalMutation({ args: applyImportFields, handler: applyBackupData });
+export const applyImport = importInternalMutation({ args: applyImportFields, handler: applyBackupData });
 
 export const history = query({
   args: { adminToken: v.string() },
@@ -980,7 +991,7 @@ async function largeRestoreEvidence(
     source,
     safeAfter:
       Math.max(record.sourceStoppedAt + duration, m.leaseExpiry, evidence?.leaseExpiry ?? 0) +
-      LEASE_SAFETY_MS,
+      Math.max(LEASE_SAFETY_MS, m.leaseSafetyMs ?? LEASE_SAFETY_MS),
   };
 }
 
@@ -1064,7 +1075,7 @@ async function restoreEvidence(
     }
     for (const name of snapshotTables)
       for (const row of snapshot[name] ?? []) inspect(decodeRow(row));
-    return { importRecord: record, source, safeAfter: maxLease + LEASE_SAFETY_MS };
+    return { importRecord: record, source, safeAfter: maxLease + Math.max(LEASE_SAFETY_MS, ...oldLedgers.map(l => l.leaseSafetyMs ?? LEASE_SAFETY_MS)) };
   }
   throw new Error('RESTORED_RUNTIME_SNAPSHOT_MISSING');
 }
@@ -1094,9 +1105,13 @@ export const restoredResidents = query({
               .unique();
             const engineStopped =
               !!status && (await ctx.db.get(status.engineId))?.running === false;
+            const observedClock = await ctx.db.query('federationClock').unique();
+            const clock = await readClock(ctx.db, await identity(ctx));
             const reason =
               Date.now() < safeAfter
                 ? 'OLD_HOST_LEASE_STILL_VALID'
+                : !observedClock || !clock.returnClockHealthy
+                  ? 'CLOCK_UNCERTAIN'
                 : !engineStopped
                   ? 'STOP_TARGET_ENGINE_FIRST'
                   : null;
@@ -1147,6 +1162,8 @@ export const reconcileRestoredResident = mutation({
     const evidence = await restoreEvidence(ctx, runtime);
     if (Date.now() < evidence.safeAfter)
       throw new Error(`OLD_HOST_LEASE_STILL_VALID: ${evidence.safeAfter}`);
+    if (!await ctx.db.query('federationClock').unique() || !(await readClock(ctx.db, await identity(ctx))).returnClockHealthy)
+      throw new Error('CLOCK_UNCERTAIN');
     const status = await ctx.db
       .query('worldStatus')
       .withIndex('worldId', (q) => q.eq('worldId', runtime.worldId))

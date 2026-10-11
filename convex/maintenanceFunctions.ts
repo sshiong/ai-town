@@ -2,6 +2,7 @@ import {
   mutation as baseMutation,
   internalMutation as baseInternalMutation,
 } from './_generated/server';
+import { withTravelAudit } from './federation/travelAuditWriter';
 import { withEmbeddingRevision } from './models/embeddingDataRevision';
 import { assertTownUnlocked } from './federation/maintenanceLock';
 import type { MutationCtx } from './_generated/server';
@@ -9,11 +10,12 @@ import type { MutationCtx } from './_generated/server';
 export * from './_generated/server';
 
 type Handler = (ctx: MutationCtx, args: any) => any;
-function guard(definition: Handler | { handler: Handler; [key: string]: any }) {
+function guard(definition: Handler | { handler: Handler; [key: string]: any }, captureTravel = true) {
   const handler = typeof definition === 'function' ? definition : definition.handler;
   const guarded: Handler = async (ctx, args) => {
     await assertTownUnlocked(ctx);
-    return handler(withEmbeddingRevision(ctx), args);
+    const trackedCtx = withEmbeddingRevision(ctx);
+    return handler(captureTravel ? withTravelAudit(trackedCtx) : trackedCtx, args);
   };
   return typeof definition === 'function' ? guarded : { ...definition, handler: guarded };
 }
@@ -35,3 +37,8 @@ export const trackedMutation: typeof baseMutation = ((definition: Parameters<typ
   baseMutation(tracked(definition))) as typeof baseMutation;
 export const trackedInternalMutation: typeof baseInternalMutation = ((definition: Parameters<typeof tracked>[0]) =>
   baseInternalMutation(tracked(definition))) as typeof baseInternalMutation;
+
+// Ordinary backup imports still obey the town lock and embedding source fence,
+// but restoring a snapshot is not a newly occurred travel transition.
+export const importInternalMutation: typeof baseInternalMutation = ((definition: Parameters<typeof guard>[0]) =>
+  baseInternalMutation(guard(definition, false))) as typeof baseInternalMutation;

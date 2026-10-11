@@ -60,6 +60,19 @@ export function canResumeRestoredResident(
 
 export function adminErrorSummary(message: string) {
   const explanations: Record<string, string> = {
+    DNS_RESOLUTION_FAILED: 'The endpoint hostname could not be resolved. Check DNS and the address.',
+    TLS_VERIFY_FAILED: 'The HTTPS certificate could not be verified. Check its hostname, expiry and certificate chain.',
+    CONNECTION_TIMEOUT: 'The request timed out. Check the route, firewall and remote service.',
+    NETWORK_UNREACHABLE: 'The service could not be reached. The runtime did not provide a more specific network cause.',
+    NO_BIDIRECTIONAL_PATH: 'The outbound route is verified; the reverse route has not been verified. The other town must run its own probe.',
+    ENDPOINT_IDENTITY_UNVERIFIED: 'The endpoint did not prove the trusted town identity. Review the address and identity before retrying.',
+    INVALID_ENDPOINT_CANDIDATES: 'Use one primary and up to three distinct HTTPS backup addresses with whole-number priorities from 0 to 1000.',
+    PRIMARY_ENDPOINT_PRIORITY_REQUIRED: 'Include the primary HTTPS address and give it the highest priority (lowest number).',
+    CLOCK_UNCERTAIN: 'Federation clock safety is locked. Restore synchronized UTC and end every visit through signed cleanup before confirming recovery.',
+    INVALID_TIME_POLICY: 'Choose whole millisecond values within the displayed bounds. Probe interval must be shorter than freshness, and request timeout shorter than reservation.',
+    END_ALL_VISITS_BEFORE_CLOCK_RECOVERY: 'End every visit through signed cleanup before confirming clock recovery.',
+    CONFIRM_SYNCHRONIZED_UTC_FIRST: 'Confirm that the server clock is synchronized with UTC before unlocking.',
+    LEASE_NOT_EXTENDED: 'This visit has reached its saved trip deadline. Return safely before requesting another visit.',
     INVALID_CREDENTIAL_OVERLAP: 'Choose a credential overlap between 10 and 30 whole minutes.',
     CREDENTIAL_ROTATION_IN_PROGRESS: 'A credential rotation is already pending or its overlap period is still active. Wait before rotating again.',
     CREDENTIAL_ROTATION_EXPIRED: 'The rotation window expired before both sides confirmed. Check the neighbor and pair again if connectivity has been lost.',
@@ -88,6 +101,10 @@ export function adminErrorSummary(message: string) {
     HOST_CAPACITY_EXCEEDED: 'The host has no visitor place available yet.',
     HOST_RESERVATION_CAPACITY_EXCEEDED: 'The host has no reservation available yet.',
     HOST_SOURCE_QUOTA_EXCEEDED: 'This source town has reached the host visitor quota.',
+    RESIDENT_VISITS_DENIED: 'This host does not allow new visits from this resident.',
+    INVALID_RESIDENT_GLOBAL_ID: 'Enter the exact resident global ID in town-id/agent:resident-id form.',
+    RESIDENT_POLICY_REVIEW_DETAILS_REQUIRED: 'Enter an operator label and a private review reason.',
+    RESIDENT_POLICY_CAPACITY_EXCEEDED: 'The resident restriction list is full. Remove an existing restriction first.',
     HOST_RESOURCE_DEGRADED: 'The host has paused new admission while its resources recover.',
     ADMIN_UNAUTHORIZED: "Administrator access was rejected. Check this deployment's admin token.",
     DRAIN_TARGET_WORK_BEFORE_RESIDENT_RESTORE:
@@ -132,7 +149,8 @@ export function adminErrorSummary(message: string) {
       'This backup exceeds the 500-record single-file limit. Use chunked archives for the full town.',
   };
   const code = Object.keys(explanations).find((code) => message.includes(code));
-  return code ? explanations[code] : message;
+  const http = message.match(/\bFEDERATION_HTTP_(\d{3})\b/);
+  return code ? explanations[code] : http ? `The remote HTTPS service returned HTTP ${http[1]}.` : message;
 }
 
 export async function readBackupFile(file: Pick<File, 'size' | 'text'>): Promise<unknown> {
@@ -141,4 +159,21 @@ export async function readBackupFile(file: Pick<File, 'size' | 'text'>): Promise
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
     throw new Error('Choose an exported AI Town JSON object.');
   return parsed;
+}
+
+
+export function safeReturnSummary(condition: string) {
+  const explanations: Record<string, string> = {
+    SIGNED_CLEANUP: 'Host signed cleanup is confirmed; home resumption is authorized.',
+    CLOCK_UNCERTAIN: 'Clock safety is locked. Only signed host cleanup can authorize return; waiting longer cannot unlock it.',
+    LEASE_AND_MARGIN_EXPIRED: 'The last issued lease and this trip’s safety margin have expired; home resumption is authorized.',
+    WAITING_FOR_LEASE_AND_MARGIN: 'Waiting for signed host cleanup or the last issued lease plus this trip’s safety margin.',
+  };
+  return explanations[condition] ?? condition;
+}
+
+export function eventProgressSummary(durable: number, acked: number, role: string) {
+  return role === 'host'
+    ? `Host history committed through ${durable}; home acknowledged through ${acked}. ${Math.max(0, durable - acked)} event page(s) await acknowledgment.`
+    : `Home history committed through ${durable}; acknowledgment issued through ${acked}. Unreceived host events cannot be reconstructed.`;
 }

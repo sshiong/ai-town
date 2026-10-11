@@ -467,3 +467,23 @@ test('lost old private keys require two administrators independent review and a 
     packet: await probePacket(s, (await local(s.towns.a))!.privateKeyEncrypted),
   });
 });
+
+test('successor-key prepare and commit use the trusted backup without requiring an obsolete-key transport probe', async () => {
+  const s = await setup();
+  const before = (await local(s.towns.a))!;
+  await s.towns.a.run(async ctx => {
+    const p = (await ctx.db.query('federationPeers').first())!;
+    await ctx.db.patch(p._id, { endpointCandidates: [{ url: p.endpoint, priority: 10 }, { url: 'https://b-backup.example/federation/v1', priority: 20 }] });
+  });
+  const backupOperations: string[] = [];
+  globalThis.fetch = (async (url: any, init: any) => {
+    if (String(url).startsWith('https://b.example/')) throw new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } });
+    if (String(url).startsWith('https://b-backup.example/')) backupOperations.push(JSON.parse(init.body).packet.body.phase);
+    return s.normalFetch(String(url).replace('b-backup.example', 'b.example'), init);
+  }) as typeof fetch;
+  await start(s.towns.a);
+  const after = (await local(s.towns.a))!;
+  expect(after.publicKey).not.toBe(before.publicKey);
+  expect((await remote(s.towns.b, 'a'))!.publicKey).toBe(after.publicKey);
+  expect(backupOperations).toEqual(['PREPARE', 'COMMIT']);
+});

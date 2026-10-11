@@ -61,6 +61,7 @@ export const configTables = [
   'modelSettings',
   'storagePolicies',
   'federationResourcePolicy',
+  'federationResidentPolicy',
   'federationIdentity',
   'federationPeers',
 ] as const;
@@ -83,6 +84,7 @@ export const historyTables = [
   'visitLedger',
   'federationActionFacts',
   'federationEventFacts',
+  'federationTravelAudit',
 ] as const;
 export const selectiveTables = [
   ...configTables,
@@ -246,7 +248,7 @@ export function rowOwner(row: BackupRow, s: Selection): Owner | undefined {
 export function eventTime(table: string, row: BackupRow) {
   return table === 'memories' && row.data?.type === 'travel'
     ? row.data.occurredAt
-    : (row.occurredAt ??
+    : (row.at ?? row.occurredAt ??
         row.receivedAt ??
         row.endedAt ??
         row.ended ??

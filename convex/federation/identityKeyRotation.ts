@@ -13,7 +13,7 @@ import {
 import { Doc } from '../_generated/dataModel';
 import { identity, peer } from './store';
 import { assertNoIdentityConflict } from './identityConflict';
-import { directRequest, readRequest } from './direct';
+import { directControlRequest, endpointContextKey, readRequest } from './direct';
 import { actionRef, mutationRef, queryRef } from './refs';
 import {
   createIdentityKeys,
@@ -392,6 +392,7 @@ export const claimDelivery = internalMutation({
       packet,
       peerPublicKey: remote.publicKey,
       credentialEncrypted: remote.credentialEncrypted,
+      local, remote,
     };
   },
 });
@@ -406,14 +407,15 @@ export const deliver = internalAction({
       );
       if (!prepared) return;
       packetDigest = await digest(prepared.packet.body);
-      const response = await directRequest(prepared.endpoint, '/peers/identity-key', {
+      const response = (await directControlRequest(ctx, prepared.local, prepared.remote, '/peers/identity-key', {
         operation: 'offer',
         packet: prepared.packet,
-      });
+      })).value;
       await ctx.runMutation(mutationRef('identityKeyRotation/acceptAck'), {
         ...args,
         response,
         packetDigest,
+        endpointContextKey: endpointContextKey(prepared.local, prepared.remote),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'IDENTITY_KEY_DELIVERY_FAILED';
@@ -431,6 +433,7 @@ export const acceptAck = internalMutation({
     peerTownId: v.string(),
     packetDigest: v.string(),
     response: v.any(),
+    endpointContextKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const row = await rotationFor(ctx, args.rotationId),
@@ -444,6 +447,7 @@ export const acceptAck = internalMutation({
     )
       throw new Error('IDENTITY_KEY_ROTATION_FENCED');
     const { local, remote } = await activePeer(ctx, args.peerTownId);
+    if (args.endpointContextKey !== undefined && endpointContextKey(local, remote) !== args.endpointContextKey) throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
     assertPeerSnapshot(exchange, remote);
     const b = args.response?.body,
       request = exchange.packet.body;
@@ -659,7 +663,7 @@ export const stageInbound = internalMutation({
     };
     if (old) await ctx.db.patch(old._id, fields);
     else await ctx.db.insert('federationIdentityKeyExchanges', fields);
-    return { endpoint: remote.endpoint, challenge };
+    return { endpoint: remote.endpoint, challenge, local, remote };
   },
 });
 export const receiveOffer = internalAction({
@@ -667,14 +671,15 @@ export const receiveOffer = internalAction({
   handler: async (ctx, args) => {
     const staged = await ctx.runMutation(mutationRef('identityKeyRotation/stageInbound'), args);
     if (staged.response) return staged.response;
-    const proof = await directRequest(staged.endpoint, '/peers/identity-key', {
+    const proof = (await directControlRequest(ctx, staged.local, staged.remote, '/peers/identity-key', {
       operation: 'challenge',
       packet: staged.challenge,
-    });
+    })).value;
     return ctx.runMutation(mutationRef('identityKeyRotation/finishInbound'), {
       ...args,
       challenge: staged.challenge,
       proof,
+      endpointContextKey: endpointContextKey(staged.local, staged.remote),
     });
   },
 });
@@ -736,11 +741,12 @@ export const respondChallenge = internalAction({
     ctx.runMutation(mutationRef('identityKeyRotation/challengeProof'), args),
 });
 export const finishInbound = internalMutation({
-  args: { packet: v.any(), challenge: v.any(), proof: v.any() },
+  args: { packet: v.any(), challenge: v.any(), proof: v.any(), endpointContextKey: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const b = args.packet?.body,
       c = await validateKeyCertificate(b?.certificate),
       { local, remote } = await activePeer(ctx, b.fromTownId);
+    if (args.endpointContextKey !== undefined && endpointContextKey(local, remote) !== args.endpointContextKey) throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
     validateControl(b, local, remote);
     const row = await exchangeFor(ctx, remote.townId, 'INBOUND', c.rotationId);
     if (
@@ -1004,26 +1010,28 @@ export const reviewPeerIdentity = action({
       local.privateKeyEncrypted,
       remote.credentialEncrypted,
     );
-    const proof = await directRequest(remote.endpoint, '/peers/identity-key', {
+    const proof = (await directControlRequest(ctx, local, remote, '/peers/identity-key', {
       operation: 'review-challenge',
       packet: challenge,
-    });
+    })).value;
     const { adminToken: _admin, ...fields } = args;
     return ctx.runMutation(mutationRef('identityKeyRotation/commitReview'), {
       ...fields,
       challenge,
       proof,
       previousPublicKey: remote.publicKey,
+      endpointContextKey: endpointContextKey(local, remote),
     });
   },
 });
 export const commitReview = internalMutation({
-  args: { ...reviewArgs, challenge: v.any(), proof: v.any(), previousPublicKey: v.string() },
+  args: { ...reviewArgs, challenge: v.any(), proof: v.any(), previousPublicKey: v.string(), endpointContextKey: v.optional(v.string()) },
   handler: async (ctx, args) => {
     validateDetails(args.operator, args.reason);
     await assertNoIdentityConflict(ctx);
     const local = await identity(ctx),
       remote = await peer(ctx, args.peerTownId);
+    if (local && remote && args.endpointContextKey !== undefined && endpointContextKey(local, remote) !== args.endpointContextKey) throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
     if (
       !local ||
       !remote ||

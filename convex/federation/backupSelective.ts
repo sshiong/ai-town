@@ -308,7 +308,7 @@ async function primary(db: DatabaseReader, table: string, row: BackupRow, s: Sel
     return s.owners.some(
       (o) => o.worldId === row.worldId && [row.player1, row.player2].includes(o.playerId),
     );
-  if (['federationActionFacts', 'federationEventFacts'].includes(table)) {
+  if (['federationActionFacts', 'federationEventFacts', 'federationTravelAudit'].includes(table)) {
     const visit = await db
       .query('visitLedger')
       .withIndex('visitId', (q) => q.eq('visitId', row.visitId))
@@ -355,7 +355,7 @@ async function envelope(
     if (transcript) references.push({ id: transcript._id, table: 'homeTravelTranscripts' });
   }
   let context: Awaited<ReturnType<typeof conversation>> = null;
-  if (['federationActionFacts', 'federationEventFacts'].includes(table)) {
+  if (['federationActionFacts', 'federationEventFacts', 'federationTravelAudit'].includes(table)) {
     const visit = await db
       .query('visitLedger')
       .withIndex('visitId', (q) => q.eq('visitId', row.visitId))

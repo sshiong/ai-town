@@ -1,3 +1,4 @@
+import { observeClock, readClock } from './timePolicy';
 import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
@@ -32,6 +33,7 @@ async function setup(role: 'home' | 'host', state: string) {
   process.env.FEDERATION_ADMIN_TOKEN = adminToken; process.env.FEDERATION_KEY_ENCRYPTION_KEY = randomSecret();
   const t = convexTest(schema, modules), keys = await createIdentityKeys(), credentialEncrypted = await sealSecret(randomSecret());
   const worldId = await t.run(async ctx => {
+    await ctx.db.insert('federationClock', { observedAt: Date.now(), uncertain: false });
     const player = { id: 'p:0' as any, lastInput: Date.now(), position: { x: 2, y: 2 }, facing: { dx: 1, dy: 0 }, speed: 0 };
     const worldId = await ctx.db.insert('worlds', { nextId: 10, players: role === 'home' ? [player] : [], agents: role === 'home' ? [{ id: 'a:1' as any, playerId: 'p:0' as any }] : [], conversations: [] });
     const engineId = await ctx.db.insert('engines', { running: true, generationNumber: 0 });
@@ -56,13 +58,18 @@ async function setup(role: 'home' | 'host', state: string) {
   return { t, worldId };
 }
 async function engineStep(t: ReturnType<typeof convexTest<typeof schema.tables>>, worldId: Id<'worlds'>, maxInputs = 100, tick = false) {
+  const currentEngine = await t.run(async ctx => {
+    const status = (await ctx.db.query('worldStatus').withIndex('worldId', q => q.eq('worldId', worldId)).unique())!;
+    return (await ctx.db.get(status.engineId))!;
+  });
+  const checkedInputs = await t.query(makeFunctionReference<'query'>('engine/abstractGame:loadInputs'), { engineId: currentEngine._id, processedInputNumber: currentEngine.processedInputNumber, max: maxInputs }) as any[];
   await t.run(async ctx => {
     const status = (await ctx.db.query('worldStatus').withIndex('worldId', q => q.eq('worldId', worldId)).unique())!;
     const engine = (await ctx.db.get(status.engineId))!;
     const loaded = await Game.load(ctx.db, worldId, engine.generationNumber);
     const game = new Game(loaded.engine, worldId, loaded.gameState);
     game.beginStep(Date.now());
-    const pending = await ctx.db.query('inputs').withIndex('byInputNumber', q => q.eq('engineId', engine._id).gt('number', engine.processedInputNumber ?? -1)).order('asc').take(maxInputs);
+    const pending = checkedInputs;
     const completedInputs = pending.map(input => {
       try { return { inputId: input._id, returnValue: { kind: 'ok' as const, value: game.handleInput(Date.now(), input.name as any, input.args) } }; }
       catch (error) { return { inputId: input._id, returnValue: { kind: 'error' as const, message: error instanceof Error ? error.message : String(error) } }; }
@@ -201,7 +208,7 @@ test('a queued Host create followed by cancellation is removed before cleanup co
   await t.mutation(mutationRef('ledger/returnVisit'), { adminToken, visitId: 'visit-1' });
   await t.mutation(mutationRef('runtime/removeHostPresence'), { visitId: 'visit-1' });
   await engineStep(t, worldId, 1);
-  expect((await t.run(ctx => ctx.db.get(worldId)))?.players).toHaveLength(1);
+  expect((await t.run(ctx => ctx.db.get(worldId)))?.players).toHaveLength(0);
   expect((await t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('REMOVING');
   expect((await t.run(ctx => ctx.db.query('federationOutbox').collect())).some(o => o.envelope.type === 'VISIT_CLEANED')).toBe(false);
   await engineStep(t, worldId, 1);
@@ -223,7 +230,8 @@ test('wall-clock lease expiry removes Host presence before physics and rejects q
   await engineStep(t, worldId, 100, true);
   expect((await t.run(ctx => ctx.db.get(worldId)))?.players).toEqual([]);
   const actionInput = (await t.run(ctx => ctx.db.query('inputs').collect())).find(i => i.name === 'federationAction');
-  expect(actionInput?.returnValue).toEqual({ kind: 'error', message: 'LEASE_EXPIRED' });
+  expect(actionInput?.returnValue).toEqual({ kind: 'error', message: 'CLOCK_UNCERTAIN' });
+  expect((await t.run(ctx => ctx.db.query('federationClock').unique()))?.uncertain).toBe(true);
   await t.mutation(mutationRef('ledger/reconcile'), {}); await t.mutation(mutationRef('runtime/removeHostPresence'), { visitId: 'visit-1' }); await engineStep(t, worldId);
   expect((await t.run(ctx => ctx.db.query('visitLedger').unique()))?.cleanupConfirmed).toBe(true);
 });
@@ -450,4 +458,119 @@ test('superseded return cannot close a ledger while its old lease safety margin 
   await t.mutation(mutationRef('runtime/resumeHome'), { visitId: 'visit-1' });
   expect((await t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('RETURN_PENDING');
   expect(await t.run(ctx => ctx.db.query('inputs').collect())).toEqual([]);
+});
+
+
+test('clock lock rejects queued Host creation and removes existing proxy before physics', async () => {
+  const { t, worldId } = await setup('host', 'CREATING');
+  await t.run(async ctx => { const clock = (await ctx.db.query('federationClock').unique())!; await ctx.db.patch(clock._id, { observedAt: Date.now(), uncertain: true, reason: 'CLOCK_MOVED_BACKWARDS' }); });
+  await expect(t.mutation(mutationRef('runtime/createHostPresence'), { visitId: 'visit-1' })).rejects.toThrow('CLOCK_UNCERTAIN');
+  await t.run(async ctx => {
+    const world = (await ctx.db.get(worldId))!;
+    await ctx.db.patch(worldId, { players: [{ id: 'p:2' as any, lastInput: Date.now(), position: { x: 2, y: 2 }, facing: { dx: 1, dy: 0 }, speed: 4,
+      remoteVisitor: { visitId: 'visit-1', agentGlobalId: 'home/agent:alice', homeTownId: 'home', homeTownName: 'Home', agentAuthorityEpoch: 2, visitLeaseVersion: 1, leaseExpiry: Date.now() + 300000, lastObservationAt: 0 } }] });
+    const ledger = (await ctx.db.query('visitLedger').unique())!;
+    await ctx.db.patch(ledger._id, { state: 'ACTIVE', hostPlayerId: 'p:2' });
+  });
+  await engineStep(t, worldId, 100, true);
+  expect((await t.run(ctx => ctx.db.get(worldId)))?.players).toHaveLength(0);
+  expect((await t.run(ctx => ctx.db.query('federationClock').unique()))?.uncertain).toBe(true);
+});
+
+test('final saveDiff gate rolls back Host side effects if clock locks after loading the action', async () => {
+  const { t, worldId } = await setup('host', 'CREATING');
+  await t.mutation(mutationRef('runtime/createHostPresence'), { visitId: 'visit-1' });
+  const diff = await t.run(async ctx => {
+    const engine = (await ctx.db.query('engines').unique())!;
+    const loaded = await Game.load(ctx.db, worldId, engine.generationNumber);
+    const game = new Game(loaded.engine, worldId, loaded.gameState);
+    const input = (await ctx.db.query('inputs').unique())!;
+    game.handleInput(Date.now(), input.name as any, input.args);
+    return game.takeDiff();
+  });
+  await t.run(async ctx => { const clock = (await ctx.db.query('federationClock').unique())!; await ctx.db.patch(clock._id, { observedAt: Date.now(), uncertain: true, reason: 'CLOCK_OBSERVATION_GAP' }); });
+  await expect(t.run(ctx => Game.saveDiff(ctx, worldId, diff))).rejects.toThrow('CLOCK_UNCERTAIN');
+  expect((await t.run(ctx => ctx.db.get(worldId)))?.players).toHaveLength(0);
+  expect(await t.run(ctx => ctx.db.query('messages').collect())).toHaveLength(0);
+});
+
+test('clock lock prevents wall-clock-only Home resumption but permits signed cleanup', async () => {
+  const { t, worldId } = await setup('home', 'RETURN_PENDING');
+  await t.run(async ctx => {
+    const clock = (await ctx.db.query('federationClock').unique())!;
+    await ctx.db.patch(clock._id, { observedAt: Date.now(), uncertain: true, reason: 'CLOCK_MOVED_BACKWARDS' });
+    const ledger = (await ctx.db.query('visitLedger').unique())!, world = (await ctx.db.get(worldId))!;
+    await ctx.db.patch(ledger._id, { leaseExpiry: Date.now() - 1000000 });
+    await ctx.db.patch(worldId, { players: [], agents: [{ ...world.agents[0], travelVisitId: 'visit-1', suspendedPlayer: world.players[0] }] });
+  });
+  await expect(t.mutation(mutationRef('runtime/resumeHome'), { visitId: 'visit-1' })).rejects.toThrow('HOST_LEASE_STILL_VALID');
+  await t.run(async ctx => { const ledger = (await ctx.db.query('visitLedger').unique())!; await ctx.db.patch(ledger._id, { cleanupConfirmed: true }); });
+  await t.mutation(mutationRef('runtime/resumeHome'), { visitId: 'visit-1' });
+  await engineStep(t, worldId);
+  expect((await t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('COMPLETED');
+  expect((await t.run(ctx => ctx.db.get(worldId)))?.players).toHaveLength(1);
+  expect((await t.run(ctx => ctx.db.query('federationClock').unique()))?.uncertain).toBe(true);
+});
+
+test('new trips persist conservative return boundaries that configuration changes and renewal cannot shrink', async () => {
+  const { t, worldId } = await setup('home', 'COMPLETED');
+  await t.run(async ctx => {
+    const clock = (await ctx.db.query('federationClock').unique())!;
+    await ctx.db.delete(clock._id);
+    const runtime = (await ctx.db.query('federationAgentRuntimes').unique())!;
+    await ctx.db.patch(runtime._id, { state: 'HOME_ACTIVE', visitId: undefined });
+    const profileId = await ctx.db.insert('chatProfiles', { name: 'Travel fixture', provider: 'custom', url: 'https://model.example/v1', model: 'fixture', stopWords: [], createdAt: Date.now() });
+    await ctx.db.insert('residentModelBindings', { worldId, playerId: 'p:0' as any, agentGlobalId: runtime.agentGlobalId, chatProfileId: profileId, createdAt: Date.now(), updatedAt: Date.now() });
+    const local = (await ctx.db.query('federationIdentity').unique())!;
+    await ctx.db.patch(local._id, { timePolicy: { reservationMs: 30000, leaseMs: 90000, clockSkewMs: 30000, probeFreshnessMs: 120000, probeIntervalMs: 45000, gapTimeoutMs: 30000, returnMarginMs: 60000, clockObservationGapMs: 120000, requestTimeoutMs: 8000 } });
+    await ctx.db.insert('transportSessions', { peerTownId: 'host', transportType: 'DIRECT_HTTPS', channelState: 'TRANSPORT_READY', localDeploymentEpoch: 1, verifiedPeerDeploymentEpoch: 1, inboundVerifiedAt: Date.now(), outboundVerifiedAt: Date.now() });
+  });
+  const startedAt = Date.now();
+  const result = await t.mutation(mutationRef('ledger/startVisit'), { adminToken, peerTownId: 'host', worldId, homePlayerId: 'p:0' }) as { visitId: string };
+  const ledger = await t.run(ctx => ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', result.visitId)).unique());
+  expect(await t.run(ctx => ctx.db.query('federationClock').unique())).toMatchObject({ observedAt: startedAt, uncertain: false });
+  expect(ledger).toMatchObject({ leaseExpiry: startedAt + 90000, leaseSafetyMs: 300000, tripDeadline: startedAt + 300000 });
+  await t.mutation(mutationRef('admin/configureTimePolicy'), { adminToken, policy: { reservationMs: 30000, leaseMs: 90000, clockSkewMs: 30000, probeFreshnessMs: 120000, probeIntervalMs: 45000, gapTimeoutMs: 30000, returnMarginMs: 60000, clockObservationGapMs: 30000, requestTimeoutMs: 8000 } });
+  await t.run(ctx => ctx.db.patch(ledger!._id, { state: 'ACTIVE' }));
+  jest.setSystemTime(startedAt + 20000);
+  await t.mutation(mutationRef('ledger/renewVisit'), { adminToken, visitId: result.visitId });
+  const renewed = await t.run(ctx => ctx.db.get(ledger!._id));
+  expect(renewed).toMatchObject({ leaseExpiry: startedAt + 110000, leaseSafetyMs: 300000, tripDeadline: startedAt + 300000, visitLeaseVersion: 2 });
+  const longerGap = { reservationMs: 30000, leaseMs: 90000, clockSkewMs: 30000, probeFreshnessMs: 120000, probeIntervalMs: 45000, gapTimeoutMs: 30000, returnMarginMs: 60000, clockObservationGapMs: 600000, requestTimeoutMs: 8000 };
+  await expect(t.mutation(mutationRef('admin/configureTimePolicy'), { adminToken, policy: longerGap })).rejects.toThrow('END_ALL_VISITS_BEFORE_INCREASING_CLOCK_GAP');
+  expect((await t.run(ctx => ctx.db.query('federationIdentity').unique()))?.timePolicy?.clockObservationGapMs).toBe(30000);
+  expect((await t.run(ctx => ctx.db.get(ledger!._id)))?.leaseSafetyMs).toBe(300000);
+  await t.run(ctx => ctx.db.patch(ledger!._id, { state: 'COMPLETED' }));
+  await t.mutation(mutationRef('admin/configureTimePolicy'), { adminToken, policy: longerGap });
+  expect((await t.run(ctx => ctx.db.query('federationIdentity').unique()))?.timePolicy?.clockObservationGapMs).toBe(600000);
+});
+
+
+test('an unreachable Host drains after explicit UTC return confirmation while new authority remains locked', async () => {
+  const { t, worldId } = await setup('home', 'RETURN_PENDING');
+  const startedAt = Date.now();
+  await t.run(async ctx => {
+    await observeClock(ctx, await ctx.db.query('federationIdentity').unique());
+    const ledger = (await ctx.db.query('visitLedger').unique())!, world = (await ctx.db.get(worldId))!;
+    await ctx.db.patch(ledger._id, { leaseExpiry: startedAt + 1000, leaseSafetyMs: 120000 });
+    await ctx.db.patch(worldId, { players: [], agents: [{ ...world.agents[0], travelVisitId: 'visit-1', suspendedPlayer: world.players[0] }] });
+  });
+  jest.setSystemTime(startedAt + 120001);
+  await t.run(ctx => observeClock(ctx, null));
+  await expect(t.mutation(mutationRef('runtime/resumeHome'), { visitId: 'visit-1' })).rejects.toThrow('HOST_LEASE_STILL_VALID');
+  await t.mutation(mutationRef('admin/confirmReturnClock'), { adminToken, synchronizedUtcConfirmed: true });
+  expect(await t.run(ctx => readClock(ctx.db))).toMatchObject({ healthy: false, returnClockHealthy: true });
+  await expect(t.mutation(mutationRef('ledger/startVisit'), { adminToken, peerTownId: 'host', worldId, homePlayerId: 'p:0' })).rejects.toThrow('CLOCK_UNCERTAIN');
+  await expect(t.mutation(mutationRef('admin/confirmClockRecovery'), { adminToken, synchronizedUtcConfirmed: true })).rejects.toThrow('END_ALL_VISITS_BEFORE_CLOCK_RECOVERY');
+  await expect(t.mutation(mutationRef('runtime/resumeHome'), { visitId: 'visit-1' })).rejects.toThrow('HOST_LEASE_STILL_VALID');
+  jest.setSystemTime(startedAt + 121000);
+  await t.mutation(mutationRef('runtime/resumeHome'), { visitId: 'visit-1' });
+  await engineStep(t, worldId);
+  const ledger = await t.run(ctx => ctx.db.query('visitLedger').unique());
+  expect(ledger).toMatchObject({ state: 'COMPLETED', leaseSafetyMs: 120000 });
+  expect(ledger?.cleanupConfirmed).not.toBe(true);
+  expect((await t.run(ctx => ctx.db.get(worldId)))?.players).toHaveLength(1);
+  expect((await t.run(ctx => readClock(ctx.db))).healthy).toBe(false);
+  await t.mutation(mutationRef('admin/confirmClockRecovery'), { adminToken, synchronizedUtcConfirmed: true });
+  expect((await t.run(ctx => readClock(ctx.db))).healthy).toBe(true);
 });

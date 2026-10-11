@@ -2,6 +2,7 @@ import { MutationCtx } from '../_generated/server';
 import { FederationMessage, PROTOCOL, streamKey } from './protocol';
 import { identity, peer, visit } from './store';
 import { actionRef } from './refs';
+import { assertClock } from './timePolicy';
 export type EnqueueArgs = {
   peerTownId: string; type: string; payload: Record<string, any>; visitId?: string; streamId?: string;
   agentGlobalId?: string; agentAuthorityEpoch?: number; visitLeaseVersion?: number;
@@ -9,6 +10,7 @@ export type EnqueueArgs = {
 export async function enqueueMessage(ctx: MutationCtx, args: EnqueueArgs): Promise<string> {
   const local = await identity(ctx); const remote = await peer(ctx, args.peerTownId);
   if (!local || !remote || remote.trustState !== 'TRUSTED' && !['VISIT_RETURN', 'VISIT_CLEANED', 'SESSION_RESYNC', 'STREAM_NACK'].includes(args.type)) throw new Error('PEER_NOT_TRUSTED');
+  if (['VISIT_RESERVE', 'VISIT_RESERVED', 'VISIT_CONFIRM', 'VISIT_RENEW', 'OBSERVATION', 'DECISION'].includes(args.type)) await assertClock(ctx.db, local);
   const queued = await ctx.db.query('federationOutbox').withIndex('retry', (q) => q.eq('ackedAt', undefined).eq('failedAt', undefined)).take(1001);
   const critical = ['VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_REJECT', 'SESSION_RESYNC', 'STREAM_NACK'].includes(args.type);
   if (local.mode !== 'ACTIVE' && !critical) throw new Error('DEPLOYMENT_NOT_ACTIVE');
@@ -38,6 +40,7 @@ export async function enqueueMessage(ctx: MutationCtx, args: EnqueueArgs): Promi
     if (cursor) await ctx.db.patch(cursor._id, { nextOutgoingSequence: envelope.sequence + 1 });
     else await ctx.db.insert('messageStreamCursors', { streamKey: key, peerTownId: remote.townId, visitIdOrPairSessionId: envelope.visitId, streamId: envelope.streamId, senderTownId: local.townId, senderDeploymentEpoch: local.deploymentEpoch, direction: 'outbound', nextOutgoingSequence: 2, nextExpectedSequence: 1, lastAckedSequence: 0, resyncState: 'OK' });
   }
+  if (ledger && args.type === 'CONVERSATION_ENDED') await ctx.db.patch(ledger._id, { lastDurableEventSeq: envelope.sequence });
   await ctx.db.insert('federationOutbox', { messageId, toTownId: remote.townId, envelope, attempts: 0, nextRetryAt: now });
   await ctx.scheduler.runAfter(0, actionRef('transport/deliver'), { messageId });
   return messageId;

@@ -383,6 +383,7 @@ test('manual recovery uses a fresh authenticated probe and refuses a replayed AC
             messageId: request.messageId,
             probeId: request.payload.probeId,
             endpoint: 'https://a-old.example/federation/v1',
+            endpointCandidates: [{ url: 'https://a-old.example/federation/v1', priority: 0 }],
             endpointSequence: 0,
           },
           s.aKeys.privateKeyEncrypted,
@@ -522,4 +523,48 @@ test('a forged acceptance response cannot finish delivery even after the peer ve
     state: 'PENDING',
     lastError: 'INVALID_ENDPOINT_UPDATE_ACK',
   });
+});
+
+test('signed candidate updates verify a backup when primary is down and preserve two-way readiness gates', async () => {
+  const s = await setup();
+  const primary = 'https://a-new.example/federation/v1', backup = 'https://a-backup.example/federation/v1';
+  const routeFetch = globalThis.fetch;
+  globalThis.fetch = jest.fn<typeof fetch>().mockImplementation(async (url, init) => {
+    if (String(url).startsWith(primary)) throw new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } });
+    return routeFetch(url, init);
+  });
+  await s.a.mutation(mutationRef('admin/updateLocalEndpoint'), {
+    adminToken, endpoint: primary, endpointCandidates: [{ url: primary, priority: 10 }, { url: backup, priority: 20 }], ...details,
+  });
+  const row = await outbound(s);
+  await s.a.action(actionRef('endpoints/deliver'), { peerTownId: 'b', updateId: row.updateId });
+  const remote = await s.b.run(ctx => ctx.db.query('federationPeers').first());
+  expect(remote?.endpointCandidates).toEqual([{ url: primary, priority: 10 }, { url: backup, priority: 20 }]);
+  expect(remote?.endpointSequence).toBe(1);
+  const generation = remote!.endpointGeneration;
+  expect((await s.b.action(actionRef('transport/probeInternal'), { peerTownId: 'a' })).channelState).toBe('TRANSPORT_TESTING');
+  let connection = await s.b.run(ctx => ctx.db.query('transportSessions').first());
+  expect(connection?.outboundEndpoint).toBe(backup);
+  expect(connection?.lastError).toBe('NO_BIDIRECTIONAL_PATH');
+  await s.a.action(actionRef('transport/probeInternal'), { peerTownId: 'b' });
+  connection = await s.b.run(ctx => ctx.db.query('transportSessions').first());
+  expect(connection?.channelState).toBe('TRANSPORT_READY');
+  expect((await s.b.run(ctx => ctx.db.query('federationPeers').first()))?.endpointGeneration).toBe(generation);
+});
+
+test('a probe response cannot revive readiness after same-primary candidate generation changed', async () => {
+  const s = await setup();
+  const routeFetch = globalThis.fetch;
+  globalThis.fetch = jest.fn<typeof fetch>().mockImplementation(async (url, init) => {
+    const response = await routeFetch(url, init);
+    if (String(url).endsWith('/probe')) await s.a.run(async ctx => {
+      const remote = (await ctx.db.query('federationPeers').first())!;
+      await ctx.db.patch(remote._id, { endpointGeneration: 1 });
+    });
+    return response;
+  });
+  await s.a.action(actionRef('transport/probeInternal'), { peerTownId: 'b' });
+  const connection = await s.a.run(ctx => ctx.db.query('transportSessions').first());
+  // The old proof is ignored, including its error path; no new outbound proof was committed.
+  expect(connection?.peerEndpointGeneration).toBeUndefined();
 });

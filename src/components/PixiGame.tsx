@@ -1,5 +1,8 @@
 import * as PIXI from 'pixi.js';
 import { useApp } from '@pixi/react';
+import { TravelPixelEffect, TRAVEL_EFFECT_DURATION } from './TravelPixelEffect';
+import { travelTransitions, type TravelEffect, type TravelPresence } from './travelEffects';
+import { useReducedMotion } from '../hooks/useReducedMotion';
 import { Player, SelectElement } from './Player.tsx';
 import { useEffect, useRef, useState } from 'react';
 import { PixiStaticMap } from './PixiStaticMap.tsx';
@@ -23,6 +26,7 @@ export const PixiGame = (props: {
   width: number;
   height: number;
   setSelectedElement: SelectElement;
+  travelingPlayerIds?: string[];
 }) => {
   // PIXI setup.
   const pixiApp = useApp();
@@ -81,6 +85,23 @@ export const PixiGame = (props: {
   };
   const { width, height, tileDim } = props.game.worldMap;
   const players = [...props.game.world.players.values()];
+  const reducedMotion = useReducedMotion();
+  const previous = useRef<{ worldId: string; players: TravelPresence[]; away: Set<string> }>();
+  const [travelEffects, setTravelEffects] = useState<TravelEffect[]>([]);
+  useEffect(() => {
+    const current = [...props.game.world.players.values()].map(player => ({ id: player.id, x: player.position.x, y: player.position.y, visitId: player.remoteVisitor?.visitId }));
+    const away = new Set(props.travelingPlayerIds ?? []);
+    const before = previous.current;
+    previous.current = { worldId: props.worldId, players: current, away };
+    if (!before || before.worldId !== props.worldId) { setTravelEffects([]); return; }
+    const effects = travelTransitions(before.players, current, away, before.away, Date.now());
+    if (effects.length) setTravelEffects(existing => [...existing.filter(effect => Date.now() - effect.startedAt < TRAVEL_EFFECT_DURATION), ...effects].slice(-20));
+  }, [props.game.world, props.worldId, props.travelingPlayerIds]);
+  useEffect(() => {
+    if (!travelEffects.length) return;
+    const timer = window.setTimeout(() => setTravelEffects(existing => existing.filter(effect => Date.now() - effect.startedAt < TRAVEL_EFFECT_DURATION)), TRAVEL_EFFECT_DURATION + 25);
+    return () => window.clearTimeout(timer);
+  }, [travelEffects]);
 
   // Zoom on the user’s avatar when it is created
   useEffect(() => {
@@ -114,6 +135,7 @@ export const PixiGame = (props: {
             <DebugPath key={`path-${p.id}`} player={p} tileDim={tileDim} />
           ),
       )}
+      {travelEffects.map(effect => <TravelPixelEffect key={effect.key} effect={effect} tileDim={tileDim} reducedMotion={reducedMotion} />)}
       {lastDestination && <PositionIndicator destination={lastDestination} tileDim={tileDim} />}
       {players.map((p) => (
         <Player

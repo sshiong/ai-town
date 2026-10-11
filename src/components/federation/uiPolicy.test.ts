@@ -1,5 +1,6 @@
 import {
   adminErrorSummary,
+  safeReturnSummary, eventProgressSummary,
   canResumeRestoredResident,
   canManageQueuedVisit,
   deadlineRemaining,
@@ -32,6 +33,11 @@ describe('federation UI operation gates', () => {
       'Pause the target',
     );
     expect(adminErrorSummary('provider unavailable')).toBe('provider unavailable');
+    expect(adminErrorSummary('Server Error: DNS_RESOLUTION_FAILED')).toContain('hostname could not be resolved');
+    expect(adminErrorSummary('Server Error: TLS_VERIFY_FAILED')).toContain('certificate could not be verified');
+    expect(adminErrorSummary('Server Error: CONNECTION_TIMEOUT')).toContain('timed out');
+    expect(adminErrorSummary('Server Error: FEDERATION_HTTP_503')).toContain('HTTP 503');
+    expect(adminErrorSummary('NO_BIDIRECTIONAL_PATH')).toContain('reverse route has not been verified');
   });
   test.each(['TRANSPORT_TESTING', 'PAIRED_BUT_NOT_REACHABLE', 'TRANSPORT_DEGRADED'])(
     'blocks travel to a trusted town with %s',
@@ -110,4 +116,12 @@ describe('federation UI operation gates', () => {
       readBackupFile({ size: 12, text: () => Promise.resolve('{"digest":"x"}') }),
     ).resolves.toEqual({ digest: 'x' });
   });
+});
+
+
+test('clock uncertainty and history progress have explicit safe-return wording', () => {
+  expect(safeReturnSummary('CLOCK_UNCERTAIN')).toContain('waiting longer cannot unlock');
+  expect(safeReturnSummary('SIGNED_CLEANUP')).toContain('signed cleanup');
+  expect(eventProgressSummary(71, 69, 'host')).toContain('2 event page(s)');
+  expect(eventProgressSummary(69, 69, 'home')).toContain('cannot be reconstructed');
 });

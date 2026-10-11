@@ -1,6 +1,7 @@
 import { internalQuery, MutationCtx, QueryCtx } from '../_generated/server';
 import { v } from 'convex/values';
 import { credentialForPeer } from './credentials';
+import { configuredTimePolicy, readClock, TimePolicy } from './timePolicy';
 export async function identity(ctx: QueryCtx | MutationCtx) {
   return await ctx.db.query('federationIdentity').unique();
 }
@@ -25,13 +26,14 @@ export async function session(ctx: QueryCtx | MutationCtx, townId: string) {
 export function ready(
   session: Awaited<ReturnType<typeof import('./store').session>>,
   now = Date.now(),
+  policy: TimePolicy = configuredTimePolicy(),
 ): boolean {
   return (
     !!session &&
     session.channelState === 'TRANSPORT_READY' &&
     !!session.outboundVerifiedAt &&
     !!session.inboundVerifiedAt &&
-    Math.min(session.outboundVerifiedAt, session.inboundVerifiedAt) > now - 120_000
+    Math.min(session.outboundVerifiedAt, session.inboundVerifiedAt) > now - policy.probeFreshnessMs
   );
 }
 export const context = internalQuery({
@@ -42,8 +44,9 @@ export const context = internalQuery({
   },
   handler: async (ctx, args) => {
     const remote = args.peerTownId ? await peer(ctx, args.peerTownId) : null;
+    const local = await identity(ctx);
     return {
-      identity: await identity(ctx),
+      identity: local, clock: await readClock(ctx.db, local),
       peer: remote,
       authCredentialEncrypted:
         remote && args.credentialId

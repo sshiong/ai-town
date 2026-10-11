@@ -274,8 +274,11 @@ test('archive maintenance lock prevents identity audits and normal world writes'
   await expect(t.action(exportRef, { adminToken, passphrase })).rejects.toThrow(
     'TOWN_BACKUP_MAINTENANCE_LOCKED',
   );
+  const before = await t.run(ctx => ctx.db.get(worldId));
   await expect(
     t.mutation(makeFunctionReference<'mutation'>('world:heartbeatWorld'), { worldId }),
-  ).rejects.toThrow('TOWN_BACKUP_MAINTENANCE_LOCKED');
+  ).resolves.toBeNull();
+  expect(await t.run(ctx => ctx.db.get(worldId))).toEqual(before);
+  expect(await t.run(ctx => ctx.db.query('backupMaintenanceLocks').collect())).toHaveLength(1);
   expect(await t.run((ctx) => ctx.db.query('identityRecoveryAudit').collect())).toHaveLength(0);
 });

@@ -59,6 +59,7 @@ import { WorldMap } from '../aiTown/worldMap';
 import { blockedWithPositions } from '../aiTown/movement';
 import { Point } from '../util/types';
 import { ACTION_TIMEOUT } from '../constants';
+import { MAX_DENIED_RESIDENTS } from './residentPolicySchema';
 
 type Job = Doc<'backupLargeJobs'>;
 type Row = Doc<'backupLargeRows'>;
@@ -98,6 +99,7 @@ const archivalTables = new Set([
   'visitLedger',
   'federationActionFacts',
   'federationEventFacts',
+  'federationTravelAudit',
   'autonomousTravelDecisions',
   'autonomousTravelPolicies',
 ]);
@@ -624,7 +626,7 @@ async function ownersFor(ctx: { db: DatabaseReader }, j: Job, r: Row): Promise<s
     return m.selection.owners
       .filter((o) => o.worldId === row.worldId && o.agentId === (row.agentId ?? row.id))
       .map((o) => o.agentGlobalId);
-  if (['federationActionFacts', 'federationEventFacts'].includes(r.table)) {
+  if (['federationActionFacts', 'federationEventFacts', 'federationTravelAudit'].includes(r.table)) {
     const visitRef = r.references.find((ref) => ref.table === 'visitLedger');
     const visit = visitRef && (await source(ctx, j, visitRef.id));
     return visit ? ownersFor(ctx, j, visit) : [];
@@ -1711,6 +1713,19 @@ async function applyConfiguration(ctx: MutationCtx, j: Job, r: Row) {
     row = data(r),
     fields = stripSystem(row),
     options = m.options;
+  if (r.table === 'federationResidentPolicy' && options.configuration.includes('federationResidentPolicy')) {
+    // Config-only imports do not move residents. Preserve exact identities and
+    // merge denials; unrelated existing restrictions are never removed.
+    const existing = await ctx.db.query('federationResidentPolicy')
+      .withIndex('agentGlobalId', q => q.eq('agentGlobalId', row.agentGlobalId)).unique();
+    if (existing) await ctx.db.patch(existing._id, { updatedAt: Math.max(Date.now(), existing.createdAt) });
+    else {
+      const denied = await ctx.db.query('federationResidentPolicy').take(MAX_DENIED_RESIDENTS);
+      if (denied.length >= MAX_DENIED_RESIDENTS) throw new Error('RESIDENT_POLICY_CAPACITY_EXCEEDED');
+      await insert(ctx, j, r.table, fields);
+    }
+    return;
+  }
   if (r.table === 'modelProviderQuotas' && options.configuration.includes('modelProviderQuotas')) {
     const existing = await ctx.db.query('modelProviderQuotas').withIndex('provider', q =>
       q.eq('kind', row.kind).eq('providerKey', row.providerKey)).unique();

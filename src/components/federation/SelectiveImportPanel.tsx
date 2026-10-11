@@ -71,6 +71,7 @@ const edgeKey = (edge: ExternalEdge) => JSON.stringify([edge.sourceId, edge.sour
 const configurationChoices: { value: Options['configuration'][number]; label: string }[] = [
   { value: 'storagePolicies', label: 'Storage policy' },
   { value: 'federationResourcePolicy', label: 'Reception and source quotas' },
+  { value: 'federationResidentPolicy', label: 'Merge denied resident IDs (keep exact identities)' },
   { value: 'visitorPolicy', label: 'Visitor limits' },
   { value: 'mainChatProfile', label: 'Main Chat Profile (future residents)' },
   { value: 'modelProviderQuotas', label: 'Provider daily request quotas (usage is not transferred)' },

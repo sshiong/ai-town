@@ -44,6 +44,7 @@ const measuredTables: Array<[TableNames, Category]> = [
   ['archivedConversations', 'history'],
   ['participatedTogether', 'history'],
   ['visitLedger', 'history'],
+  ['federationTravelAudit', 'history'],
   ['federationActionFacts', 'history'],
   ['federationEventFacts', 'history'],
   ['backupLargeChunks', 'history'],

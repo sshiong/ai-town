@@ -17,6 +17,7 @@ export const federationInputs = {
       leaseExpiry: v.number(),
     },
     handler: (game, now, args) => {
+      if (!game.federationClockHealthy) throw new Error('CLOCK_UNCERTAIN');
       const player = [...game.world.players.values()].find(
         (p) => p.remoteVisitor?.visitId === args.visitId,
       );
@@ -43,6 +44,7 @@ export const federationInputs = {
   federationSuspend: inputHandler({
     args: { agentId, visitId: v.string() },
     handler: (game, now, args) => {
+      if (!game.federationClockHealthy) throw new Error('CLOCK_UNCERTAIN');
       const agent = game.world.agents.get(parseGameId('agents', args.agentId));
       if (!agent) throw new Error('RESIDENT_NOT_FOUND');
       if (agent.travelVisitId) {
@@ -108,6 +110,7 @@ export const federationInputs = {
       description: v.string(),
     },
     handler: (game, now, args) => {
+      if (!game.federationClockHealthy) throw new Error('CLOCK_UNCERTAIN');
       if (args.visitor.leaseExpiry <= Math.max(now, Date.now())) throw new Error('LEASE_EXPIRED');
       const existing = [...game.world.players.values()].find(
         (p) => p.remoteVisitor?.visitId === args.visitor.visitId,
@@ -154,6 +157,7 @@ export const federationInputs = {
       ),
     },
     handler: (game, now, args) => {
+      if (!game.federationClockHealthy) throw new Error('CLOCK_UNCERTAIN');
       const player = game.world.players.get(parseGameId('players', args.playerId));
       const visitor = player?.remoteVisitor;
       if (!player || !visitor || visitor.visitId !== args.visitId)

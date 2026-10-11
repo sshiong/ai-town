@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import AutonomyPanel from './AutonomyPanel';
 import SocialHistoryPanel from './SocialHistoryPanel';
+import TravelAuditPanel from './TravelAuditPanel';
 import VisitorQueuePanel from './VisitorQueuePanel';
 import { useConvex, useQuery } from 'convex/react';
 import { makeFunctionReference, type FunctionArgs, type FunctionReturnType } from 'convex/server';
-import { adminErrorSummary, deadlineRemaining, isOpenVisit, isReadyDestination } from './uiPolicy';
+import { adminErrorSummary, deadlineRemaining, isOpenVisit, isReadyDestination, safeReturnSummary, eventProgressSummary } from './uiPolicy';
 import { api } from '../../../convex/_generated/api';
 import {
   AdminButton,
@@ -38,7 +39,7 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-  const destinations = status?.peers.filter((peer) => isReadyDestination(peer, now)) ?? [];
+  const destinations = status?.settings.clock.healthy ? status.peers.filter((peer) => isReadyDestination(peer, now)) : [];
   const available = residents?.filter((resident) => resident.state === 'HOME_ACTIVE') ?? [];
   const openVisits = status?.visits.filter((visit) => isOpenVisit(visit.state)) ?? [];
   return (
@@ -93,6 +94,46 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
               Register existing residents
             </AdminButton>
           )}
+          {!status.settings.clock.healthy && <p className="admin-warning" role="alert">
+            Clock safety locked: {status.settings.clock.reason}. New visits, renewal and host actions are paused.
+            Signed cleanup and committed history delivery remain available. Waiting longer cannot prove clock recovery.
+            {status.settings.clock.returnClockHealthy && <> Verified UTC allows saved lease deadlines to drain existing visits; new travel remains locked.</>}
+          </p>}
+          <details className="admin-disclosure">
+            <summary>Time policy &amp; clock recovery</summary>
+            <p className="admin-muted">Both towns must use synchronized UTC within 30 seconds. Observing this server’s wall clock cannot prove a continuous drift bound. Every new trip saves the larger of the configured margin or twice the observation gap plus 60 seconds, and its maximum deadline. Probes show connectivity; they never renew a lease.</p>
+            <form key={JSON.stringify(status.settings.timePolicy)} className="admin-form" onSubmit={event => {
+              event.preventDefault();
+              const fields = new FormData(event.currentTarget);
+              const policy = Object.fromEntries(Object.keys(status.settings.timePolicy).map(key => [key, Number(fields.get(key))])) as typeof status.settings.timePolicy;
+              void task.run('Saving time policy', () => convex.mutation(api.federation.admin.configureTimePolicy, { adminToken, policy }), 'Time policy saved. Existing trips retain their safety margin and deadline.');
+            }}>
+              {Object.entries(status.settings.timePolicy).map(([key, value]) => {
+                const bounds: Record<string, [string, number, number]> = {
+                  reservationMs: ['Reservation (ms)', 5000, 120000], leaseMs: ['Lease duration (ms)', 30000, status.settings.maxVisitDurationMs],
+                  clockSkewMs: ['Accepted clock skew (ms)', 1000, 30000], probeFreshnessMs: ['Probe freshness (ms)', 20000, 300000],
+                  probeIntervalMs: ['Probe interval (ms)', 10000, 120000], gapTimeoutMs: ['Stream gap timeout (ms)', 5000, 120000],
+                  returnMarginMs: ['Return safety margin (ms)', 60000, 600000], clockObservationGapMs: ['Maximum clock observation gap (ms)', 30000, 600000],
+                  requestTimeoutMs: ['Transport request timeout (ms)', 1000, 30000],
+                };
+                const [label, min, max] = bounds[key];
+                return <Field key={key} label={`${label} · ${min}–${max}`}><input type="number" name={key} min={min} max={max} step="1" defaultValue={value} required /></Field>;
+              })}
+              <div className="admin-form-actions"><AdminButton type="submit" disabled={!!task.pending}>Save time policy</AdminButton></div>
+            </form>
+            {!status.settings.clock.healthy && <form className="admin-form" onSubmit={event => {
+              event.preventDefault();
+              void task.run('Confirming clock recovery', () => convex.mutation(api.federation.admin.confirmClockRecovery, { adminToken, synchronizedUtcConfirmed: new FormData(event.currentTarget).get('utc') === 'on' }), 'Clock safety unlocked after operator confirmation.');
+            }}>
+              <label className="admin-check"><input type="checkbox" name="utc" required /> I verified synchronized UTC on this server.</label>
+              <AdminButton type="button" disabled={!!task.pending} onClick={event => {
+                const form = event.currentTarget.closest('form');
+                if (!form?.reportValidity()) return;
+                void task.run('Confirming UTC for return deadlines', () => convex.mutation(api.federation.admin.confirmReturnClock, { adminToken, synchronizedUtcConfirmed: new FormData(form).get('utc') === 'on' }), 'UTC confirmed for saved return deadlines. Admission stays locked until all visits end.');
+              }}>Verify UTC for existing return deadlines</AdminButton>
+              <AdminButton type="submit" disabled={!!task.pending || status.settings.activeVisitsRemain}>Confirm clock recovery after all visits end</AdminButton>
+            </form>}
+          </details>
           <h3>Send a resident on a visit</h3>
           {!world && (
             <EmptyState>No default world exists. Initialize the local simulation first.</EmptyState>
@@ -266,6 +307,13 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
                       {visit.queueReason && <p className="admin-muted">{adminErrorSummary(visit.queueReason)}</p>}
                     </>
                   )}
+                  <p className={visit.communicationState === 'SUSPECT_HOST' ? 'admin-warning' : 'admin-muted'}>
+                    Connection: {visit.communicationState === 'SUSPECT_HOST' ? 'Confirming peer status; connectivity loss does not prove cleanup.' : 'Confirmed'}
+                    {visit.lastVerifiedAt && <> · last two-way verification {formatTime(visit.lastVerifiedAt)}</>}
+                  </p>
+                  <p>{safeReturnSummary(visit.returnSafety.condition)}</p>
+                  <p className="admin-muted">Safe after: {formatTime(visit.returnSafety.safeAfter)} · saved margin {visit.leaseSafetyMs / 1000}s{visit.tripDeadline && <> · trip deadline {formatTime(visit.tripDeadline)}</>}</p>
+                  <p className="admin-muted">{eventProgressSummary(visit.lastDurableEventSeq, visit.lastAckedEventSeq, visit.role)}</p>
                   {visit.lastError && <p className="admin-error">{visit.lastError}</p>}
                 </div>
                 <div className="admin-toolbar">
@@ -324,6 +372,7 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
       )}
       <AutonomyPanel adminToken={adminToken} />
       <SocialHistoryPanel adminToken={adminToken} />
+      <TravelAuditPanel adminToken={adminToken} />
       <details className="admin-disclosure">
         <summary>Delivery &amp; recovery diagnostics</summary>
         <p className="admin-muted">

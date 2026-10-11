@@ -1,3 +1,4 @@
+import { configuredTimePolicy, timePolicy, validateTimePolicy, readClock, returnSafety, observeClock, activeVisitsRemain } from './timePolicy';
 import { replyTimeoutMs } from './replyPolicy';
 import { action, internalMutation, mutation, query } from '../maintenanceFunctions';
 import { v } from 'convex/values';
@@ -108,6 +109,7 @@ export const configure = mutation({
       args.maxVisitDurationMs > 30 * 60_000
     )
       throw new Error('INVALID_CAPACITY_OR_DURATION');
+    if (local.timePolicy) validateTimePolicy(local.timePolicy, args.maxVisitDurationMs);
     if (local.mode !== 'ACTIVE' && args.enabled) throw new Error('DEPLOYMENT_NOT_ACTIVE');
     await ctx.db.patch(local._id, {
       enabled: args.enabled,
@@ -126,7 +128,9 @@ export const status = query({
     const peers = await ctx.db.query('federationPeers').take(100);
     const limits = await configuredResourceLimits(ctx.db);
     const worlds = await ctx.db.query('worlds').collect();
-    const now = Date.now();
+    const now = Date.now(), timing = configuredTimePolicy(local), clock = await readClock(ctx.db, local);
+    const activeStates = ['REQUESTED', 'FREEZING', 'CONFIRMING', 'QUEUED', 'RESERVED', 'CREATING', 'ACTIVE', 'REMOVING', 'RETURN_PENDING'];
+    const activeVisitsRemain = (await Promise.all(activeStates.map(state => ctx.db.query('visitLedger').withIndex('state', q => q.eq('state', state)).first()))).some(Boolean);
     const pendingDecisions = await pendingDecisionCount(ctx.db, now);
     const pendingChat = await ctx.db.query('federationLlmRequests')
       .withIndex('state_expiry', q => q.eq('state', 'PENDING').gt('expiresAt', now)).take(1001);
@@ -155,7 +159,7 @@ export const status = query({
     const chatQueueFull = pendingChat.length >= limits.maxPendingLocalLLM &&
       (pendingChat.length > 0 || runningChat.length >= limits.maxConcurrentLocalLLM);
     const hardware = await hostResourceHealth(ctx.db, now);
-    const admissionState = !local?.enabled || local.mode !== 'ACTIVE' ? 'CLOSED'
+    const admissionState = !clock.healthy ? 'CLOCK_UNCERTAIN' : !local?.enabled || local.mode !== 'ACTIVE' ? 'CLOSED'
       : activeSlots.length >= local.maxVisitors || reservations >= limits.maxVisitReservations ? 'FULL'
       : pendingDecisions >= limits.maxPendingDecisions || chatQueueFull || !limits.maxConcurrentLocalLLM || hardware.reasons.length > 0 ? 'DEGRADED' : 'OPEN';
     const sourceOccupancy = new Map<string, number>();
@@ -193,12 +197,14 @@ export const status = query({
             fingerprint: local.fingerprint,
             publicKey: local.publicKey,
             endpoint: local.endpoint,
+            endpointCandidates: local.endpointCandidates, endpointGeneration: local.endpointGeneration ?? local.endpointSequence ?? 0,
             deploymentInstanceId: local.deploymentInstanceId,
             deploymentEpoch: local.deploymentEpoch,
             mode: local.mode,
           }
         : null,
       settings: {
+        timePolicy: timing, clock, activeVisitsRemain,
         enabled: local?.enabled ?? false,
         allowIncomingPairRequests: local?.allowIncomingPairRequests ?? false,
         maxVisitors: local?.maxVisitors ?? 8,
@@ -215,6 +221,7 @@ export const status = query({
           townName,
           fingerprint,
           endpoint,
+          endpointCandidates,
           trustState,
           inboundVisitsAllowed,
           outboundVisitsAllowed,
@@ -223,23 +230,26 @@ export const status = query({
           const expired =
             !state?.outboundVerifiedAt ||
             !state?.inboundVerifiedAt ||
-            Math.min(state.outboundVerifiedAt, state.inboundVerifiedAt) < Date.now() - 120_000;
+            Math.min(state.outboundVerifiedAt, state.inboundVerifiedAt) < Date.now() - timing.probeFreshnessMs;
           return {
             townId,
             townName,
             fingerprint,
             endpoint,
+            endpointCandidates,
             trustState,
             inboundVisitsAllowed,
             outboundVisitsAllowed,
             readinessExpiresAt:
               Math.min(state?.outboundVerifiedAt ?? 0, state?.inboundVerifiedAt ?? 0) +
-              (state?.outboundVerifiedAt && state?.inboundVerifiedAt ? 120000 : 0),
+              (state?.outboundVerifiedAt && state?.inboundVerifiedAt ? timing.probeFreshnessMs : 0),
             channelState:
               expired && state?.channelState === 'TRANSPORT_READY'
                 ? 'TRANSPORT_TESTING'
                 : (state?.channelState ?? 'TRANSPORT_TESTING'),
             lastError: state?.lastError,
+            outboundEndpoint: state?.outboundEndpoint,
+            inboundVerifiedAt: state?.inboundVerifiedAt, outboundVerifiedAt: state?.outboundVerifiedAt,
             transportType: 'DIRECT_HTTPS',
           };
         },
@@ -263,42 +273,92 @@ export const status = query({
         retryAfter: r.requestedAt + 60_000,
         expiresAt: r.expiresAt,
       })),
-      visits: visits.map(
-        ({
-          visitId,
-          agentGlobalId,
-          homeTownId,
-          hostTownId,
-          state,
-          role,
-          leaseExpiry,
-          agentAuthorityEpoch,
-          visitLeaseVersion,
-          lastError,
-          queuedAt, queueExpiresAt, queueReason, queuePaused, allowQueue, requestOrigin, autonomousPolicyRevision,
-        }) => ({
-          visitId,
-          agentGlobalId,
-          homeTownId,
-          hostTownId,
-          state,
-          role,
-          leaseExpiry,
-          agentAuthorityEpoch,
-          visitLeaseVersion,
-          lastError,
-          queuedAt, queueExpiresAt, queueReason, queuePaused, allowQueue, requestOrigin, autonomousPolicyRevision,
-        }),
-      ),
+      visits: visits.map(ledger => {
+        const connection = sessions.find(value => value.peerTownId === (ledger.role === 'home' ? ledger.hostTownId : ledger.homeTownId));
+        const lastVerified = Math.min(connection?.outboundVerifiedAt ?? 0, connection?.inboundVerifiedAt ?? 0);
+        const suspect = !['COMPLETED', 'REJECTED'].includes(ledger.state) &&
+          (!lastVerified || lastVerified + timing.probeFreshnessMs <= now || connection?.channelState !== 'TRANSPORT_READY');
+        const { visitId, agentGlobalId, homeTownId, hostTownId, state, role, leaseExpiry,
+          agentAuthorityEpoch, visitLeaseVersion, lastError, queuedAt, queueExpiresAt, queueReason,
+          queuePaused, allowQueue, requestOrigin, autonomousPolicyRevision, leaseSafetyMs, tripDeadline,
+          lastDurableEventSeq, lastAckedEventSeq, suspectSince } = ledger;
+        return { visitId, agentGlobalId, homeTownId, hostTownId, state, role, leaseExpiry,
+          agentAuthorityEpoch, visitLeaseVersion, lastError, queuedAt, queueExpiresAt, queueReason,
+          queuePaused, allowQueue, requestOrigin, autonomousPolicyRevision, leaseSafetyMs: leaseSafetyMs ?? 60_000, tripDeadline,
+          communicationState: suspect ? 'SUSPECT_HOST' : 'CONFIRMED', suspectSince,
+          lastVerifiedAt: lastVerified || undefined, lastDurableEventSeq: lastDurableEventSeq ?? 0,
+          lastAckedEventSeq: lastAckedEventSeq ?? 0, returnSafety: returnSafety(ledger, clock, now) };
+      }),
     };
   },
 });
 
 export const updateLocalEndpoint = mutation({
-  args: { adminToken: v.string(), endpoint: v.string(), operator: v.optional(v.string()), reason: v.optional(v.string()) },
+  args: { adminToken: v.string(), endpoint: v.string(), endpointCandidates: v.optional(v.array(v.object({ url: v.string(), priority: v.number() }))), operator: v.optional(v.string()), reason: v.optional(v.string()) },
   handler: async (ctx, args) => {
     requireAdmin(args.adminToken);
-    return commitLocalEndpoint(ctx, { endpoint: args.endpoint,
+    return commitLocalEndpoint(ctx, { endpoint: args.endpoint, endpointCandidates: args.endpointCandidates,
       operator: args.operator ?? 'Local administrator', reason: args.reason ?? 'Administrator changed the town address' });
+  },
+});
+
+
+export const configureTimePolicy = mutation({
+  args: { adminToken: v.string(), policy: timePolicy },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    const local = await identity(ctx);
+    if (!local) throw new Error('INITIALIZE_IDENTITY_FIRST');
+    validateTimePolicy(args.policy, local.maxVisitDurationMs);
+    // Existing grants saved a margin for the previous observation bound.
+    // Enlarging that bound while they survive would weaken their guarantee.
+    if (args.policy.clockObservationGapMs > configuredTimePolicy(local).clockObservationGapMs && await activeVisitsRemain(ctx.db))
+      throw new Error('END_ALL_VISITS_BEFORE_INCREASING_CLOCK_GAP');
+    await observeClock(ctx, local);
+    await ctx.db.insert('federationResourceAudit', { operation: 'TIME_POLICY_CHANGED',
+      previous: configuredTimePolicy(local), next: args.policy, createdAt: Date.now() });
+    await ctx.db.patch(local._id, { timePolicy: args.policy });
+  },
+});
+
+export const confirmClockRecovery = mutation({
+  args: { adminToken: v.string(), synchronizedUtcConfirmed: v.boolean() },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    if (!args.synchronizedUtcConfirmed) throw new Error('CONFIRM_SYNCHRONIZED_UTC_FIRST');
+    // No waiting period can prove that a wall clock is safe again. An operator
+    // must restore synchronized UTC; no old grant may survive this reset.
+    for (const state of ['REQUESTED', 'FREEZING', 'CONFIRMING', 'QUEUED', 'RESERVED', 'CREATING', 'ACTIVE', 'REMOVING', 'RETURN_PENDING']) {
+      if (await ctx.db.query('visitLedger').withIndex('state', q => q.eq('state', state)).first())
+        throw new Error('END_ALL_VISITS_BEFORE_CLOCK_RECOVERY');
+    }
+    const clock = await ctx.db.query('federationClock').unique();
+    const next = { observedAt: Date.now(), uncertain: false };
+    await ctx.db.insert('federationResourceAudit', { operation: 'CLOCK_RECOVERY_CONFIRMED',
+      previous: clock ? { observedAt: clock.observedAt, uncertain: clock.uncertain, reason: clock.reason } : null,
+      next, createdAt: Date.now() });
+    if (clock) await ctx.db.patch(clock._id, { ...next, reason: undefined, returnClockConfirmedAt: undefined });
+    else await ctx.db.insert('federationClock', next);
+    return { healthy: true };
+  },
+});
+
+
+export const confirmReturnClock = mutation({
+  args: { adminToken: v.string(), synchronizedUtcConfirmed: v.boolean() },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    if (!args.synchronizedUtcConfirmed) throw new Error('CONFIRM_SYNCHRONIZED_UTC_FIRST');
+    // This is an explicit UTC attestation, never host cleanup. Keep admission
+    // locked while old grants drain; only their saved deadlines become usable.
+    const clock = await ctx.db.query('federationClock').unique();
+    const now = Date.now();
+    const next = { observedAt: now, uncertain: true, reason: 'CLOCK_RECOVERY_DRAINING', returnClockConfirmedAt: now };
+    await ctx.db.insert('federationResourceAudit', { operation: 'RETURN_CLOCK_CONFIRMED',
+      previous: clock ? { observedAt: clock.observedAt, uncertain: clock.uncertain } : null,
+      next, createdAt: now });
+    if (clock) await ctx.db.patch(clock._id, next); else await ctx.db.insert('federationClock', next);
+    await ctx.scheduler.runAfter(0, mutationRef('ledger/reconcile'), {});
+    return { healthy: false, returnClockHealthy: true };
   },
 });

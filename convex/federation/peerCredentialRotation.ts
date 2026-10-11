@@ -12,7 +12,7 @@ import {
 import { identity, peer } from './store';
 import { credentialForPeer } from './credentials';
 import { actionRef, mutationRef, queryRef } from './refs';
-import { directRequest, readRequest } from './direct';
+import { directControlRequest, endpointContextKey, readRequest } from './direct';
 import { CLOCK_SKEW_MS, PROTOCOL, SignedPacket } from './protocol';
 import {
   deriveCredential,
@@ -398,7 +398,7 @@ export const deliver = internalAction({
         !row.ephemeralPrivateEncrypted
       )
         throw new Error('CREDENTIAL_ROTATION_FENCED');
-      const response = await directRequest(remote.endpoint, '/peers/rotate-auth', row.packet),
+      const response = (await directControlRequest(ctx, local, remote, '/peers/rotate-auth', row.packet)).value,
         b = response?.body;
       if (
         !b ||
@@ -437,6 +437,7 @@ export const deliver = internalAction({
         ...args,
         response,
         credentialEncrypted: await sealSecret(credential),
+        endpointContextKey: endpointContextKey(local, remote),
       });
       return { rotationId: row.rotationId, state: 'COMMITTED' };
     } catch (error) {
@@ -456,6 +457,7 @@ export const finish = internalMutation({
     rotationId: v.string(),
     response: v.any(),
     credentialEncrypted: v.string(),
+    endpointContextKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const row = await rowFor(ctx, args.peerTownId, 'OUTBOUND', args.rotationId);
@@ -470,6 +472,7 @@ export const finish = internalMutation({
       remote.credentialId !== row.packet.body.credentialId
     )
       throw new Error('CREDENTIAL_ROTATION_FENCED');
+    if (args.endpointContextKey !== undefined && endpointContextKey(local, remote) !== args.endpointContextKey) throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
     await ctx.db.patch(row._id, {
       state: 'COMMITTED',
       response: args.response,

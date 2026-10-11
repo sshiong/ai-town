@@ -905,3 +905,21 @@ test('durable history with a lost ACK reauthenticates after overlap, keeps seque
     }),
   ).rejects.toThrow('STALE_AGENT_AUTHORITY');
 });
+
+test('credential rotation retains its authenticated exchange over a trusted backup when primary is unavailable', async () => {
+  const s = await setup();
+  await s.a.run(async ctx => {
+    const p = (await ctx.db.query('federationPeers').unique())!;
+    await ctx.db.patch(p._id, { endpointCandidates: [{ url: p.endpoint, priority: 10 }, { url: 'https://b-backup.example/federation/v1', priority: 20 }] });
+  });
+  const urls: string[] = [];
+  globalThis.fetch = (async (url: any, init: any) => {
+    urls.push(String(url));
+    if (String(url).startsWith('https://b.example/')) throw new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } });
+    return s.normalFetch(url, init);
+  }) as typeof fetch;
+  const result = await s.a.action(actionRef('peerCredentialRotation/start'), { adminToken, peerTownId: 'b', overlapMs: MIN_OVERLAP_MS });
+  expect(result.state).toBe('COMMITTED');
+  expect(urls).toEqual(['https://b.example/federation/v1/peers/rotate-auth', 'https://b-backup.example/federation/v1/peers/rotate-auth']);
+  expect((await remote(s.a))!.credentialId).toBe((await remote(s.b))!.credentialId);
+});

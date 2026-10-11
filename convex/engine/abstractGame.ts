@@ -1,3 +1,4 @@
+import { canResume, readClock } from '../federation/timePolicy';
 import { ConvexError, Infer, Value, v } from 'convex/values';
 import { Doc, Id } from '../_generated/dataModel';
 import { ActionCtx, DatabaseReader, MutationCtx, internalQuery } from '../_generated/server';
@@ -169,8 +170,8 @@ export const loadInputs = internalQuery({
       .take(args.max);
     return await Promise.all(
       inputs.map(async (input) => {
-        if (input.name !== 'federationAction') return input;
-        const visitId = input.args?.visitId;
+        if (!['federationAction', 'federationCreateVisitor', 'federationUpdateLease', 'federationSuspend', 'federationResume'].includes(input.name)) return input;
+        const visitId = input.args?.visitId ?? input.args?.visitor?.visitId;
         const ledger =
           typeof visitId === 'string'
             ? await ctx.db
@@ -178,6 +179,17 @@ export const loadInputs = internalQuery({
                 .withIndex('visitId', (q) => q.eq('visitId', visitId))
                 .unique()
             : null;
+        const clock = await readClock(ctx.db, await ctx.db.query('federationIdentity').unique());
+        const reject = (reason: string) => ({ ...input, args: { ...input.args, __federationRejectReason: reason } });
+        if (input.name === 'federationResume') {
+          return ledger?.role === 'home' && ledger.state === 'RETURN_PENDING' && await canResume(ctx.db, ledger)
+            ? input : reject('HOST_LEASE_STILL_VALID');
+        }
+        if (!clock.healthy) return reject('CLOCK_UNCERTAIN');
+        if (input.name === 'federationSuspend') return ledger?.role === 'home' && ['FREEZING', 'RETURN_PENDING'].includes(ledger.state) ? input : reject('STALE_VISIT');
+        if (input.name === 'federationCreateVisitor') return ledger?.role === 'host' && ledger.state === 'CREATING' && ledger.leaseExpiry > Date.now() &&
+          ledger.agentAuthorityEpoch === input.args.visitor?.agentAuthorityEpoch && ledger.visitLeaseVersion === input.args.visitor?.visitLeaseVersion
+          ? input : reject('STALE_VISIT');
         if (
           ledger?.role === 'host' &&
           ledger.state === 'ACTIVE' &&
@@ -190,7 +202,7 @@ export const loadInputs = internalQuery({
         // side effects. On the next load, reject that stale input in the pure
         // handler so its error result can commit and the world can advance.
         // Preserve the persisted request and its original deadline for audit.
-        return { ...input, args: { ...input.args, deadline: 0 } };
+        return reject('STALE_TURN');
       }),
     );
   },

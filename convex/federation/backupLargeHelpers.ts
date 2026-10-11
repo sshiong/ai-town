@@ -1,3 +1,4 @@
+import { validateTimePolicy } from './timePolicy';
 import {
   BackupRow,
   assertNoSecrets,
@@ -11,7 +12,9 @@ import {
 import { digest, verifySignature } from './security';
 import schema from '../schema';
 import { validateResourceLimits } from './resources';
+import { validateEndpointRecord } from './protocol';
 import { validateModelPolicyPortable } from '../models/usageSchema';
+import { MAX_DENIED_RESIDENTS, validateResidentPolicyPortable } from './residentPolicySchema';
 
 // Derived vectors are deliberately omitted: canonical memories are the complete rebuilding source.
 export const largeTables = [
@@ -79,7 +82,7 @@ export function sanitizeLargeValue(value: any): any {
     Object.entries(value)
       .filter(
         ([key]) =>
-          !['coverageJobId', 'validationJobId'].includes(key) &&
+          !['embeddingCertificateId', 'coverageJobId', 'validationJobId'].includes(key) &&
           !/(privateKey|secretEncrypted|credentialEncrypted|ephemeralPrivate|apiKey$|adminToken|fencingToken)/i.test(
             key,
           ),
@@ -143,8 +146,10 @@ export async function validateManifest(manifest: LargeManifest, signature: strin
     bytes += entry.bytes;
   }
   if (bytes > MAX_ARCHIVE_BYTES) throw new Error('LARGE_BACKUP_ARCHIVE_BUDGET');
-  if (largeTables.some((table) => !['modelProviderQuotas', 'coldHistoryFiles', 'federationIdentityKeyHistory', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(table) && !tables.has(table)))
+  if (largeTables.some((table) => !['modelProviderQuotas', 'coldHistoryFiles', 'federationIdentityKeyHistory', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit', 'federationTravelAudit', 'federationResidentPolicy', 'federationResidentPolicyAudit'].includes(table) && !tables.has(table)))
     throw new Error('INCOMPLETE_LARGE_BACKUP_MANIFEST');
+  if (manifest.chunks.filter(c => c.table === 'federationResidentPolicy').reduce((sum, c) => sum + c.count, 0) > MAX_DENIED_RESIDENTS)
+    throw new Error('RESIDENT_POLICY_CAPACITY_EXCEEDED');
   validateSourceRow('federationIdentity', manifest.source);
   if (manifest.source.fingerprint !== `sha256:${await digest(manifest.source.publicKey)}`)
     throw new Error('BACKUP_IDENTITY_MISMATCH');
@@ -217,11 +222,20 @@ export function validateSourceRow(table: string, row: BackupRow) {
   if (!definition) throw new Error('INVALID_BACKUP_SECTION');
   const validator = (definition.validator as unknown as { json: unknown }).json;
   validateFields(fields, validator);
+  if (table === 'federationIdentity' || table === 'federationPeers') {
+    validateEndpointRecord(fields as never);
+  }
   if (table === 'federationIdentity' && fields.identityVersion !== undefined &&
     (!Number.isSafeInteger(fields.identityVersion) || fields.identityVersion < 1))
     throw new Error('INVALID_IDENTITY_VERSION');
   if (table === 'federationResourcePolicy') validateResourcePolicy(fields);
   validateModelPolicyPortable(table, fields);
+  validateResidentPolicyPortable(table, fields);
+  if (table === 'federationIdentity' && fields.timePolicy !== undefined)
+    validateTimePolicy(fields.timePolicy, fields.maxVisitDurationMs);
+  if (table === 'visitLedger' && fields.leaseSafetyMs !== undefined &&
+    (!Number.isSafeInteger(fields.leaseSafetyMs) || fields.leaseSafetyMs < 60_000 || fields.leaseSafetyMs > 1_260_000))
+    throw new Error('INVALID_RESTORED_LEASE_MARGIN');
   if (table === 'federationIdentity' && fields.resourceLimits !== undefined)
     validateResourceLimits(fields.resourceLimits);
   // Runtime snapshots intentionally contain source IDs, never executable target references.
@@ -259,6 +273,7 @@ export function rowMetadata(table: string, row: BackupRow): BackupRow {
     'engineId',
     'visitId',
     'leaseExpiry',
+    'leaseSafetyMs',
     'homePlayerId',
     'role',
     'policyId',
@@ -278,6 +293,7 @@ export function rowMetadata(table: string, row: BackupRow): BackupRow {
   return metadata;
 }
 export function relationKey(table: string, row: BackupRow): string | undefined {
+  if (table === 'federationResidentPolicy') return row.agentGlobalId;
   if (table === 'modelProviderQuotas') return JSON.stringify([row.kind, row.providerKey]);
   if (table === 'messages') return JSON.stringify([row.worldId, row.conversationId, row.messageUuid]);
   if (table === 'archivedConversations') return JSON.stringify([row.worldId, row.id]);

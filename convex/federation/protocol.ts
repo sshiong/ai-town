@@ -1,3 +1,4 @@
+import { configuredTimePolicy, type TimePolicy } from './timePolicy';
 export const PROTOCOL = 'ai-town-federation/1';
 export const MESSAGE_MAX_BYTES = 64 * 1024;
 export const CLOCK_SKEW_MS = 30_000;
@@ -14,6 +15,42 @@ export type FederationMessage = {
   streamId?: string; sequence?: number; pairSessionId?: string;
 };
 export type SignedPacket<T = FederationMessage> = { body: T; signature: string; mac: string };
+export type EndpointCandidate = { url: string; priority: number };
+export const MAX_ENDPOINT_CANDIDATES = 4;
+// Candidates are locator hints signed by the trusted identity. Each route still
+// needs an authenticated response, and never changes the town's trust key.
+export function normalizeEndpointCandidates(endpoint: string, input?: unknown): EndpointCandidate[] {
+  const primary = normalizeEndpoint(endpoint);
+  if (input === undefined) return [{ url: primary, priority: 10 }];
+  if (!Array.isArray(input) || input.length < 1 || input.length > MAX_ENDPOINT_CANDIDATES)
+    throw new Error('INVALID_ENDPOINT_CANDIDATES');
+  const urls = new Set<string>();
+  const candidates = input.map(candidate => {
+    if (!candidate || typeof candidate.url !== 'string' || !Number.isSafeInteger(candidate.priority) || candidate.priority < 0 || candidate.priority > 1000 || Object.keys(candidate).some(key => !['url', 'priority'].includes(key)))
+      throw new Error('INVALID_ENDPOINT_CANDIDATES');
+    const url = normalizeEndpoint(candidate.url);
+    if (urls.has(url)) throw new Error('DUPLICATE_ENDPOINT_CANDIDATE');
+    urls.add(url);
+    return { url, priority: candidate.priority };
+  }).sort((a, b) => a.priority - b.priority || (a.url === primary ? -1 : b.url === primary ? 1 : a.url < b.url ? -1 : 1));
+  if (!urls.has(primary) || candidates[0].url !== primary) throw new Error('PRIMARY_ENDPOINT_PRIORITY_REQUIRED');
+  return candidates;
+}
+export function endpointGeneration(record: { endpointGeneration?: number; endpointSequence?: number }) {
+  return record.endpointGeneration ?? record.endpointSequence ?? 0;
+}
+export function nextEndpointGeneration(record: { endpointGeneration?: number; endpointSequence?: number }) {
+  const generation = endpointGeneration(record) + 1;
+  if (!Number.isSafeInteger(generation) || generation < 1 || generation >= Number.MAX_SAFE_INTEGER) throw new Error('ENDPOINT_GENERATION_EXHAUSTED');
+  return generation;
+}
+export function validateEndpointRecord(record: { endpoint: string; endpointCandidates?: unknown; endpointGeneration?: number; endpointSequence?: number }) {
+  if (normalizeEndpoint(record.endpoint) !== record.endpoint) throw new Error('INVALID_ENDPOINT');
+  normalizeEndpointCandidates(record.endpoint, record.endpointCandidates);
+  if (Array.isArray(record.endpointCandidates) && record.endpointCandidates.some(candidate => normalizeEndpoint(candidate.url) !== candidate.url)) throw new Error('INVALID_ENDPOINT_CANDIDATES');
+  for (const value of [record.endpointGeneration, record.endpointSequence])
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0 || value >= Number.MAX_SAFE_INTEGER)) throw new Error('INVALID_ENDPOINT_GENERATION');
+}
 export function canonicalJson(value: unknown): string {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
   if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
@@ -25,6 +62,7 @@ export function canonicalJson(value: unknown): string {
   throw new Error('INVALID_JSON_VALUE');
 }
 export function normalizeEndpoint(input: string): string {
+  if (typeof input !== 'string' || !input || input.length > 2048) throw new Error('INVALID_ENDPOINT');
   const url = new URL(input.includes('://') ? input : `https://${input}`);
   if (url.protocol !== 'https:') throw new Error('HTTP_AUTH_LIBRARY_UNAVAILABLE: HTTPS required');
   if (url.username || url.password || url.search || url.hash) throw new Error('INVALID_ENDPOINT');
@@ -33,11 +71,14 @@ export function normalizeEndpoint(input: string): string {
   if (!['', '/', '/federation/v1', '/federation/v1/'].includes(url.pathname)) throw new Error('INVALID_ENDPOINT_PATH');
   return `${url.origin}/federation/v1`;
 }
-export function validateEnvelope(message: FederationMessage, now = Date.now()): void {
+export function validateEnvelope(message: FederationMessage, now = Date.now(), policy: TimePolicy = configuredTimePolicy(), allowRecoveryTime = false): void {
   if (!message || message.protocol !== PROTOCOL || ['messageId', 'fromTownId', 'toTownId', 'nonce', 'credentialId', 'senderDeploymentInstanceId', 'type'].some(field => typeof (message as any)[field] !== 'string' || !(message as any)[field] || (message as any)[field].length > 200)) throw new Error('INVALID_ENVELOPE');
   if (['visitId', 'agentGlobalId', 'streamId', 'pairSessionId'].some(field => (message as any)[field] !== undefined && (typeof (message as any)[field] !== 'string' || !(message as any)[field] || (message as any)[field].length > 300))) throw new Error('INVALID_ENVELOPE');
   if (!Number.isSafeInteger(message.senderDeploymentEpoch) || message.senderDeploymentEpoch < 1 || !Number.isSafeInteger(message.expectedRecipientDeploymentEpoch) || message.expectedRecipientDeploymentEpoch < 1) throw new Error('INVALID_DEPLOYMENT_EPOCH');
-  if (!Number.isFinite(message.sentAt) || !Number.isFinite(message.expiresAt) || message.sentAt > now + CLOCK_SKEW_MS || message.expiresAt <= now || message.expiresAt > now + 10 * 60_000) throw new Error('MESSAGE_EXPIRED');
+  const recovery = allowRecoveryTime && ['VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_REJECT', 'SESSION_RESYNC', 'STREAM_NACK', 'CONVERSATION_ENDED'].includes(message.type);
+  if (!Number.isSafeInteger(message.sentAt) || !Number.isSafeInteger(message.expiresAt) ||
+    message.expiresAt <= message.sentAt || message.expiresAt - message.sentAt > 10 * 60_000 ||
+    !recovery && (message.sentAt > now + policy.clockSkewMs || message.expiresAt <= now || message.expiresAt > now + 10 * 60_000)) throw new Error('MESSAGE_EXPIRED');
   if (!message.payload || typeof message.payload !== 'object' || Array.isArray(message.payload)) throw new Error('INVALID_PAYLOAD');
   if (new TextEncoder().encode(canonicalJson(message)).byteLength > MESSAGE_MAX_BYTES) throw new Error('MESSAGE_TOO_LARGE');
   if (message.type === 'TRANSPORT_PROBE') {

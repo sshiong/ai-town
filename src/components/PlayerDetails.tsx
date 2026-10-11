@@ -17,6 +17,7 @@ export default function PlayerDetails({
   playerId,
   setSelectedElement,
   scrollViewRef,
+  awayResident,
 }: {
   worldId: Id<'worlds'>;
   engineId: Id<'engines'>;
@@ -24,6 +25,7 @@ export default function PlayerDetails({
   playerId?: GameId<'players'>;
   setSelectedElement: SelectElement;
   scrollViewRef: React.RefObject<HTMLDivElement>;
+  awayResident?: { name: string; state: string; hostTownId?: string };
 }) {
   const humanTokenIdentifier = useQuery(api.world.userStatus, { worldId });
 
@@ -61,7 +63,20 @@ export default function PlayerDetails({
     );
   }
   if (!player) {
-    return null;
+    if (!awayResident) return null;
+    return <section className="visitor-detail" aria-label="Resident traveling away">
+      <h2 className="font-display text-2xl">{awayResident.name}</h2>
+      <span className="admin-badge">{awayResident.state}</span>
+      <p>{awayResident.hostTownId ? `Traveling in ${awayResident.hostTownId}` : 'Preparing or returning from a visit.'}</p>
+      {playerDescription?.description && <p>{playerDescription.description}</p>}
+      <p className="admin-muted">Their home identity remains here. Local map presence resumes after safe return.</p>
+      {previousConversation && <>
+        <h3 className="font-display text-xl">Previous local conversation</h3>
+        <Messages worldId={worldId} engineId={engineId} inConversationWithMe={false}
+          conversation={{ kind: 'archived', doc: previousConversation }} humanPlayer={humanPlayer} scrollViewRef={scrollViewRef} />
+      </>}
+      <button type="button" className="admin-button" onClick={() => setSelectedElement(undefined)}>Close resident details</button>
+    </section>;
   }
   const isMe = humanPlayer && player.id === humanPlayer.id;
   const canInvite = !isMe && !playerConversation && humanPlayer && !humanConversation;
@@ -150,6 +165,7 @@ export default function PlayerDetails({
       </div>
       {player.remoteVisitor && <div className="visitor-detail">
         <span className="admin-badge">Visiting</span>
+        <p>Visit: {player.remoteVisitor.visitId}</p>
         <p>Home: {playerDescription?.originTownName ?? player.remoteVisitor.homeTownName}</p>
         <small>Thinking runs in their home town.</small>
       </div>}

@@ -1,3 +1,4 @@
+import { assertClock, canResume, observeClock, readClock } from '../federation/timePolicy';
 import { ConvexError, Infer, v } from 'convex/values';
 import { configuredResourceLimits, DEFAULT_RESOURCE_LIMITS, ResourceLimits, resourceLimits } from '../federation/resources';
 import { Doc, Id } from '../_generated/dataModel';
@@ -36,6 +37,7 @@ import {
 } from '../federation/runtime';
 
 const gameState = v.object({
+  federationClockHealthy: v.optional(v.boolean()),
   resourceBudget: v.optional(v.object({ limits: resourceLimits, otherResidents: v.number(), otherHumans: v.number(), otherPendingDecisions: v.number() })),
   world: v.object(serializedWorld),
   playerDescriptions: v.array(v.object(serializedPlayerDescription)),
@@ -75,6 +77,7 @@ export class Game extends AbstractGame {
   otherPendingDecisions: number;
 
   numPathfinds: number;
+  federationClockHealthy: boolean;
 
   constructor(
     engine: Doc<'engines'>,
@@ -82,6 +85,7 @@ export class Game extends AbstractGame {
     state: GameState,
   ) {
     super(engine);
+    this.federationClockHealthy = state.federationClockHealthy ?? true;
     this.resourceLimits = state.resourceBudget?.limits ?? DEFAULT_RESOURCE_LIMITS;
     this.otherResidents = state.resourceBudget?.otherResidents ?? 0;
     this.otherHumans = state.resourceBudget?.otherHumans ?? 0;
@@ -163,6 +167,7 @@ export class Game extends AbstractGame {
     return {
       engine,
       gameState: {
+        federationClockHealthy: (await readClock(db, await db.query('federationIdentity').unique())).healthy,
         resourceBudget: {
           limits,
           otherResidents: others.reduce((count, world) => count + world.agents.length, 0),
@@ -188,6 +193,7 @@ export class Game extends AbstractGame {
   }
 
   handleInput<Name extends InputNames>(now: number, name: Name, args: InputArgs<Name>) {
+    if ((args as any).__federationRejectReason) throw new Error((args as any).__federationRejectReason);
     const handler = inputs[name]?.handler;
     if (!handler) {
       throw new Error(`Invalid input: ${name}`);
@@ -287,6 +293,25 @@ export class Game extends AbstractGame {
       throw new Error(`No world found with id ${worldId}`);
     }
     const newWorld = diff.world;
+    const local = await ctx.db.query('federationIdentity').unique();
+    if (local) await observeClock(ctx, local);
+    // The action may have loaded before a clock jump, lease revocation or renewal.
+    // Re-check before any world state, conversation fact or engine result commits.
+    for (const player of newWorld.players) {
+      if (!player.remoteVisitor) continue;
+      await assertClock(ctx.db, local);
+      const visitor = player.remoteVisitor;
+      const ledger = await ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', visitor.visitId)).unique();
+      if (!ledger || ledger.role !== 'host' || !['CREATING', 'ACTIVE'].includes(ledger.state) ||
+        ledger.agentAuthorityEpoch !== visitor.agentAuthorityEpoch || visitor.visitLeaseVersion > ledger.visitLeaseVersion ||
+        ledger.leaseExpiry <= Date.now() || visitor.leaseExpiry <= Date.now())
+        throw new Error('STALE_FEDERATION_ENGINE_COMMIT');
+    }
+    for (const agent of existingWorld.agents) {
+      if (!agent.travelVisitId || newWorld.agents.some(next => next.id === agent.id && next.travelVisitId === agent.travelVisitId)) continue;
+      const ledger = await ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', agent.travelVisitId!)).unique();
+      if (!ledger || !await canResume(ctx.db, ledger)) throw new Error('HOST_LEASE_STILL_VALID');
+    }
     // Validate additions transactionally as well as at the engine input boundary.
     // Another world or an administrator may have changed capacity since the action loaded.
     const limits = await configuredResourceLimits(ctx.db);
