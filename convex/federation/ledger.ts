@@ -359,9 +359,29 @@ export async function homeResumed(ctx: MutationCtx, visitId: string) {
   await ctx.db.patch(ledger._id, { state: 'COMPLETED', updatedAt: Date.now() });
 }
 
-export const reconcile = internalMutation({ args: {}, handler: async ctx => {
-  const now = Date.now(), ledgers = await ctx.db.query('visitLedger').collect();
-  for (const ledger of ledgers.filter(l => !TERMINAL.has(l.state))) {
+const RECONCILE_STATES = ['REQUESTED', 'FREEZING', 'CONFIRMING', 'QUEUED', 'RESERVED',
+  'CREATING', 'ACTIVE', 'REMOVING', 'RETURN_PENDING'];
+const RECONCILE_PAGE_SIZE = 20;
+export const reconcile = internalMutation({
+  args: { state: v.optional(v.string()), cursor: v.optional(v.union(v.string(), v.null())) },
+  handler: async (ctx, args) => {
+  if (args.state && !RECONCILE_STATES.includes(args.state)) throw new Error('INVALID_RECONCILE_STATE');
+  if (!args.state && args.cursor) throw new Error('INVALID_RECONCILE_CURSOR');
+  const now = Date.now();
+  let processed = 0, continuations = 0;
+  // Convex permits one paginated query per function. Start safe returns here
+  // and give every other active state its own independent scheduled worker.
+  const state = args.state ?? 'RETURN_PENDING';
+  if (!args.state) {
+    for (const nextState of RECONCILE_STATES.filter(value => value !== state)) {
+      await ctx.scheduler.runAfter(0, mutationRef('ledger/reconcile'), { state: nextState, cursor: null });
+      continuations++;
+    }
+  }
+  const page = await ctx.db.query('visitLedger').withIndex('state', q => q.eq('state', state))
+    .paginate({ cursor: args.cursor ?? null, numItems: RECONCILE_PAGE_SIZE });
+  for (const ledger of page.page) {
+    processed++;
     if (ledger.role === 'host') {
       if (ledger.state === 'QUEUED') continue; // The bounded queue worker owns expiry and authority checks.
       const slot = await reservation(ctx, ledger.visitId);
@@ -376,5 +396,12 @@ export const reconcile = internalMutation({ args: {}, handler: async ctx => {
     else if (ledger.state === 'CONFIRMING' && now - ledger.updatedAt > RESERVATION_MS) await beginReturn(ctx, ledger, 'CONFIRM_TIMEOUT');
     // REQUESTED is bounded by its lease; Outbox retries survive process restarts.
   }
-  await drainVisitorQueue(ctx);
+  if (!page.isDone) {
+    await ctx.scheduler.runAfter(0, mutationRef('ledger/reconcile'), { state, cursor: page.continueCursor });
+    continuations++;
+  }
+  // Queue admission has its own bounded worker; do not multiply its allowance
+  // for every continuation page of unrelated active ledger states.
+  if (!args.state) await drainVisitorQueue(ctx);
+  return { processed, continuations };
 } });
