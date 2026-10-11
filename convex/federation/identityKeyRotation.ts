@@ -1165,14 +1165,17 @@ export async function maintainIdentityKeyRotations(ctx: MutationCtx) {
     .withIndex('state_expiry', (q) => q.eq('state', 'PREPARING').lte('expiresAt', Date.now()))
     .take(20);
   for (const row of expired) await abortPrepared(ctx, row, 'EXPIRED');
-  const incoming = await ctx.db.query('federationIdentityKeyExchanges').collect();
-  for (const row of incoming.filter(
-    (r) =>
-      r.direction === 'INBOUND' &&
-      ['PREPARED', 'CHALLENGING'].includes(r.state) &&
-      r.expiresAt <= Date.now(),
-  ))
-    await ctx.db.patch(row._id, { state: 'EXPIRED' });
+  // Expired rows leave the indexed range, so each transport tick drains the
+  // next batch without reading terminal history or retaining a scan cursor.
+  for (const state of ['PREPARED', 'CHALLENGING']) {
+    const incoming = await ctx.db
+      .query('federationIdentityKeyExchanges')
+      .withIndex('direction_state_expiry', (q) =>
+        q.eq('direction', 'INBOUND').eq('state', state).lte('expiresAt', Date.now()),
+      )
+      .take(20);
+    for (const row of incoming) await ctx.db.patch(row._id, { state: 'EXPIRED' });
+  }
   for (const state of ['PENDING_PREPARE', 'PENDING_COMMIT', 'RUNNING_PREPARE', 'RUNNING_COMMIT']) {
     const rows = await ctx.db
       .query('federationIdentityKeyExchanges')

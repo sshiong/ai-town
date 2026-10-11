@@ -60,5 +60,6 @@ export const identityKeyRotationTables = {
   })
     .index('exchange', ['peerTownId', 'direction', 'rotationId'])
     .index('rotation_direction', ['rotationId', 'direction'])
+    .index('direction_state_expiry', ['direction', 'state', 'expiresAt'])
     .index('state_retry', ['state', 'nextRetryAt']),
 };

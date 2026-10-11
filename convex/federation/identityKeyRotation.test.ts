@@ -15,6 +15,7 @@ import {
 import { PROTOCOL } from './protocol';
 import { renewedCredentialIdForPeer } from './credentials';
 import { verifiedIdentityKeySuccessor } from './identityKeyRotationProof';
+import { maintainIdentityKeyRotations } from './identityKeyRotation';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 const modules = {
@@ -282,6 +283,111 @@ test('an unreachable neighbor cannot partly replace identities; expiry removes t
   expect(
     await s.towns.a.run((ctx) => ctx.db.query('federationIdentityKeyHistory').collect()),
   ).toEqual([]);
+});
+
+test('identity maintenance drains every expired inbound batch without reading terminal history or changing outbound and unexpired trust', async () => {
+  const s = await setup(), t = s.towns.a, now = Date.now();
+  const beforeLocal = await local(t), beforePeer = await remote(t, 'b');
+  const exchange = {
+    peerTownId: 'b', peerPublicKey: s.keys.b.publicKey, peerIdentityVersion: 1,
+    credentialId: 'credential:a-b', peerDeploymentInstanceId: 'b-instance',
+    peerDeploymentEpoch: 1, localPublicKey: s.keys.a.publicKey, certificate: { audit: true },
+    createdAt: now, attempts: 0, nextRetryAt: now + 60_000,
+  };
+  await t.run(async ctx => {
+    for (let i = 0; i < 3000; i++) await ctx.db.insert('federationIdentityKeyExchanges', {
+      ...exchange, rotationId: `terminal-${i}`, direction: i % 2 ? 'INBOUND' : 'OUTBOUND',
+      state: ['ACKED', 'ABORTED', 'EXPIRED'][i % 3], expiresAt: now - 120_000,
+    });
+    for (const state of ['PREPARED', 'CHALLENGING']) {
+      for (let i = 0; i < 45; i++) await ctx.db.insert('federationIdentityKeyExchanges', {
+        ...exchange, rotationId: `${state}-${i}`, direction: 'INBOUND', state,
+        // Include exactly the deadline; expiry remains inclusive.
+        expiresAt: i === 44 ? now : now - 1000,
+      });
+      await ctx.db.insert('federationIdentityKeyExchanges', {
+        ...exchange, rotationId: `future-${state}`, direction: 'INBOUND', state,
+        expiresAt: now + 1,
+      });
+      await ctx.db.insert('federationIdentityKeyExchanges', {
+        ...exchange, rotationId: `outbound-${state}`, direction: 'OUTBOUND', state,
+        expiresAt: now - 1000,
+      });
+    }
+  });
+  const terminalBefore = await t.run(async ctx =>
+    (await ctx.db.query('federationIdentityKeyExchanges').collect()).filter(row =>
+      row.rotationId.startsWith('terminal-')),
+  );
+  for (const remaining of [25, 5, 0]) {
+    await t.run(async ctx => {
+      // convex-test does not enforce production read limits. Fail explicitly
+      // if maintenance falls back to scanning the accumulated exchange table.
+      const db = new Proxy(ctx.db, {
+        get(target, property) {
+          if (property !== 'query') return Reflect.get(target, property);
+          return (table: Parameters<typeof ctx.db.query>[0]) => {
+            const query = target.query(table);
+            if (table !== 'federationIdentityKeyExchanges') return query;
+            return new Proxy(query, {
+              get(target, property) {
+                if (property === 'collect') return () => { throw new Error('UNBOUNDED_IDENTITY_HISTORY_READ'); };
+                const value = Reflect.get(target, property);
+                return typeof value === 'function' ? value.bind(target) : value;
+              },
+            });
+          };
+        },
+      });
+      await maintainIdentityKeyRotations({ ...ctx, db });
+    });
+    for (const state of ['PREPARED', 'CHALLENGING']) expect(await t.run(ctx => ctx.db
+      .query('federationIdentityKeyExchanges')
+      .withIndex('direction_state_expiry', q => q.eq('direction', 'INBOUND').eq('state', state)
+        .lte('expiresAt', now)).collect())).toHaveLength(remaining);
+  }
+  const after = await t.run(ctx => ctx.db.query('federationIdentityKeyExchanges').collect());
+  expect(after.filter(row => row.rotationId.startsWith('terminal-'))).toEqual(terminalBefore);
+  expect(after.filter(row => row.rotationId.startsWith('PREPARED-') || row.rotationId.startsWith('CHALLENGING-')))
+    .toHaveLength(90);
+  expect(after.filter(row => row.rotationId.startsWith('PREPARED-') || row.rotationId.startsWith('CHALLENGING-'))
+    .every(row => row.state === 'EXPIRED')).toBe(true);
+  for (const state of ['PREPARED', 'CHALLENGING']) {
+    expect(after.find(row => row.rotationId === `future-${state}`)?.state).toBe(state);
+    expect(after.find(row => row.rotationId === `outbound-${state}`)?.state).toBe(state);
+  }
+  expect(await local(t)).toEqual(beforeLocal);
+  expect(await remote(t, 'b')).toEqual(beforePeer);
+  expect(await t.run(ctx => ctx.db.query('federationIdentityKeyHistory').collect())).toEqual([]);
+});
+
+test('expiring a staged identity still aborts every outbound peer exchange beyond the maintenance batch size', async () => {
+  const s = await setup(), t = s.towns.a, now = Date.now();
+  const beforeLocal = await local(t), beforePeer = await remote(t, 'b');
+  await t.run(async ctx => {
+    await ctx.db.insert('federationIdentityKeyRotations', {
+      rotationId: 'expired-staged-key', certificate: { audit: true }, newPrivateEncrypted: 'staged-key',
+      state: 'PREPARING', expiresAt: now, ...review, createdAt: now,
+    });
+    for (let i = 0; i < 23; i++) await ctx.db.insert('federationIdentityKeyExchanges', {
+      rotationId: 'expired-staged-key', peerTownId: `peer-${i}`, direction: 'OUTBOUND',
+      state: i % 2 ? 'PREPARED' : 'PENDING_PREPARE', peerPublicKey: 'fixture-public-key',
+      peerIdentityVersion: 1, credentialId: `credential-${i}`, peerDeploymentInstanceId: `instance-${i}`,
+      peerDeploymentEpoch: 1, localPublicKey: s.keys.a.publicKey, certificate: { audit: true },
+      packet: { staged: true }, expiresAt: now, createdAt: now, attempts: 0, nextRetryAt: now,
+    });
+  });
+  await t.mutation(mutationRef('transport/maintenance'), {});
+  const rotation = await t.run(ctx => ctx.db.query('federationIdentityKeyRotations').unique());
+  expect(rotation?.state).toBe('EXPIRED');
+  expect(rotation?.newPrivateEncrypted).toBeUndefined();
+  const exchanges = await t.run(ctx => ctx.db.query('federationIdentityKeyExchanges').collect());
+  expect(exchanges).toHaveLength(23);
+  expect(exchanges.every(row => row.state === 'ABORTED' && row.packet === undefined)).toBe(true);
+  expect(await local(t)).toEqual(beforeLocal);
+  expect(await remote(t, 'b')).toEqual(beforePeer);
+  expect(await t.run(ctx => ctx.db.query('federationIdentityKeyHistory').collect())).toEqual([]);
+  expect(await t.run(ctx => ctx.db.system.query('_scheduled_functions').collect())).toEqual([]);
 });
 
 test('a committed key and lost commit ACK survive both restarts and recover from the maintenance index without replaying trust or extending a deadline', async () => {
