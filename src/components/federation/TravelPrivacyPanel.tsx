@@ -71,10 +71,10 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
           event.preventDefault();
           if (source === 'IMPORTED' && !choice) return;
           void task.run(
-            t('Checking travel privacy scope'),
+            'Checking travel privacy scope',
             async () => setJobId(await inspect({ adminToken, visitId: visitId.trim(), scope,
               ...(source === 'IMPORTED' && choice ? { history: choice.history } : {}) })),
-            t('Travel privacy preview started.'),
+            'Travel privacy preview started.',
           );
         }}
       >
@@ -189,9 +189,9 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
               disabled={!!task.pending}
               onClick={() =>
                 void task.run(
-                  t('Clearing selected local travel data'),
+                  'Clearing selected local travel data',
                   () => start({ adminToken, jobId: report.jobId }),
-                  t('Selected local travel clearing started.'),
+                  'Selected local travel clearing started.',
                 )
               }
             >
@@ -204,9 +204,9 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
               <AdminButton
                 disabled={!!task.pending}
                 onClick={() => void task.run(
-                  t('Retrying travel privacy work'),
+                  'Retrying travel privacy work',
                   () => retry({ adminToken, jobId: report.jobId }),
-                  t('Travel privacy checkpoint requeued.'),
+                  'Travel privacy checkpoint requeued.',
                 )}
               >
                 {t('Retry pending travel privacy work')}

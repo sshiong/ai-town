@@ -1,4 +1,6 @@
 export const federationMessages: Record<string, string> = {
+  'Visit ID': '旅行编号',
+  State: '状态',
   'Imported backup history': '备份导入的旅行历史',
   'Only safely ended backup history for a resident currently at home is selectable.': '仅可选择已安全结束、且对应居民当前在家的备份旅行历史。',
   'This visit has a current local ledger. Select the current travel record source.': '这次旅行已有当前本地账本，请选择当前旅行记录来源。',

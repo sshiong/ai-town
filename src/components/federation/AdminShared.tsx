@@ -80,7 +80,7 @@ export function TaskFeedback({ task }: { task: ReturnType<typeof useAdminTask> }
   const { t } = useLocale();
   return (
     <div className="admin-feedback" aria-live="polite">
-      {task.pending && <p role="status">{task.pending}…</p>}
+      {task.pending && <p role="status">{t(task.pending)}…</p>}
       {task.error && (
         <>
           <p className="admin-error" role="alert">
@@ -94,7 +94,7 @@ export function TaskFeedback({ task }: { task: ReturnType<typeof useAdminTask> }
           )}
         </>
       )}
-      {task.message && <p className="admin-success">{task.message}</p>}
+      {task.message && <p className="admin-success">{t(task.message)}</p>}
     </div>
   );
 }
