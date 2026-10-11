@@ -32,6 +32,7 @@ const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/backupLarge.ts': () => import('./backupLarge'),
   '../federation/backup.ts': () => import('./backup'),
+  '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
   '../federation/admin.ts': () => import('./admin'),
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
@@ -906,6 +907,55 @@ test('partial import cancellation restores the original private target snapshot 
   }
 });
 
+test('formal large clone supplies terminal historical evidence for privacy cleanup without executable leases', async () => {
+  const source = await town(1);
+  await source.t.run(async ctx => {
+    await ctx.db.patch(source.memoryIds[0], { data: { type: 'travel', visitId: 'large-history',
+      eventId: 'history-event', hostTownId: 'foreign', participants: [], occurredAt: 1 } });
+    await ctx.db.insert('visitLedger', { visitId: 'large-history', worldId: source.worldId,
+      homePlayerId: 'p:0', agentGlobalId: source.agentGlobalId, homeTownId: 'town:large', hostTownId: 'foreign',
+      homeDeploymentEpoch: 1, hostDeploymentEpoch: 1, agentAuthorityEpoch: 1, visitLeaseVersion: 1,
+      leaseExpiry: 1, state: 'COMPLETED', role: 'home', fencingToken: 'source-fence',
+      profile: {}, createdAt: 1, updatedAt: 1 });
+  });
+  const archive = await exported(source.t), target = convexTest(schema, modules);
+  const importJobId = await staged(target, archive, 'clone');
+  await drive(target, importJobId, 'import', 'READY');
+  await target.mutation(mutation('startApply'), { adminToken, jobId: importJobId });
+  await drive(target, importJobId, 'import', 'COMPLETE');
+  await target.run(async ctx => {
+    for (const scheduled of await ctx.db.system.query('_scheduled_functions').collect())
+      await ctx.scheduler.cancel(scheduled._id);
+  });
+  const candidates = await target.query(makeFunctionReference<'query'>('federation/travelPrivacy:historicalCandidates'), {
+    adminToken, visitId: 'large-history', paginationOpts: { cursor: null, numItems: 5 },
+  });
+  expect(candidates.page).toHaveLength(1);
+  const ledger = await target.run(async ctx => (await ctx.db.query('backupLargeRows')
+    .withIndex('job_relation', q => q.eq('jobId', importJobId).eq('role', 'SOURCE')
+      .eq('table', 'visitLedger').eq('relationKey', 'visit:large-history')).unique())!);
+  await target.run(ctx => ctx.db.patch(ledger._id, { metadata: { ...ledger.metadata, state: undefined } }));
+  await expect(target.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:inspect'), {
+    adminToken, visitId: 'large-history', scope: 'SENSITIVE', history: candidates.page[0].history,
+  })).rejects.toThrow('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+  await target.run(ctx => ctx.db.patch(ledger._id, { metadata: ledger.metadata }));
+  jest.useFakeTimers();
+  try {
+    const jobId: Id<'travelPrivacyJobs'> = await target.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:inspect'), {
+      adminToken, visitId: 'large-history', scope: 'SENSITIVE', history: candidates.page[0].history,
+    });
+    await target.finishAllScheduledFunctions(() => jest.runAllTimers());
+    expect((await target.run(ctx => ctx.db.get(jobId)))!.state).toBe('READY');
+    await target.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:start'), { adminToken, jobId });
+    await target.finishAllScheduledFunctions(() => jest.runAllTimers());
+    await target.run(async ctx => {
+      expect((await ctx.db.get(jobId))!.state).toBe('COMPLETE');
+      expect(await ctx.db.query('memories').collect()).toEqual([]);
+      expect(await ctx.db.query('visitLedger').collect()).toEqual([]);
+      expect((await ctx.db.get(ledger._id))!.metadata).toMatchObject({ visitId: 'large-history', state: 'COMPLETED' });
+    });
+  } finally { jest.useRealTimers(); }
+});
 test('clone creates a new identity and local global ownership while retaining prose and history', async () => {
   const { t } = await town();
   await t.run(async ctx => {

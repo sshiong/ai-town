@@ -307,6 +307,7 @@ export function rowMetadata(table: string, row: BackupRow): BackupRow {
   ];
   const metadata: BackupRow = {};
   for (const key of keys) if (row[key] !== undefined) metadata[key] = row[key];
+  if (table === 'visitLedger') metadata.state = row.state;
   if (redactedFact(table, row)) {
     if (table === 'federationEventFacts') metadata.payload = row.payload;
     else Object.assign(metadata, { action: row.action, result: row.result, receiptPayload: row.receiptPayload });

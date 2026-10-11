@@ -298,3 +298,7 @@ D/E 实际可信 Ollama 证书的最小链均通过：权重 artifact/pipeline/p
 选择性历史入口后续接入：从 backupImports 的 selectiveJobId 定位已完成且 importId/sourceTownId 一致的正式导入任务，通过 job_relation 读取唯一源 visitLedger，并由新增 job_source 索引定位只读 backupSelectiveHistory。编码源账本与只读账本逐项一致才能作为证据。以源 selection 中的唯一居民及正式 targetOwners 映射当前世界、居民和 playerId；旧版无 worldId/homePlayerId 的账本可由选择清单补证，显式字段矛盾则拒绝。沿用当前居民 HOME_ACTIVE、旧租约安全终态、无当前执行账本和逐步重新验证的要求。候选界面现在支持普通与选择性备份历史。
 
 正式选择性克隆新增两种集成场景：显式世界/角色字段和旧版缺字段，实际导出 → 暂存/验证/应用/完成 → 候选 → inspect/start/page 后克隆旅行记忆清除，目标已有居民记忆与只读账本保留，执行 visitLedger 始终为空。另篡改只读账本租约后确认在创建清理 job 前拒绝。普通备份/隐私/语言三套相邻 98 项通过，构建、Convex 类型与 diff 通过；选择性导出/导入完整两套 57 项通过（131 秒）。大包历史入口、连续世界替换后的别名证明、SOURCE/OLD/原始向量归档正文副本、真实浏览器和完整 V/P1 验收仍开放。
+
+大包历史入口后续接入：完成导入的 largeJobId/importId/sourceTownId 必须一致；索引定位唯一 SOURCE visitLedger，保存其 state 作为最小安全证据，并从源世界 newId、residentModelBindings 的源/目标行和全局身份映射交叉验证当前归属。源 homePlayerId、源绑定和目标绑定角色必须一致。旧任务若没有持久化终态字段则显式 HISTORY_EVIDENCE_MISSING，不以租约过期自行推断终态，也不扫描任意存储正文凑证据。Home 历史沿用现有终态安全期、HOME_ACTIVE 和无当前执行账本要求。
+
+正式大包 export/stage/validate/apply/finish 后候选和 inspect/start/page 集成用例通过，克隆记忆删除、只读账本元数据保留、执行 visitLedger 始终为空；移除持久化 state 时创建任务前拒绝。此用例取消导入的向量后台调度以隔离 provider 工作。普通备份/隐私/语言相邻 98 项通过，构建、Convex 类型和 diff 通过；大包完整套件 55 项通过（162 秒），补充角色一致性检查后的正式克隆用例复验通过。连续世界替换后的别名、Host 历史、SOURCE/OLD/原始向量归档正文副本以及浏览器和完整 V/P1 验收仍开放。

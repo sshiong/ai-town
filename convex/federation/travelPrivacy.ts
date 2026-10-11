@@ -92,7 +92,8 @@ async function importedVisitEvidence(ctx: QueryCtx | MutationCtx, imported: Doc<
         worldId: imported.mapping[row.worldId] ?? row.worldId,
         ownerGlobalId: imported.mapping[row.agentGlobalId] ?? row.agentGlobalId,
         playerId: imported.mapping[row.homePlayerId] ?? row.homePlayerId }));
-  const jobId = imported.runtimeSnapshot?.selectiveJobId;
+  const selective = imported.runtimeSnapshot?.selectiveJobId;
+  const jobId = selective ?? imported.runtimeSnapshot?.largeJobId;
   if (!jobId) return [];
   const job = await ctx.db.get(jobId as Id<'backupLargeJobs'>);
   if (!job || job.kind !== 'import' || job.state !== 'COMPLETE' ||
@@ -101,6 +102,29 @@ async function importedVisitEvidence(ctx: QueryCtx | MutationCtx, imported: Doc<
   const staged = await ctx.db.query('backupLargeRows').withIndex('job_relation', q =>
     q.eq('jobId', job._id).eq('role', 'SOURCE').eq('table', 'visitLedger').eq('relationKey', `visit:${visitId}`)).take(2);
   if (staged.length !== 1) return [];
+  if (!selective) {
+    const row = staged[0].metadata;
+    if (!row.state || row.visitId !== visitId || !row.worldId || !row.agentGlobalId || !row.homePlayerId)
+      throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+    const world = await ctx.db.query('backupLargeRows').withIndex('job_role_source', q =>
+      q.eq('jobId', job._id).eq('role', 'SOURCE').eq('sourceId', row.worldId)).unique();
+    const binding = await ctx.db.query('backupLargeRows').withIndex('job_relation', q =>
+      q.eq('jobId', job._id).eq('role', 'SOURCE').eq('table', 'residentModelBindings')
+        .eq('relationKey', `${row.worldId}:${row.homePlayerId}`)).unique();
+    if (world?.table !== 'worlds' || !world.newId || !binding?.newId ||
+      binding.metadata.agentGlobalId !== row.agentGlobalId)
+      throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+    const currentBinding = await ctx.db.get(binding.newId as Id<'residentModelBindings'>);
+    const global = await ctx.db.query('backupLargeGlobalMappings').withIndex('job_source', q =>
+      q.eq('jobId', job._id).eq('sourceId', row.agentGlobalId)).unique();
+    const ownerGlobalId = global?.targetId ?? row.agentGlobalId;
+    if (!currentBinding || currentBinding.worldId !== world.newId || currentBinding.agentGlobalId !== ownerGlobalId)
+      throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+    if (binding.metadata.worldId !== row.worldId || binding.metadata.playerId !== row.homePlayerId ||
+      currentBinding.playerId !== binding.metadata.playerId)
+      throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+    return [{ ledger: row, worldId: world.newId, ownerGlobalId, playerId: currentBinding.playerId }];
+  }
   const envelope = staged[0].metadata.envelope;
   if (envelope?.kind !== 'record') throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
   const stagedLedger = decodeRow(envelope.record);
