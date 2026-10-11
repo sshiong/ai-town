@@ -73,6 +73,7 @@ const configurationChoices: { value: Options['configuration'][number]; label: st
   { value: 'federationResourcePolicy', label: 'Reception and source quotas' },
   { value: 'visitorPolicy', label: 'Visitor limits' },
   { value: 'mainChatProfile', label: 'Main Chat Profile (future residents)' },
+  { value: 'modelProviderQuotas', label: 'Provider daily request quotas (usage is not transferred)' },
   { value: 'embeddingProfiles', label: 'Embedding drafts (no active space switch)' },
 ];
 

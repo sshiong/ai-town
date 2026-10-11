@@ -29,7 +29,7 @@ export async function recallConversationMemories(
   let embedding;
   try {
     route = await activeRoute(ctx);
-    embedding = await embeddingsCache.fetch(ctx, searchText, { route, inputMode: 'query' });
+    embedding = await embeddingsCache.fetch(ctx, searchText, { route, inputMode: 'query', owner: { worldId, playerId } });
   } catch (error) {
     console.warn('CONVERSATION_MEMORY_CANONICAL_FALLBACK', String(error).slice(0, 300));
     return combine(await ctx.runQuery(internal.agent.memory.canonicalMemories, { worldId, playerId, n }));

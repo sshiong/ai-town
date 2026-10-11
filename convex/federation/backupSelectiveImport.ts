@@ -1,11 +1,10 @@
+import { trackedMutation as mutation, trackedInternalMutation as internalMutation } from '../maintenanceFunctions';
 import { v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
 import {
   action,
-  internalMutation,
   internalAction,
   internalQuery,
-  mutation,
   query,
   MutationCtx,
   DatabaseReader,
@@ -18,6 +17,9 @@ import { BackupRow, BackupBundle, decodeRow, encodeRow, stripSystem } from './ba
 import { coldScope } from './coldLarge';
 import { restoreColdFiles, validateColdAttachments } from './coldBackup';
 import { captureSource } from './coldHistory';
+import { source as coldSource, archiveFor } from './coldHistory';
+import { fileStorageDescriptor } from './coldHistoryFiles';
+import { claimColdBackupPart, advanceColdBackupCounts, portablePartMetadata } from './coldBackupProgress';
 import {
   ChunkDescriptor,
   LargeChunk,
@@ -29,6 +31,7 @@ import {
   descriptor,
   size,
   validateSourceRow,
+  relationKey as backupRelationKey,
 } from './backupLargeHelpers';
 import {
   ArchiveEnvelope,
@@ -537,6 +540,10 @@ export const saveChunk = internalMutation({
         throw new Error('BACKUP_IDENTITY_MISMATCH');
       if (row && ['chatProfiles', 'embeddingProfiles'].includes(chunk.table))
         validateConnection(row as never);
+      if (row && chunk.table === 'modelProviderQuotas' && await ctx.db.query('backupLargeRows')
+        .withIndex('job_relation', q => q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', chunk.table)
+          .eq('relationKey', backupRelationKey(chunk.table, row)!)).unique())
+        throw new Error('DUPLICATE_MODEL_PROVIDER_QUOTA');
       await ctx.db.insert('backupLargeRows', {
         jobId: j._id,
         role: 'SOURCE',
@@ -550,6 +557,7 @@ export const saveChunk = internalMutation({
         ownerGlobalId: row ? rowOwner(row, m.selection)?.agentGlobalId : undefined,
         worldId: row?.worldId,
         sourceScope: row ? coldScope(chunk.table, row) : undefined,
+        relationKey: row ? backupRelationKey(chunk.table, row) : undefined,
       });
     }
     await ctx.db.insert('backupLargeChunks', {
@@ -1019,6 +1027,20 @@ export const coldPageData = internalQuery({
         const graph = [memory, world, binding], memoryData = data(memory).data;
         const scope = memoryData.type === 'conversation' ? memoryData.conversationId :
           JSON.stringify([row.owner.agentGlobalId, memoryData.transcriptId ?? `${memoryData.federationConversationId}/${memoryData.visitId}`]);
+        if (row.file.version === 2) {
+          const required: [string, string][] = memoryData.type === 'conversation'
+            ? [['archivedConversations', JSON.stringify([row.owner.worldId, memoryData.conversationId])],
+              ...row.file.payload.messages.map((message: BackupRow): [string, string] => ['messages', JSON.stringify([row.owner.worldId, memoryData.conversationId, message.messageId])])]
+            : [['homeTravelTranscripts', scope], ['homeTravelTranscriptPages', JSON.stringify([...JSON.parse(scope), row.file.payload.sourcePageNumber])]];
+          for (const [name, relation] of required) {
+            const staged = await ctx.db.query('backupLargeRows').withIndex('job_relation', q => q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', name).eq('relationKey', relation)).unique();
+            if (!staged) throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
+            graph.push(staged);
+          }
+          for (const staged of graph) (rows[staged.table] ??= []).push(data(staged));
+          entries.push({ sourceId: r.sourceId, file, rows, apply });
+          continue;
+        }
         for (const name of memoryData.type === 'conversation' ? ['archivedConversations', 'messages'] : ['homeTravelTranscripts', 'homeTravelTranscriptPages']) {
           const matches = await ctx.db.query('backupLargeRows').withIndex('job_scope', q =>
             q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', name)
@@ -1049,11 +1071,23 @@ export const saveColdPage = internalMutation({
         key('travel', row.owner.worldId, row.owner.agentGlobalId, d.transcriptId ?? `${d.federationConversationId}/${d.visitId}`);
       const existing = await ctx.db.query('backupLargeRows').withIndex('job_relation', q =>
         q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', 'coldHistoryFiles').eq('relationKey', relationKey)).unique();
-      if (existing && existing.sourceId !== id) throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
-      await ctx.db.patch(r._id, { relationKey });
+      if (row.file.version === 2) {
+        if (existing) throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+        const sourceScope = d.type === 'conversation' ? d.conversationId : JSON.stringify([row.owner.agentGlobalId,
+          d.transcriptId ?? `${d.federationConversationId}/${d.visitId}`]);
+        const transcript = d.type === 'travel' ? await ctx.db.query('backupLargeRows').withIndex('job_relation', q => q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', 'homeTravelTranscripts').eq('relationKey', sourceScope)).unique() : null;
+        await claimColdBackupPart(ctx, j._id, relationKey, sourceScope, portablePartMetadata(row),
+          transcript ? data(transcript).finalPageNumber + 1 : undefined);
+        await ctx.db.patch(r._id, { relationKey: `${relationKey}/part/${row.file.descriptor.index}` });
+      } else {
+        if (await ctx.db.query('coldBackupChecks').withIndex('job_scope', q => q.eq('jobId', j._id).eq('scope', relationKey)).unique())
+          throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+        if (existing && existing.sourceId !== id) throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+        await ctx.db.patch(r._id, { relationKey });
+      }
     }
     await ctx.db.patch(j._id, { cursor: a.done ? null : a.cursor,
-      phase: a.done ? 'CAPTURE_TARGET' : j.phase, updatedAt: Date.now() });
+      phase: a.done ? 'VALIDATE_COLD_COUNTS' : j.phase, updatedAt: Date.now() });
   },
 });
 export const applyColdPage = internalMutation({
@@ -1074,7 +1108,8 @@ export const applyColdPage = internalMutation({
           [row.owner.memoryId]: memory.newId, [row.owner.playerId]: target.playerId,
           [row.owner.agentGlobalId]: target.agentGlobalId };
         const prior = new Map<string, string>(row.authorAliases.map((alias: any) => [alias.sourceAuthor, alias.targetAuthor]));
-        const authors = new Set<string>(row.file.payload.messages.map((message: any) => message.authorGlobalId ?? message.authorPlayerId));
+        const authors = new Set<string>([...row.file.payload.messages.map((message: any) => message.authorGlobalId ?? message.authorPlayerId),
+          ...row.authorAliases.map((alias: any) => alias.sourceAuthor)]);
         if (row.file.manifest.kind === 'travel') authors.add(JSON.parse(row.file.manifest.sourceKey)[2]);
         for (const author of authors) {
           const localAuthor = prior.get(author) ?? author;
@@ -1085,16 +1120,29 @@ export const applyColdPage = internalMutation({
         const owner = { adminToken: process.env.FEDERATION_ADMIN_TOKEN ?? '',
           worldId: target.worldId as Id<'worlds'>, playerId: target.playerId,
           agentGlobalId: target.agentGlobalId, memoryId: memory.newId as Id<'memories'> };
-        const before = await captureSource(ctx, owner, true);
+        const before = row.file.version === 2 ? { existing: await archiveFor(ctx, (await coldSource(ctx, owner)).sourceKey) } : await captureSource(ctx, owner, true);
         await restoreColdFiles(ctx, owner.adminToken, { coldHistoryFiles: [{ owner: row.owner,
           file: row.file, authorAliases: row.authorAliases }] } as BackupBundle, mapping, [{ index: 0, storageId: a.storageId }]);
-        const after = await captureSource(ctx, owner);
+        const after = row.file.version === 2 ? { existing: await archiveFor(ctx, (await coldSource(ctx, owner)).sourceKey) } : await captureSource(ctx, owner);
         if (!before.existing && after.existing) await journal(ctx, j, 'coldHistoryArchives', after.existing._id);
+        if (row.file.version === 2 && after.existing) {
+          const part = await ctx.db.query('coldHistoryChunks').withIndex('archive_index', q => q.eq('archiveId', after.existing!._id).eq('index', row.file.descriptor.index)).unique();
+          if (part && part.storageId === a.storageId) await journal(ctx, j, 'coldHistoryChunks', part._id);
+        }
         await ctx.db.patch(staged._id, { state: 'APPLIED' });
       }
     }
     await ctx.db.patch(j._id, { cursor: a.done ? null : a.cursor,
       phase: a.done ? 'VECTOR_RESET' : j.phase, updatedAt: Date.now() });
+  },
+});
+export const validateColdCounts = internalMutation({
+  args: { jobId: v.id('backupLargeJobs') },
+  handler: async (ctx, a) => {
+    const j = await owned(ctx, a.jobId);
+    if (j.phase !== 'VALIDATE_COLD_COUNTS') throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    if (await advanceColdBackupCounts(ctx, j._id))
+      await ctx.db.patch(j._id, { phase: 'CAPTURE_TARGET', updatedAt: Date.now() });
   },
 });
 
@@ -1286,11 +1334,16 @@ export const prepare = internalMutation({
         .query('residentModelBindings')
         .withIndex('globalAgent', (q) => q.eq('agentGlobalId', target.agentGlobalId))
         .unique();
+      const sourceBinding = await ctx.db.query('backupLargeRows')
+        .withIndex('job_owner', q => q.eq('jobId', j._id).eq('role', 'SOURCE')
+          .eq('table', 'residentModelBindings').eq('ownerGlobalId', original.agentGlobalId)).unique();
+      if (!sourceBinding) throw new Error('SELECTIVE_IMPORT_SOURCE_BINDING_MISMATCH');
       const bindingFields = {
         worldId: world._id,
         playerId: target.playerId,
         agentGlobalId: target.agentGlobalId,
         chatProfileId: profileId,
+        requestQuotas: data(sourceBinding).requestQuotas,
         createdAt: binding?.createdAt ?? Date.now(),
         updatedAt: Date.now(),
       };
@@ -1658,6 +1711,13 @@ async function applyConfiguration(ctx: MutationCtx, j: Job, r: Row) {
     row = data(r),
     fields = stripSystem(row),
     options = m.options;
+  if (r.table === 'modelProviderQuotas' && options.configuration.includes('modelProviderQuotas')) {
+    const existing = await ctx.db.query('modelProviderQuotas').withIndex('provider', q =>
+      q.eq('kind', row.kind).eq('providerKey', row.providerKey)).unique();
+    if (existing) await ctx.db.replace(existing._id, fields as never);
+    else await insert(ctx, j, r.table, fields);
+    return;
+  }
   if (r.table === 'embeddingProfiles' && options.configuration.includes('embeddingProfiles')) {
     await insert(ctx, j, r.table, {
       ...fields,
@@ -1907,10 +1967,12 @@ export const advanceImport = action({
         for (const entry of page.entries) {
           const files = [entry.file], bytes = size(files);
           await validateColdAttachments({ coldHistoryFiles: files, signature: j.signature,
-            manifest: { coldHistoryFiles: { count: 1, bytes, digest: await digest(files) } } } as BackupBundle, entry.rows);
+            manifest: { coldHistoryFiles: { count: 1, bytes, digest: await digest(files) } } } as BackupBundle, entry.rows, entry.file.file.version === 2);
         }
         await ctx.runMutation(mref('saveColdPage'), { jobId: j._id, expectedCursor: j.cursor,
           cursor: page.continueCursor, done: page.isDone, sourceIds: page.entries.map((e: any) => e.sourceId) });
+      } else if (j.phase === 'VALIDATE_COLD_COUNTS') {
+        await ctx.runMutation(mref('validateColdCounts'), { jobId: j._id });
       } else if (j.phase === 'APPLY_COLD') {
         const page = await ctx.runQuery(qref('coldPageData'), { jobId: j._id });
         let storageId: Id<'_storage'> | undefined;
@@ -1919,7 +1981,8 @@ export const advanceImport = action({
           storageId = await ctx.storage.store(new Blob([JSON.stringify(file.payload)], { type: 'application/json' }));
           stored.push(storageId);
           const object = await ctx.storage.get(storageId);
-          if (!object || object.size !== file.manifest.bytes || (await digest(JSON.parse(await object.text()))) !== file.manifest.digest)
+          const expected = fileStorageDescriptor(file);
+          if (!object || object.size !== expected.bytes || (await digest(JSON.parse(await object.text()))) !== expected.digest)
             throw new Error('COLD_HISTORY_INTEGRITY_FAILED');
         }
         publicationPending = !!storageId;

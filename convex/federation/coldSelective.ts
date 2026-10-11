@@ -1,6 +1,6 @@
 import type { QueryCtx } from '../_generated/server';
 import type { Doc } from '../_generated/dataModel';
-import { captureSource } from './coldHistory';
+import { captureSource, source, archiveFor } from './coldHistory';
 import { inBounds, type Selection } from './backupSelectiveHelpers';
 import type { BackupRow } from './backupHelpers';
 
@@ -124,11 +124,10 @@ export async function selectiveColdCandidate(
       exclusion: 'SOURCE_SCOPE_NOT_SELECTED' as const,
       verifyOriginal: false,
     };
-  const captured = await captureSource(
-    ctx,
-    { ...owner, adminToken: process.env.FEDERATION_ADMIN_TOKEN ?? '' },
-    true,
-  );
+  const authOwner = { ...owner, adminToken: process.env.FEDERATION_ADMIN_TOKEN ?? '' };
+  const captured = archive.manifest.version === 2
+    ? { existing: await archiveFor(ctx, (await source(ctx, authOwner)).sourceKey) }
+    : await captureSource(ctx, authOwner, true);
   if (captured.existing?._id !== archive._id) throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
   let originals: BackupRow[];
   if (archive.kind === 'conversation') {
@@ -136,7 +135,7 @@ export async function selectiveColdCandidate(
       .query('archivedConversations')
       .withIndex('worldId', (q) => q.eq('worldId', archive.worldId).eq('id', lookup[2]))
       .unique();
-    const messages = await ctx.db
+    const messages = archive.manifest.version === 2 ? [] : await ctx.db
       .query('messages')
       .withIndex('conversationId', (q) =>
         q.eq('worldId', archive.worldId).eq('conversationId', lookup[2]),
@@ -150,7 +149,7 @@ export async function selectiveColdCandidate(
         q.eq('agentGlobalId', owner.agentGlobalId).eq('transcriptId', lookup[3]),
       )
       .unique();
-    const pages = await ctx.db
+    const pages = archive.manifest.version === 2 ? [] : await ctx.db
       .query('homeTravelTranscriptPages')
       .withIndex('owner_transcript_page', (q) =>
         q.eq('agentGlobalId', owner.agentGlobalId).eq('transcriptId', lookup[3]),

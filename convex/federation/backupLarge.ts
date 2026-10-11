@@ -1,14 +1,17 @@
+import { trackedMutation as mutation, trackedInternalMutation as internalMutation } from '../maintenanceFunctions';
 import { coldLargeOwner, checkColdLargeExport, validateColdLargeRow, coldScope, type ColdLargeRow } from './coldLarge';
 import { load as loadColdHistory } from './coldHistory';
+import { fileStorageDescriptor } from './coldHistoryFiles';
+import { actionRef } from './refs';
+import { claimColdBackupPart, advanceColdBackupCounts } from './coldBackupProgress';
+import { coldExportSourcePage } from './coldExportProgress';
 import { restoreColdFiles, validateColdAttachments } from './coldBackup';
 import type { BackupBundle } from './backupHelpers';
 import { v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
 import {
   action,
-  internalMutation,
   internalQuery,
-  mutation,
   query,
   DatabaseReader,
   MutationCtx,
@@ -51,6 +54,7 @@ import { validateConnection } from '../models/profiles';
 import { defaultStoragePolicy } from './storagePolicy';
 import { embeddingFingerprint } from '../models/compatibility';
 import { assertNoIdentityConflict } from './identityConflict';
+import { attribution, exportAttribution } from './backupExportAudit';
 
 type Job = Doc<'backupLargeJobs'>;
 const args = { adminToken: v.string(), jobId: v.id('backupLargeJobs') };
@@ -82,6 +86,7 @@ function publicJob(job: Job) {
     recordCount: job.recordCount,
     bytes: job.bytes,
     error: job.error,
+    exportAttribution: job.kind === 'export' ? job.metadata?.exportAttribution : undefined,
     canResume: job.state === 'FAILED',
   };
 }
@@ -133,9 +138,10 @@ export const listJobs = query({
   },
 });
 export const startExport = mutation({
-  args: { adminToken: v.string() },
+  args: { adminToken: v.string(), ...exportAttribution },
   handler: async (ctx, a) => {
     requireAdmin(a.adminToken);
+    const declared = attribution(a);
     await assertTownUnlocked(ctx);
     const local = await stable(ctx);
     const now = Date.now();
@@ -152,6 +158,7 @@ export const startExport = mutation({
       createdAt: now,
       updatedAt: now,
       source: sanitizeLargeValue(local),
+      metadata: { exportAttribution: declared },
     });
     await ctx.db.insert('backupMaintenanceLocks', { key: 'town', jobId, createdAt: now });
     return { jobId };
@@ -224,9 +231,13 @@ export const saveExportPage = internalMutation({
     jobId: v.id('backupLargeJobs'),
     expectedCursor: v.union(v.string(), v.null()),
     expectedTableIndex: v.number(),
-    cursor: v.string(),
+    cursor: v.union(v.string(), v.null()),
     done: v.boolean(),
     chunks: v.array(v.any()),
+    expectedColdPartIndex: v.optional(v.number()),
+    coldPartIndex: v.optional(v.number()),
+    expectedColdRevision: v.optional(v.number()),
+    coldProgress: v.optional(v.any()),
   },
   handler: async (ctx, a) => {
     const job = await owned(ctx, a.jobId);
@@ -235,6 +246,10 @@ export const saveExportPage = internalMutation({
       job.cursor !== a.expectedCursor ||
       job.tableIndex !== a.expectedTableIndex
     )
+      throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    if (a.expectedColdPartIndex !== undefined && (job.metadata?.coldPartIndex ?? 0) !== a.expectedColdPartIndex)
+      throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    if (a.expectedColdRevision !== undefined && (job.metadata?.coldRevision ?? 0) !== a.expectedColdRevision)
       throw new Error('BACKUP_CHECKPOINT_CHANGED');
     let bytes = job.bytes,
       records = job.recordCount;
@@ -256,6 +271,9 @@ export const saveExportPage = internalMutation({
       cursor: a.done ? null : a.cursor,
       phase: a.done && job.tableIndex + 1 === largeTables.length ? 'SIGNING' : 'EXPORTING',
       updatedAt: Date.now(),
+      ...(a.coldPartIndex !== undefined || a.coldProgress ? { metadata: { ...job.metadata,
+        ...(a.coldPartIndex !== undefined ? { coldPartIndex: a.coldPartIndex } : {}), ...a.coldProgress,
+        coldRevision: (job.metadata?.coldRevision ?? 0) + 1 } } : {}),
     });
   },
 });
@@ -264,10 +282,23 @@ export const finishExport = internalMutation({
     jobId: v.id('backupLargeJobs'),
     manifestStorageId: v.id('_storage'),
     signature: v.string(),
+    manifestDigest: v.string(),
+    sectionCounts: v.record(v.string(), v.number()),
   },
   handler: async (ctx, a) => {
     const job = await owned(ctx, a.jobId);
     if (job.phase !== 'SIGNING') throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    await ctx.db.insert('backupExportAudits', {
+      scope: 'town',
+      sourceTownId: job.source.townId,
+      exportedAt: job.createdAt,
+      recordedAt: Date.now(),
+      ...attribution(job.metadata?.exportAttribution?.attribution === 'legacy-admin-token'
+        ? {} : job.metadata?.exportAttribution ?? {}),
+      manifestDigest: a.manifestDigest,
+      sectionCounts: a.sectionCounts,
+      bytes: job.bytes,
+    });
     const policy = await ctx.db
       .query('storagePolicies')
       .withIndex('key', (q) => q.eq('key', 'local'))
@@ -365,6 +396,24 @@ export const advanceExport = action({
         const page = await ctx.runQuery(readRef('page'), { jobId: job._id });
         if (page.table === 'coldHistoryFiles') {
           for (const {archive,owner} of page.archives ?? []) {
+            if (archive.manifest.version === 2) {
+              if (!job.metadata?.coldScopeChecked) {
+                const checked = await ctx.runQuery(readRef('checkColdScope'), { jobId: job._id, archiveId: archive._id, owner, adminToken: a.adminToken });
+                page.coldProgress = { coldScopeScan: checked.scan, coldScopeChecked: checked.done };
+                page.continueCursor = job.cursor; page.isDone = false;
+                continue;
+              }
+              const index = job.metadata?.coldPartIndex ?? 0;
+              const file = await ctx.runAction(actionRef('coldHistoryChunks/exportPart'), { ...owner, adminToken: a.adminToken, index });
+              const row: ColdLargeRow = { _id: `${archive._id}/part/${index}`, _creationTime: archive._creationTime,
+                owner, file, authorAliases: archive.authorAliases ?? [] };
+              await ctx.runQuery(readRef('checkColdExport'), { jobId: job._id, rowJson: JSON.stringify(row), adminToken: a.adminToken });
+              page.rows.push(row);
+              page.coldPartIndex = index + 1 < archive.manifest.chunkCount ? index + 1 : 0;
+              if (page.coldPartIndex) { page.continueCursor = job.cursor; page.isDone = false; }
+              else page.coldProgress = { coldScopeScan: null, coldScopeChecked: false };
+              continue;
+            }
             const payload=await loadColdHistory(ctx,archive);
             const row: ColdLargeRow = {_id:archive._id,_creationTime:archive._creationTime,owner,
               file:{format:'ai-town-cold-history-file',version:1,manifest:archive.manifest,publicKey:archive.publicKey,signature:archive.signature,payload},authorAliases:archive.authorAliases ?? []};
@@ -372,7 +421,7 @@ export const advanceExport = action({
             page.rows.push(row);
           }
         }
-        let groups: unknown[][] = [[]];
+        let groups: unknown[][] = page.table === 'coldHistoryFiles' && !page.rows.length && page.coldProgress ? [] : [[]];
         for (const row of page.rows) {
           let current = groups[groups.length - 1];
           const encoded = encodeRow(row);
@@ -405,6 +454,10 @@ export const advanceExport = action({
           cursor: page.continueCursor,
           done: page.isDone,
           chunks,
+          expectedColdPartIndex: page.table === 'coldHistoryFiles' ? job.metadata?.coldPartIndex ?? 0 : undefined,
+          coldPartIndex: page.coldPartIndex,
+          expectedColdRevision: page.table === 'coldHistoryFiles' ? job.metadata?.coldRevision ?? 0 : undefined,
+          coldProgress: page.coldProgress,
         });
         publicationPending = false;
       } else if (job.phase === 'SIGNING') {
@@ -429,6 +482,11 @@ export const advanceExport = action({
           jobId: job._id,
           manifestStorageId,
           signature,
+          manifestDigest: await digest(manifest),
+          sectionCounts: manifest.chunks.reduce<Record<string, number>>((counts, chunk) => {
+            counts[chunk.table] = (counts[chunk.table] ?? 0) + chunk.count;
+            return counts;
+          }, {}),
         });
         publicationPending = false;
       }
@@ -1040,6 +1098,8 @@ function activeFields(name: string, row: BackupRow, job: Job, allocation: boolea
       status: 'RETIRED',
       validatedAt: undefined,
       validationSampleCount: undefined,
+      coverageJobId: undefined,
+      validationJobId: undefined,
       failure: undefined,
     };
   if (name === 'storagePolicies') fields = { ...fields, lastVerifiedBackupAt: undefined };
@@ -1352,6 +1412,7 @@ export const advanceImport = action({
           expectedCursor: job.cursor,
         });
       else if (job.phase === 'VALIDATE_COLD') await advanceColdValidation(ctx,job);
+      else if (job.phase === 'VALIDATE_COLD_COUNTS') await ctx.runMutation(writeRef('validateColdCounts'), { jobId: job._id });
       else if (job.phase === 'CAPTURE_OLD') {
         const page = await ctx.runQuery(readRef('capturePage'), { jobId: job._id });
         const chunks: (ChunkDescriptor & { storageId: Id<'_storage'>; json: string })[] = [];
@@ -1402,7 +1463,8 @@ export const advanceImport = action({
           const row=await validateColdLargeRow(decodeRow(chunk.rows[0]));
           coldStorageId=await storeJSON(ctx,row.file.payload);created.push(coldStorageId);
           const object=await ctx.storage.get(coldStorageId);
-          if (!object || object.size !== row.file.manifest.bytes || await digest(JSON.parse(await object.text())) !== row.file.manifest.digest)
+          const expected = fileStorageDescriptor(row.file);
+          if (!object || object.size !== expected.bytes || await digest(JSON.parse(await object.text())) !== expected.digest)
             throw new Error('BACKUP_COLD_FILES_STORAGE_INVALID');
         }
         publicationPending=!!coldStorageId;
@@ -1429,6 +1491,16 @@ export const advanceImport = action({
   },
 });
 
+export const checkColdScope = internalQuery({
+  args: { jobId: v.id('backupLargeJobs'), archiveId: v.id('coldHistoryArchives'), owner: v.any(), adminToken: v.string() },
+  handler: async (ctx, a) => {
+    requireAdmin(a.adminToken); const job = await owned(ctx, a.jobId); await stable(ctx);
+    if (job.phase !== 'EXPORTING') throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    const archive = await ctx.db.get(a.archiveId);
+    if (!archive || archive.state !== 'VERIFIED') throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
+    return coldExportSourcePage(ctx, job, archive, { ...a.owner, adminToken: a.adminToken });
+  },
+});
 export const checkColdExport = internalQuery({
   args:{jobId:v.id('backupLargeJobs'),rowJson:v.string(),adminToken:v.string()},
   handler:async(ctx,a)=>{
@@ -1459,6 +1531,19 @@ export const coldValidationData = internalQuery({
       if (!data || data.type !== cold.metadata.kind) throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
       const scopes=data.type === 'conversation' ? ['archivedConversations','messages'] : ['homeTravelTranscripts','homeTravelTranscriptPages'];
       const scope=data.type === 'conversation' ? data.conversationId : JSON.stringify([owner.agentGlobalId,data.transcriptId ?? `${data.federationConversationId}/${data.visitId}`]);
+      if (cold.metadata.manifest?.version === 2) {
+        const required: [string, string][] = data.type === 'conversation'
+          ? [['archivedConversations', JSON.stringify([owner.worldId, data.conversationId])],
+            ...cold.metadata.messageIds.map((id: string): [string, string] => ['messages', JSON.stringify([owner.worldId, data.conversationId, id])])]
+          : [['homeTravelTranscripts', scope],
+            ['homeTravelTranscriptPages', JSON.stringify([...JSON.parse(scope), cold.metadata.sourcePageNumber])]];
+        for (const [name, key] of required) {
+          const row = await relatedRow(ctx, job._id, name, key);
+          if (!row) throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
+          graph.push(row);
+        }
+        continue;
+      }
       for (const name of scopes) {
         const matches=await ctx.db.query('backupLargeRows').withIndex('job_scope',q=>q.eq('jobId',job._id).eq('role','SOURCE').eq('table',name).eq('worldId',name === 'homeTravelTranscriptPages' ? undefined : owner.worldId).eq('sourceScope',scope)).take(1001);
         if (matches.length>1000) throw new Error('COLD_HISTORY_REQUIRES_CHUNKED_ARCHIVE');
@@ -1498,11 +1583,31 @@ export const saveColdValidation = internalMutation({
         : JSON.stringify(['travel', owner.worldId, owner.agentGlobalId,
             data.transcriptId ?? `${data.federationConversationId}/${data.visitId}`]);
       const existing = await relatedRow(ctx, job._id, 'coldHistoryFiles', key);
-      if (existing && existing.sourceId !== row.sourceId)
-        throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
-      await ctx.db.patch(row._id,{state:'VALIDATED',relationKey:key});
+      if (row.metadata.manifest?.version === 2) {
+        if (existing) throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+        const sourceScope = data.type === 'conversation' ? data.conversationId : JSON.stringify([owner.agentGlobalId,
+          data.transcriptId ?? `${data.federationConversationId}/${data.visitId}`]);
+        const transcript = data.type === 'travel' ? await relatedRow(ctx, job._id, 'homeTravelTranscripts', sourceScope) : null;
+        await claimColdBackupPart(ctx, job._id, key, sourceScope, row.metadata as any,
+          transcript ? transcript.metadata.finalPageNumber + 1 : undefined);
+        await ctx.db.patch(row._id, { state: 'VALIDATED', relationKey: `${key}/part/${row.metadata.descriptor.index}` });
+      } else {
+        if (await ctx.db.query('coldBackupChecks').withIndex('job_scope', q => q.eq('jobId', job._id).eq('scope', key)).unique())
+          throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+        if (existing && existing.sourceId !== row.sourceId) throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+        await ctx.db.patch(row._id,{state:'VALIDATED',relationKey:key});
+      }
     }
-    await ctx.db.patch(job._id,{cursor:a.done?null:a.cursor,phase:a.done?'READY':'VALIDATE_COLD',state:a.done?'READY':'VALIDATING',updatedAt:Date.now()});
+    await ctx.db.patch(job._id,{cursor:a.done?null:a.cursor,phase:a.done?'VALIDATE_COLD_COUNTS':'VALIDATE_COLD',state:'VALIDATING',updatedAt:Date.now()});
+  },
+});
+export const validateColdCounts = internalMutation({
+  args: { jobId: v.id('backupLargeJobs') },
+  handler: async (ctx, a) => {
+    const job = await owned(ctx, a.jobId);
+    if (job.phase !== 'VALIDATE_COLD_COUNTS') throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    if (await advanceColdBackupCounts(ctx, job._id))
+      await ctx.db.patch(job._id, { phase: 'READY', state: 'READY', updatedAt: Date.now() });
   },
 });
 async function advanceColdValidation(ctx:ActionCtx,job:Job) {
@@ -1517,7 +1622,8 @@ async function advanceColdValidation(ctx:ActionCtx,job:Job) {
   const files=(rows.coldHistoryFiles ?? []).map(r=>({owner:r.owner,file:r.file,authorAliases:r.authorAliases}));
   if (files.length) {
     const bytes=new TextEncoder().encode(JSON.stringify(files)).length;
-    await validateColdAttachments({coldHistoryFiles:files,signature:job.signature,manifest:{coldHistoryFiles:{count:files.length,bytes,digest:await digest(files)}}} as BackupBundle,rows);
+    await validateColdAttachments({coldHistoryFiles:files,signature:job.signature,manifest:{coldHistoryFiles:{count:files.length,bytes,digest:await digest(files)}}} as BackupBundle,rows,
+      files.some(f => f.file.version === 2));
   }
   await ctx.runMutation(writeRef('saveColdValidation'),{jobId:job._id,expectedCursor:job.cursor,cursor:data.continueCursor,done:data.isDone,sourceIds:data.rows});
 }

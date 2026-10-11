@@ -14,6 +14,7 @@ import { GameId, parseGameId, playerId } from '../aiTown/ids';
 import { assertFederationAdmin } from '../federation/auth';
 import { ChatConfig, chatCompletion, getChatConfig } from '../util/llm';
 import { chatOptions, connectionFields } from './schema';
+import { trackedModelCall } from './usage';
 
 export function validateConnection(profile: {
   name: string;
@@ -61,6 +62,7 @@ export async function audit(
   previous?: string,
 ) {
   await ctx.db.insert('modelAudits', {
+    actor: 'FEDERATION_ADMIN',
     operation,
     subject,
     next,
@@ -96,7 +98,9 @@ export const setMain = mutation({
   args: { adminToken: v.string(), chatProfileId: v.id('chatProfiles') },
   handler: async (ctx, args) => {
     assertFederationAdmin(args.adminToken);
-    if (!(await ctx.db.get(args.chatProfileId))) throw new Error('CHAT_PROFILE_NOT_FOUND');
+    const target = await ctx.db.get(args.chatProfileId);
+    if (!target) throw new Error('CHAT_PROFILE_NOT_FOUND');
+    if (target.disabled) throw new Error('CHAT_PROFILE_DISABLED');
     const health = await chatProfileHealth(ctx, args.chatProfileId);
     if (health?.operation !== 'PROBE_CHAT_SUCCESS') throw new Error('CHAT_PROFILE_NOT_VALIDATED');
     const config = await settings(ctx);
@@ -146,6 +150,8 @@ export async function bindResident(
   if (chatProfileId) {
     const main = await ctx.db.get(chatProfileId);
     if (!main) throw new Error('MAIN_CHAT_PROFILE_MISSING');
+    if (main.apiKeyEnv && !process.env[main.apiKeyEnv]) throw new Error('MAIN_CHAT_CREDENTIAL_UNAVAILABLE');
+    if (main.disabled) throw new Error('MAIN_CHAT_PROFILE_DISABLED');
     const health = await chatProfileHealth(ctx, chatProfileId);
     if (health?.operation === 'PROBE_CHAT_FAILED' || (!main.legacy && health?.operation !== 'PROBE_CHAT_SUCCESS'))
       throw new Error('MAIN_CHAT_PROFILE_NOT_VALIDATED');
@@ -205,7 +211,9 @@ export const setResidentChat = mutation({
   handler: async (ctx, args) => {
     assertFederationAdmin(args.adminToken);
     if (!args.reason.trim() || args.reason.length > 1000) throw new Error('AUDIT_REASON_REQUIRED');
-    if (!(await ctx.db.get(args.chatProfileId))) throw new Error('CHAT_PROFILE_NOT_FOUND');
+    const target = await ctx.db.get(args.chatProfileId);
+    if (!target) throw new Error('CHAT_PROFILE_NOT_FOUND');
+    if (target.disabled) throw new Error('CHAT_PROFILE_DISABLED');
     const bindingId = await bindResident(ctx, args.worldId, parseGameId('players', args.playerId));
     const binding = await ctx.db.get(bindingId);
     await ctx.db.patch(bindingId, { chatProfileId: args.chatProfileId, updatedAt: Date.now() });
@@ -246,6 +254,7 @@ export const getResidentProfile = internalQuery({
   },
 });
 export function profileChatConfig(profile: Doc<'chatProfiles'>): ChatConfig {
+  if (profile.disabled) throw new Error('BOUND_CHAT_PROFILE_DISABLED');
   const apiKey = profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : undefined;
   if (profile.apiKeyEnv && !apiKey)
     throw new Error(`MODEL_CREDENTIAL_MISSING: ${profile.apiKeyEnv}`);
@@ -256,6 +265,7 @@ export function profileChatConfig(profile: Doc<'chatProfiles'>): ChatConfig {
     stopWords: profile.stopWords,
     reasoningEffort: profile.reasoningEffort,
     apiKey,
+    modelUsage: { profileId: profile._id },
   };
 }
 export async function chatConfigForResident(
@@ -264,18 +274,25 @@ export async function chatConfigForResident(
   id: GameId<'players'>,
 ): Promise<ChatConfig> {
   await ctx.runMutation(internal.models.profiles.ensureResidentBinding, { worldId, playerId: id });
-  return profileChatConfig(
-    await ctx.runQuery(internal.models.profiles.getResidentProfile, { worldId, playerId: id }),
-  );
+  const config = profileChatConfig(await ctx.runQuery(internal.models.profiles.getResidentProfile, { worldId, playerId: id }));
+  return { ...config, modelUsage: { ...config.modelUsage!, worldId, playerId: id } };
 }
 export async function chatConfigForGlobalAgent(
   ctx: ActionCtx,
   agentGlobalId: string,
 ): Promise<ChatConfig> {
-  return profileChatConfig(
-    await ctx.runQuery(internal.models.profiles.getResidentProfile, { agentGlobalId }),
-  );
+  const binding = await ctx.runQuery(internal.models.profiles.globalBinding, { agentGlobalId });
+  const config = profileChatConfig(await ctx.runQuery(internal.models.profiles.getResidentProfile, { agentGlobalId }));
+  return { ...config, modelUsage: { ...config.modelUsage!, worldId: binding.worldId, playerId: binding.playerId } };
 }
+export const globalBinding = internalQuery({
+  args: { agentGlobalId: v.string() },
+  handler: async (ctx, args) => {
+    const binding = await ctx.db.query('residentModelBindings').withIndex('globalAgent', q => q.eq('agentGlobalId', args.agentGlobalId)).unique();
+    if (!binding) throw new Error('RESIDENT_MODEL_BINDING_MISSING');
+    return binding;
+  },
+});
 export const list = query({
   args: { adminToken: v.string() },
   handler: async (ctx, args) => {
@@ -289,6 +306,9 @@ export const list = query({
         ctx.db.query('modelAudits').order('desc').take(100),
         settings(ctx),
       ]);
+    const descriptions = await Promise.all([...new Set(bindings.map(binding => binding.worldId))]
+      .map(worldId => ctx.db.query('playerDescriptions').withIndex('worldId', q => q.eq('worldId', worldId)).collect()));
+    const residentNames = new Map(descriptions.flat().map(row => [`${row.worldId}/${row.playerId}`, row.name]));
     return {
       chatProfiles: chatProfiles.map((p) => ({
         ...p,
@@ -299,6 +319,10 @@ export const list = query({
         credentialAvailable: !p.apiKeyEnv || !!process.env[p.apiKeyEnv],
       })),
       embeddingSpaces,
+      affectedResidents: bindings.map(binding => ({
+        ...binding,
+        name: residentNames.get(`${binding.worldId}/${binding.playerId}`) ?? binding.playerId,
+      })),
       bindings,
       audits,
       settings: config,
@@ -317,7 +341,9 @@ export const profileById = internalQuery({
 export const recordChatProbe = internalMutation({
   args: { chatProfileId: v.id('chatProfiles'), ok: v.boolean() },
   handler: async (ctx, args) => {
-    if (!(await ctx.db.get(args.chatProfileId))) throw new Error('CHAT_PROFILE_NOT_FOUND');
+    const profile = await ctx.db.get(args.chatProfileId);
+    if (!profile) throw new Error('CHAT_PROFILE_NOT_FOUND');
+    if (profile.disabled) throw new Error('CHAT_PROFILE_DISABLED');
     await audit(
       ctx,
       args.ok ? 'PROBE_CHAT_SUCCESS' : 'PROBE_CHAT_FAILED',
@@ -350,11 +376,12 @@ export const probeChat = action({
       chatProfileId: args.chatProfileId,
     });
     try {
-      const response = await chatCompletion(
+      const config = profileChatConfig(profile);
+      const response = await trackedModelCall(ctx, 'CHAT', config.modelUsage, () => chatCompletion(
         { messages: [{ role: 'user', content: 'Reply OK.' }], max_tokens: 256 },
-        profileChatConfig(profile),
+        config,
         { deadline: Date.now() + timeoutMs },
-      );
+      ), result => result.totalTokens);
       if (!response.content.trim()) throw new Error('EMPTY_CHAT_RESPONSE');
       await ctx.runMutation(internal.models.profiles.recordChatProbe, {
         chatProfileId: args.chatProfileId,

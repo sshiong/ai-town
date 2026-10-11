@@ -4,6 +4,7 @@ import { makeFunctionReference, type ApiFromModules, type FunctionReturnType } f
 import type * as files from '../../../convex/federation/coldHistoryFiles';
 import type { Id } from '../../../convex/_generated/dataModel';
 import { AdminButton, Field, TaskFeedback, downloadBundle, useAdminTask } from './AdminShared';
+import { ColdHistoryChunkTransfer } from './ColdHistoryChunkTransfer';
 type FilesApi = ApiFromModules<{ files: typeof files }>['files'];
 const exportRef: FilesApi['exportFile'] = makeFunctionReference(
   'federation/coldHistoryFiles:exportFile',
@@ -18,10 +19,14 @@ export function ColdHistoryFileTransfer({
   owner,
   memoryId,
   hasArchive,
+  version,
+  chunkCount,
 }: {
   owner: { adminToken: string; worldId: Id<'worlds'>; playerId: string; agentGlobalId?: string };
   memoryId: Id<'memories'>;
   hasArchive: boolean;
+  version?: 1 | 2;
+  chunkCount?: number;
 }) {
   const args = { ...owner, memoryId },
     exportFile = useAction(exportRef),
@@ -50,14 +55,14 @@ export function ColdHistoryFileTransfer({
     };
   }
   return (
-    <details className="admin-disclosure">
-      <summary>Save or restore a history file</summary>
+    <><details className="admin-disclosure">
+      <summary>Save or restore a single history file</summary>
       <p className="admin-muted">
         Keep this signed file alongside your town backup. Restore the resident and matching original
         messages first, then review the history file here. Imported files preserve source proof and
         never establish federation trust.
       </p>
-      {hasArchive && (
+      {hasArchive && version !== 2 && (
         <AdminButton
           disabled={!!task.pending}
           onClick={() =>
@@ -196,5 +201,7 @@ export function ColdHistoryFileTransfer({
       )}
       <TaskFeedback task={task} />
     </details>
+    <ColdHistoryChunkTransfer owner={args} chunkCount={hasArchive && version === 2 ? chunkCount : undefined} />
+    </>
   );
 }

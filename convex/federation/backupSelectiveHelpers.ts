@@ -56,6 +56,7 @@ export const configTables = [
   'maps',
   'chatProfiles',
   'embeddingProfiles',
+  'modelProviderQuotas',
   'embeddingSpaces',
   'modelSettings',
   'storagePolicies',

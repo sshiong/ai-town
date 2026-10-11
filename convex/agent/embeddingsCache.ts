@@ -7,6 +7,7 @@ import { activeRoute, EmbeddingRoute, profileEmbeddingConfig } from '../models/e
 import { assertTownUnlocked } from '../federation/maintenanceLock';
 import { cacheWritesAllowed } from '../federation/storagePolicy';
 import { validateVector } from '../models/compatibility';
+import { trackedModelCall, UsageOwner } from '../models/usage';
 
 export function cacheNamespace(route: EmbeddingRoute, inputMode: 'query' | 'document') {
   return JSON.stringify([
@@ -16,7 +17,7 @@ export function cacheNamespace(route: EmbeddingRoute, inputMode: 'query' | 'docu
     inputMode,
   ]);
 }
-export type CacheOptions = { route?: EmbeddingRoute; inputMode?: 'query' | 'document' };
+export type CacheOptions = { route?: EmbeddingRoute; inputMode?: 'query' | 'document'; owner?: UsageOwner };
 
 const selfInternal = internal.agent.embeddingsCache;
 
@@ -49,11 +50,11 @@ export async function fetchBatch(
   if (cacheResults.length < texts.length) {
     const missingIndexes = [...results.keys()].filter((i) => !results[i]);
     const missingTexts = missingIndexes.map((i) => texts[i]);
-    const response = await fetchEmbeddingBatch(
-      missingTexts,
-      profileEmbeddingConfig(route.profile),
-      inputMode,
-    );
+    const response = await trackedModelCall(ctx, 'EMBEDDING', { profileId: route.profile._id, ...options.owner }, async () => {
+      const result = await fetchEmbeddingBatch(missingTexts, profileEmbeddingConfig(route.profile), inputMode);
+      for (const embedding of result.embeddings) validateVector(embedding, route.profile.dimensions);
+      return result;
+    }, response => 'usage' in response ? response.usage : undefined);
     if (response.embeddings.length !== missingIndexes.length) {
       throw new Error(
         `Expected ${missingIndexes.length} embeddings, got ${response.embeddings.length}`,

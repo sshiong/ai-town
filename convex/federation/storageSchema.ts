@@ -41,6 +41,7 @@ export const storagePolicyTables = {
     signature: v.string(),
     publicKey: v.string(),
     storageId: v.optional(v.id('_storage')),
+    jobId: v.optional(v.id('coldHistoryJobs')),
     verifiedAt: v.optional(v.number()),
     createdAt: v.number(),
     importedAt: v.optional(v.number()),

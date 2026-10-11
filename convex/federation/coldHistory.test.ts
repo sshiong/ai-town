@@ -5,6 +5,7 @@ import { createIdentityKeys, digest } from './security';
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/coldHistory.ts': () => import('./coldHistory'),
+  '../federation/coldHistoryChunks.ts': () => import('./coldHistoryChunks'),
 };
 const token = 'cold-history-test-admin-token';
 const query = (name: string) => makeFunctionReference<'query'>(`federation/coldHistory:${name}`);
@@ -302,7 +303,7 @@ test('complete Home transcripts preserve original global authors and reject miss
   ).toEqual([owner.agentGlobalId, 'host/bob']);
 });
 
-test('oversized and duplicate retained sources fail before publication and preserve every hot row', async () => {
+test('oversized aggregate starts a v2 checkpoint and duplicate retained sources fail before publication', async () => {
   const { t, owner } = await fixture();
   await t.run(async (ctx) => {
     for (const r of await ctx.db.query('messages').collect()) await ctx.db.delete(r._id);
@@ -317,10 +318,10 @@ test('oversized and duplicate retained sources fail before publication and prese
         text: 'x'.repeat(450000),
       });
   });
-  await expect(t.action(action('archive'), owner)).rejects.toThrow(
-    'COLD_HISTORY_REQUIRES_CHUNKED_ARCHIVE',
-  );
-  expect(await t.run((ctx) => ctx.db.query('coldHistoryArchives').collect())).toHaveLength(0);
+  await t.run(async ctx => { const local = (await ctx.db.query('federationIdentity').unique())!; await ctx.db.patch(local._id, { enabled: false }); });
+  const started = await t.action(action('archive'), owner);
+  expect(started).toMatchObject({ state: 'RUNNING', phase: 'CAPTURE' });
+  await t.mutation(makeFunctionReference<'mutation'>('federation/coldHistoryChunks:cancel'), { ...owner, jobId: started.jobId });
   expect(await t.run((ctx) => ctx.db.query('messages').collect())).toHaveLength(2);
   await t.run(async (ctx) => {
     for (const r of await ctx.db.query('messages').collect())

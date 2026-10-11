@@ -3,25 +3,14 @@ import { action, internalQuery, internalMutation, query } from '../maintenanceFu
 import type { QueryCtx, ActionCtx } from '../_generated/server';
 import type { Id, Doc } from '../_generated/dataModel';
 import { owns, requireOwner } from '../agent/social';
-import { playerId } from '../aiTown/ids';
 import { identity } from './store';
 import { digest, requireAdmin, sign, verifySignature } from './security';
 import { queryRef, mutationRef } from './refs';
+import { loadChunkPayload } from './coldHistoryChunks';
+import { coldBytes, validateChunkRoot, type ChunkManifest } from './coldHistoryChunkFormat';
 
-export const ownerArgs = {
-  adminToken: v.string(),
-  worldId: v.id('worlds'),
-  playerId,
-  agentGlobalId: v.optional(v.string()),
-  memoryId: v.id('memories'),
-};
-export type OwnerArgs = {
-  adminToken: string;
-  worldId: Id<'worlds'>;
-  playerId: string;
-  agentGlobalId?: string;
-  memoryId: Id<'memories'>;
-};
+import { ownerArgs, type OwnerArgs } from './coldHistoryOwner';
+export { ownerArgs, type OwnerArgs } from './coldHistoryOwner';
 const MAX_BYTES = 900_000;
 const MAX_RECORDS = 1000;
 type RawMessage = {
@@ -109,6 +98,7 @@ export async function source(ctx: QueryCtx, args: OwnerArgs) {
       ]),
       ownerGlobalId: args.agentGlobalId,
       expectedCount: transcript.totalMessageCount,
+      expectedPageCount: (transcript.finalPageNumber ?? -1) + 1,
     };
   }
   throw new Error('COLD_HISTORY_NO_SOURCE');
@@ -151,6 +141,9 @@ export const discover = query({
           verifiedAt: archive.verifiedAt,
           count: (archive.manifest as Manifest).count,
           bytes: (archive.manifest as Manifest).bytes,
+          version: archive.manifest.version as 1 | 2,
+          chunkCount: archive.manifest.chunkCount as number | undefined,
+          jobId: archive.jobId,
           location: 'PRIVATE_FILE_STORAGE' as const,
           hotRecordsRetained: true as const,
         }
@@ -296,6 +289,7 @@ export const publish = internalMutation({
   },
 });
 export async function load(ctx: ActionCtx, archive: Doc<'coldHistoryArchives'>): Promise<Payload> {
+  if (archive.manifest.version === 2) throw new Error('COLD_HISTORY_USE_PART_EXPORT');
   if (!archive.storageId) throw new Error('COLD_HISTORY_NOT_VERIFIED');
   const blob = await ctx.storage.get(archive.storageId);
   if (!blob) throw new Error('COLD_HISTORY_STORAGE_MISSING');
@@ -331,13 +325,21 @@ export const archive = action({
   args: ownerArgs,
   handler: async (ctx, args) => {
     requireAdmin(args.adminToken);
-    const captured: {
+    let captured: {
       existing: Doc<'coldHistoryArchives'> | null;
       source: Awaited<ReturnType<typeof source>>;
       messages: RawMessage[];
-    } = await ctx.runQuery(queryRef('coldHistory/capture'), args);
+    };
+    try {
+      captured = await ctx.runQuery(queryRef('coldHistory/capture'), args);
+    } catch (error) {
+      if (!String(error).includes('COLD_HISTORY_REQUIRES_CHUNKED_ARCHIVE')) throw error;
+      return ctx.runMutation(mutationRef('coldHistoryChunks/start'), args);
+    }
     if (captured.existing?.state === 'VERIFIED') {
-      await load(ctx, captured.existing);
+      if (captured.existing.manifest.version === 2) {
+        await validateChunkRoot(captured.existing.manifest, captured.existing.signature, captured.existing.publicKey);
+      } else await load(ctx, captured.existing);
       return {
         archiveId: captured.existing._id,
         state: 'VERIFIED' as const,
@@ -352,7 +354,7 @@ export const archive = action({
     };
     const text = JSON.stringify(payload),
       bytes = new TextEncoder().encode(text).length;
-    if (bytes > MAX_BYTES) throw new Error('COLD_HISTORY_REQUIRES_CHUNKED_ARCHIVE');
+    if (bytes > MAX_BYTES) return ctx.runMutation(mutationRef('coldHistoryChunks/start'), args);
     const townId: string = await ctx.runQuery(queryRef('coldHistory/signingTown'), {});
     const manifest: Manifest = {
       format: payload.format,
@@ -433,19 +435,47 @@ export const read = action({
       queryRef('coldHistory/readData'),
       owner,
     );
-    const payload = await load(ctx, archive);
-    if (offset > payload.messages.length) throw new Error('INVALID_COLD_HISTORY_PAGE');
+    const count = archive.manifest.count;
+    if (offset > count) throw new Error('INVALID_COLD_HISTORY_PAGE');
+    let messages: RawMessage[];
+    if (archive.manifest.version === 2) {
+      await validateChunkRoot(archive.manifest as ChunkManifest, archive.signature, archive.publicKey);
+      const chunks: Doc<'coldHistoryChunks'>[] = await ctx.runQuery(queryRef('coldHistoryChunks/pageChunks'), {
+        archiveId: archive._id, offset, numItems,
+      });
+      messages = [];
+      let position = offset;
+      let responseBudgetReached = false;
+      for (const chunk of chunks) {
+        if (position >= Math.min(count, offset + numItems)) break;
+        if (position < chunk.start || position >= chunk.start + chunk.count)
+          throw new Error('COLD_HISTORY_INCOMPLETE_CHUNKS');
+        const payload = await loadChunkPayload(ctx, archive, chunk, false);
+        const selected = payload.messages.slice(position - chunk.start, offset + numItems - chunk.start);
+        for (const message of selected) {
+          // A message is never truncated. Large originals may make a page
+          // shorter than numItems so the RPC stays below Convex's 1 MiB limit.
+          if (messages.length && coldBytes([...messages, message]) > 950_000) {
+            responseBudgetReached = true;
+            break;
+          }
+          messages.push(message); position++;
+        }
+        if (responseBudgetReached) break;
+      }
+      if (!responseBudgetReached && messages.length !== Math.min(numItems, count - offset)) throw new Error('COLD_HISTORY_INCOMPLETE_CHUNKS');
+    } else messages = (await load(ctx, archive)).messages.slice(offset, offset + numItems);
     return {
       location: 'PRIVATE_FILE_STORAGE' as const,
       state: 'VERIFIED' as const,
-      page: payload.messages.slice(offset, offset + numItems).map((message) => {
+      page: messages.map((message) => {
         const alias = archive.authorAliases?.find(
           (a) => a.sourceAuthor === (message.authorGlobalId ?? message.authorPlayerId),
         );
         return alias ? { ...message, targetAuthor: alias.targetAuthor } : message;
       }),
-      isDone: offset + numItems >= payload.messages.length,
-      nextOffset: Math.min(offset + numItems, payload.messages.length),
+      isDone: offset + messages.length >= count,
+      nextOffset: offset + messages.length,
       sourceTownId: archive.manifest.sourceTownId,
       verifiedAt: archive.verifiedAt,
     };

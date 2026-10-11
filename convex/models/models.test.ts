@@ -5,12 +5,15 @@ import { makeFunctionReference } from 'convex/server';
 import schema from '../schema';
 import { embeddingFingerprint, verifiedCompatible, validateVector } from './compatibility';
 import { cacheNamespace } from '../agent/embeddingsCache';
+import { memorySourceDigest } from './embeddingDataRevision';
 import { bindResident, profileChatConfig } from './profiles';
 import { ensureEmbeddingSpace, profileEmbeddingConfig } from './embeddings';
 import { chatCompletion, fetchEmbeddingBatch, ollamaFetchEmbedding } from '../util/llm';
 import { recallHomeMemories } from '../federation/decision';
 
 const modules = {
+  '../models/usage.ts': () => import('./usage'),
+  '../models/profileLifecycle.ts': () => import('./profileLifecycle'),
   '../federation/resources.ts': () => import('../federation/resources'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../models/profiles.ts': () => import('./profiles'),
@@ -45,6 +48,29 @@ afterEach(() => {
   jest.useRealTimers();
   jest.restoreAllMocks();
 });
+
+async function drainScan(t: ReturnType<typeof convexTest>, jobId: any) {
+  for (let page = 0; page < 1000; page++) {
+    const job = await t.query(query('models/embeddings:scanJob'), { jobId });
+    if (job && ['DONE', 'FAILED'].includes(job.phase)) return job;
+    await t.action(makeFunctionReference<'action'>('models/embeddings:scanWork'), { jobId });
+  }
+  throw new Error('SCAN_DID_NOT_FINISH');
+}
+async function validateScannedSpace(t: ReturnType<typeof convexTest>, args: any) {
+  const started = await t.action(makeFunctionReference<'action'>('models/embeddings:validateSpace'), args);
+  const job = await drainScan(t, started.jobId);
+  if (job?.phase === 'FAILED') throw new Error(job.failure);
+  return { valid: true, sampleCount: job?.sampleCount };
+}
+async function stampFixtureVectors(t: ReturnType<typeof convexTest>) {
+  await t.run(async ctx => {
+    for (const vector of await ctx.db.query('modelMemoryVectors').collect()) {
+      const memory = await ctx.db.get(vector.memoryId);
+      if (memory) await ctx.db.patch(vector._id, { sourceDigest: await memorySourceDigest(memory) });
+    }
+  });
+}
 
 test('same dimensions and model name are not embedding compatibility evidence; caches isolate modes and spaces', () => {
   expect(verifiedCompatible(profile, profile)).toBe(false);
@@ -131,6 +157,10 @@ test('first validated profile becomes main; failed main blocks new residents wit
   expect((await t.run(ctx => ctx.db.get(binding)))?.chatProfileId).toBe(first);
   await t.mutation(mutation('models/profiles:recordChatProbe'), { chatProfileId: first, ok: true });
   await t.run(ctx => bindResident(ctx, worldId, 'p:1' as never));
+  await t.run(ctx => ctx.db.patch(first, { apiKeyEnv: 'TEST_MISSING_CHAT_CREDENTIAL' }));
+  delete process.env.TEST_MISSING_CHAT_CREDENTIAL;
+  await expect(t.run(ctx => bindResident(ctx, worldId, 'p:2' as never))).rejects.toThrow('MAIN_CHAT_CREDENTIAL_UNAVAILABLE');
+  expect(await t.run(ctx => bindResident(ctx, worldId, 'p:0' as never))).toBe(binding);
 });
 
 test('embedding switch requires complete coverage and validation, with old vectors available for rollback', async () => {
@@ -179,28 +209,30 @@ test('embedding switch requires complete coverage and validation, with old vecto
     });
     return { worldId, profileId, old, next, memoryId };
   });
-  await expect(
-    t.mutation(mutation('models/embeddings:finishBuild'), { spaceId: ids.next }),
-  ).rejects.toThrow('EMBEDDING_COVERAGE_INCOMPLETE');
+  const incomplete = await t.mutation(mutation('models/embeddings:finishBuild'), { spaceId: ids.next });
+  expect((await drainScan(t, incomplete))?.failure).toContain('EMBEDDING_COVERAGE_INCOMPLETE');
   await t.mutation(mutation('models/embeddings:putVector'), {
     spaceId: ids.next,
     memoryId: ids.memoryId,
     worldId: ids.worldId,
     embedding: [0, 1],
   });
-  await t.mutation(mutation('models/embeddings:finishBuild'), { spaceId: ids.next });
+  await stampFixtureVectors(t);
+  await drainScan(t, await t.mutation(mutation('models/embeddings:finishBuild'), { spaceId: ids.next }));
   await expect(
     t.mutation(mutation('models/embeddings:activateSpace'), { adminToken, spaceId: ids.next }),
   ).rejects.toThrow('EMBEDDING_SPACE_NOT_VALIDATED');
   jest
     .spyOn(globalThis, 'fetch')
     .mockResolvedValue(new Response(JSON.stringify({ data: [{ index: 0, embedding: [0, 1] }] })));
-  await t.action(makeFunctionReference<'action'>('models/embeddings:validateSpace'), {
+  await validateScannedSpace(t, {
     adminToken,
     spaceId: ids.next,
   });
   await t.mutation(mutation('models/embeddings:activateSpace'), { adminToken, spaceId: ids.next });
   expect((await t.query(query('models/embeddings:getRoute'), {})).space._id).toBe(ids.next);
+  jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] })));
+  await validateScannedSpace(t, { adminToken, spaceId: ids.old });
   await t.mutation(mutation('models/embeddings:rollback'), { adminToken, spaceId: ids.old });
   expect((await t.query(query('models/embeddings:getRoute'), {})).space._id).toBe(ids.old);
   expect(await t.query((ctx) => ctx.db.query('modelMemoryVectors').collect())).toHaveLength(2);
@@ -915,15 +947,15 @@ test('embedding validation requires a live retrieval hit in the correct resident
       }),
     );
   });
-  const validate = makeFunctionReference<'action'>('models/embeddings:validateSpace');
-  await expect(t.action(validate, { adminToken, spaceId })).resolves.toEqual({
+  await stampFixtureVectors(t);
+  await expect(validateScannedSpace(t, { adminToken, spaceId })).resolves.toEqual({
     valid: true,
     sampleCount: 3,
   });
   request.mockImplementation(
     async () => new Response(JSON.stringify({ data: [{ index: 0, embedding: [0, 1] }] })),
   );
-  await expect(t.action(validate, { adminToken, spaceId })).rejects.toThrow(
+  await expect(validateScannedSpace(t, { adminToken, spaceId })).rejects.toThrow(
     'EMBEDDING_RETRIEVAL_SAMPLE_MISSED',
   );
   expect(

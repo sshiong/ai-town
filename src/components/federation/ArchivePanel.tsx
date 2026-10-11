@@ -44,6 +44,8 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
   const [exportPassphrase, setExportPassphrase] = useState('');
   const [exportConfirmation, setExportConfirmation] = useState('');
   const [importPassphrase, setImportPassphrase] = useState('');
+  const [operator, setOperator] = useState('');
+  const [exportReason, setExportReason] = useState('');
   const [manifestFile, setManifestFile] = useState<File>();
   const canDownload =
     !encryptDownloads ||
@@ -114,6 +116,27 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
         federation admission and pause the target before starting maintenance.
       </p>
       <TaskFeedback task={task} />
+      <div className="admin-form">
+        <Field
+          label="Export operator"
+          hint="A declared label for the audit; access uses the shared administrator token."
+        >
+          <input
+            value={operator}
+            maxLength={200}
+            disabled={!!task.pending}
+            onChange={(event) => setOperator(event.target.value)}
+          />
+        </Field>
+        <Field label="Export reason">
+          <input
+            value={exportReason}
+            maxLength={1000}
+            disabled={!!task.pending}
+            onChange={(event) => setExportReason(event.target.value)}
+          />
+        </Field>
+      </div>
       <label className="admin-check">
         <input
           type="checkbox"
@@ -173,13 +196,21 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
       )}
       <div className="admin-toolbar">
         <AdminButton
-          disabled={!!task.pending || !maintenanceReady || !status?.identity}
+          disabled={
+            !!task.pending ||
+            !maintenanceReady ||
+            !status?.identity ||
+            !operator.trim() ||
+            !exportReason.trim()
+          }
           onClick={() =>
             void task.run(
               'Starting consistent town snapshot',
               async () => {
                 const created = await convex.mutation(api.federation.backupLarge.startExport, {
                   adminToken,
+                  operator: operator.trim(),
+                  reason: exportReason.trim(),
                 });
                 setJobId(created.jobId);
                 setProgress(undefined);

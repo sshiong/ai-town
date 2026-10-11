@@ -13,6 +13,7 @@ import { backupLargeTables } from './federation/backupLargeSchema';
 import { identityRecoveryTables } from './federation/identityRecoverySchema';
 import { storagePolicyTables } from './federation/storageSchema';
 import { endpointTables } from './federation/endpointsSchema';
+import { coldHistoryTables } from './federation/coldHistorySchema';
 
 export default defineSchema({
   music: defineTable({
@@ -42,4 +43,5 @@ export default defineSchema({
   ...identityRecoveryTables,
   ...storagePolicyTables,
   ...endpointTables,
+  ...coldHistoryTables,
 });

@@ -11,7 +11,7 @@ export function useWorldHeartbeat() {
   const heartbeat = useMutation(api.world.heartbeatWorld);
   useEffect(() => {
     const sendHeartBeat = () => {
-      if (!worldStatus) {
+      if (!worldStatus || worldStatus.status === 'stoppedByDeveloper') {
         return;
       }
       // Don't send a heartbeat if we've observed one sufficiently close
@@ -24,7 +24,6 @@ export function useWorldHeartbeat() {
     sendHeartBeat();
     const id = setInterval(sendHeartBeat, WORLD_HEARTBEAT_INTERVAL);
     return () => clearInterval(id);
-    // Rerun if the `worldId` changes but not `worldStatus`, since don't want to
-    // resend the heartbeat whenever its last viewed timestamp changes.
-  }, [worldId, heartbeat]);
+    // Restart the timer on presence or pause changes, without resending for every view timestamp.
+  }, [worldId, worldStatus?.status, heartbeat]);
 }

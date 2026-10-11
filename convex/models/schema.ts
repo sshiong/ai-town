@@ -1,6 +1,7 @@
 import { defineTable } from 'convex/server';
 import { v } from 'convex/values';
 import { playerId } from '../aiTown/ids';
+import { modelUsageTables, requestQuota, residentRequestQuotas } from './usageSchema';
 
 export const provider = v.union(
   v.literal('openai'),
@@ -30,20 +31,25 @@ export const embeddingProfileFields = {
   fingerprint: v.string(),
 };
 export const modelTables = {
+  ...modelUsageTables,
   chatProfiles: defineTable({
     ...connectionFields,
     ...chatOptions,
     stopWords: v.array(v.string()),
     createdAt: v.number(),
     legacy: v.optional(v.boolean()),
+    disabled: v.optional(v.boolean()),
+    dailyRequestLimit: v.optional(requestQuota),
   }),
-  embeddingProfiles: defineTable({ ...embeddingProfileFields, createdAt: v.number() }),
+  embeddingProfiles: defineTable({ ...embeddingProfileFields, createdAt: v.number(),
+    disabled: v.optional(v.boolean()), dailyRequestLimit: v.optional(requestQuota) }),
   modelSettings: defineTable({
     key: v.string(),
     mainChatProfileId: v.optional(v.id('chatProfiles')),
     activeEmbeddingSpaceId: v.optional(v.id('embeddingSpaces')),
   }).index('key', ['key']),
   residentModelBindings: defineTable({
+    requestQuotas: v.optional(residentRequestQuotas),
     worldId: v.id('worlds'),
     playerId,
     agentGlobalId: v.optional(v.string()),
@@ -52,8 +58,10 @@ export const modelTables = {
     updatedAt: v.number(),
   })
     .index('resident', ['worldId', 'playerId'])
-    .index('globalAgent', ['agentGlobalId']),
+    .index('globalAgent', ['agentGlobalId'])
+    .index('player', ['playerId']),
   modelAudits: defineTable({
+    actor: v.optional(v.literal('FEDERATION_ADMIN')),
     operation: v.string(),
     subject: v.string(),
     previous: v.optional(v.string()),
@@ -61,6 +69,26 @@ export const modelTables = {
     reason: v.string(),
     at: v.number(),
   }),
+  embeddingDataRevisions: defineTable({ key: v.string(), revision: v.number() }).index('key', ['key']),
+  embeddingScanJobs: defineTable({
+    kind: v.union(v.literal('PLAN'), v.literal('COVERAGE'), v.literal('VALIDATION')),
+    profileId: v.optional(v.id('embeddingProfiles')),
+    spaceId: v.optional(v.id('embeddingSpaces')),
+    phase: v.union(v.literal('MEMORIES'), v.literal('VECTORS'), v.literal('SAMPLES'), v.literal('DONE'), v.literal('FAILED')),
+    cursor: v.union(v.string(), v.null()),
+    sourceRevision: v.number(),
+    vectorRevision: v.number(),
+    memoryCount: v.number(),
+    vectorCount: v.number(),
+    sampleIndex: v.number(),
+    sampleMemoryIds: v.array(v.id('memories')),
+    queryVector: v.optional(v.array(v.float64())),
+    sampleCount: v.number(),
+    restarts: v.number(),
+    failure: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index('profile', ['profileId']).index('space', ['spaceId']),
   embeddingSpaces: defineTable({
     profileId: v.id('embeddingProfiles'),
     fingerprint: v.string(),
@@ -74,10 +102,13 @@ export const modelTables = {
     createdAt: v.number(),
     validatedAt: v.optional(v.number()),
     validationSampleCount: v.optional(v.number()),
+    validationJobId: v.optional(v.id('embeddingScanJobs')),
+    coverageJobId: v.optional(v.id('embeddingScanJobs')),
     failure: v.optional(v.string()),
   }),
   modelMemoryVectors: defineTable({
     memoryId: v.id('memories'),
+    sourceDigest: v.optional(v.string()),
     worldId: v.id('worlds'),
     playerId,
     agentGlobalId: v.optional(v.string()),

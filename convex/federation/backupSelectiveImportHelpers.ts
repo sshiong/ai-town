@@ -36,6 +36,7 @@ export const importOptions = {
       v.literal('visitorPolicy'),
       v.literal('mainChatProfile'),
       v.literal('embeddingProfiles'),
+      v.literal('modelProviderQuotas'),
     ),
   ),
   worlds: v.array(
@@ -59,6 +60,7 @@ export type Options = {
     | 'visitorPolicy'
     | 'mainChatProfile'
     | 'embeddingProfiles'
+    | 'modelProviderQuotas'
   )[];
   worlds: {
     sourceId: string;

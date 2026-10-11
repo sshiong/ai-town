@@ -1,4 +1,5 @@
 import { packColdFiles, restoreColdFiles, type PreparedColdFile } from './coldBackup';
+import { fileStorageDescriptor } from './coldHistoryFiles';
 import { queryRef } from './refs';
 import { ObjectType, v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
@@ -471,7 +472,8 @@ export const importBackup = action({
         const storageId = await ctx.storage.store(new Blob([JSON.stringify(attachment.file.payload)], {type:'application/json'}));
         preparedColdFiles.push({index,storageId});
         const blob = await ctx.storage.get(storageId);
-        if (!blob || blob.size !== attachment.file.manifest.bytes || await digest(JSON.parse(await blob.text())) !== attachment.file.manifest.digest)
+        const expected = fileStorageDescriptor(attachment.file);
+        if (!blob || blob.size !== expected.bytes || await digest(JSON.parse(await blob.text())) !== expected.digest)
           throw new Error('BACKUP_COLD_FILES_STORAGE_INVALID');
       }
       publicationStarted = true;
@@ -663,7 +665,7 @@ export async function applyBackupData(
     'modelSettings',
     'federationAgentRuntimes',
     ...(args.mode === 'merge'
-      ? ['engines', 'worlds', 'worldStatus', 'maps', 'deploymentRecords', 'modelAudits', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'federationResourcePolicy', 'federationResourceAudit']
+      ? ['engines', 'worlds', 'worldStatus', 'maps', 'deploymentRecords', 'modelAudits', 'modelProviderQuotas', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'federationResourcePolicy', 'federationResourceAudit']
       : []),
   ]);
   for (const name of dataTables) {

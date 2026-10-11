@@ -6,7 +6,8 @@ import { archiveFor, source, load } from './coldHistory';
 import { adoptHistoryFile, plan, validateFile, type PortableHistory } from './coldHistoryFiles';
 import { digest, requireAdmin, sign } from './security';
 import { identity } from './store';
-import { queryRef } from './refs';
+import { queryRef, actionRef } from './refs';
+import { validateColdParts, type PortableColdPart } from './coldHistoryChunkFormat';
 import { decodeRow, validateBundle, type BackupBundle, type BackupRow } from './backupHelpers';
 
 export type ColdBackupAttachment = {
@@ -29,6 +30,7 @@ const exactKeys = (x: any, allowed: string[]) =>
 export async function validateColdAttachments(
   bundle: BackupBundle,
   rows: Record<string, BackupRow[]>,
+  allowPartialParts = false,
 ) {
   const files = bundle.coldHistoryFiles,
     summary = bundle.manifest.coldHistoryFiles;
@@ -45,6 +47,13 @@ export async function validateColdAttachments(
   )
     throw new Error('BACKUP_COLD_FILES_CHECKSUM_MISMATCH');
   const scopes = new Set<string>();
+  const partGroups = new Map<string, PortableColdPart[]>();
+  for (const a of files) if (a.file?.version === 2) {
+    const group = JSON.stringify([a.owner, a.file.manifest.snapshotId, a.authorAliases]);
+    const parts = partGroups.get(group) ?? []; parts.push(a.file); partGroups.set(group, parts);
+  }
+  if (!allowPartialParts) for (const parts of partGroups.values()) await validateColdParts(parts, `sha256:${await digest(parts[0].publicKey)}`);
+  const scopeSnapshots = new Map<string, string>();
   for (const a of files) {
     if (
       !exactKeys(a, ['owner', 'file', 'authorAliases']) ||
@@ -87,7 +96,7 @@ export async function validateColdAttachments(
       messages = (rows.messages ?? [])
         .filter((m) => m.worldId === owner.worldId && m.conversationId === c.id)
         .map((m) => ({ messageId: m.messageUuid, text: m.text, author: m.author }));
-      if (messages.length < c.numMessages) throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
+      if (!(allowPartialParts && file.version === 2) && messages.length < c.numMessages) throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
       scope = JSON.stringify(['conversation', owner.worldId, c.id, c.created, c.ended]);
     } else {
       const transcriptId =
@@ -109,14 +118,16 @@ export async function validateColdAttachments(
         t.federationConversationId !== memory.data.federationConversationId ||
         t.state !== 'COMPLETE' ||
         t.summaryState !== 'DONE' ||
-        pages.length !== t.finalPageNumber + 1 ||
-        pages.some((p, i) => p.pageNumber !== i || p.finalPage !== (i === pages.length - 1))
+        (!(allowPartialParts && file.version === 2) && (pages.length !== t.finalPageNumber + 1 ||
+        pages.some((p, i) => p.pageNumber !== i || p.finalPage !== (i === pages.length - 1)))) ||
+        (allowPartialParts && file.version === 2 && (pages.length !== 1 || pages[0].pageNumber !== file.payload.sourcePageNumber ||
+          pages[0].finalPage !== (pages[0].pageNumber === t.finalPageNumber)))
       )
         throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
       messages = pages.flatMap((p) =>
         p.messages.map((m: any) => ({ messageId: m.messageId, text: m.text, author: m.author })),
       );
-      if (messages.length !== t.totalMessageCount)
+      if (!(allowPartialParts && file.version === 2) && messages.length !== t.totalMessageCount)
         throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
       scope = JSON.stringify([
         'travel',
@@ -127,9 +138,15 @@ export async function validateColdAttachments(
         t.endedAt,
       ]);
     }
-    if (scopes.has(scope)) throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
+    const snapshot = file.version === 2 ? await digest({ owner, manifest: file.manifest, aliases: a.authorAliases }) : undefined;
+    if (scopes.has(scope) && (!snapshot || scopeSnapshots.get(scope) !== snapshot)) throw new Error('BACKUP_COLD_FILES_DUPLICATE_SOURCE');
     scopes.add(scope);
-    const from = new Set(file.payload.messages.map(actor)),
+    if (snapshot) scopeSnapshots.set(scope, snapshot);
+    const groupMessages = file.version === 2
+      ? partGroups.get(JSON.stringify([a.owner, file.manifest.snapshotId, a.authorAliases]))!.flatMap(p => p.payload.messages)
+      : file.payload.messages;
+    if (file.version === 2 && !allowPartialParts && messages.length !== file.manifest.count) throw new Error('BACKUP_COLD_FILES_MESSAGES_MISMATCH');
+    const from = new Set(groupMessages.map(actor)),
       to = new Set(messages.map((m) => m.author)),
       aliases = new Map<string, string>();
     if (file.manifest.kind === 'travel') {
@@ -139,8 +156,7 @@ export async function validateColdAttachments(
     for (const alias of a.authorAliases) {
       if (
         !exactKeys(alias, ['sourceAuthor', 'targetAuthor']) ||
-        !from.has(alias.sourceAuthor) ||
-        !to.has(alias.targetAuthor) ||
+        (!(allowPartialParts && file.version === 2) && (!from.has(alias.sourceAuthor) || !to.has(alias.targetAuthor))) ||
         aliases.has(alias.sourceAuthor) ||
         [...aliases.values()].includes(alias.targetAuthor)
       )
@@ -161,7 +177,7 @@ export async function validateColdAttachments(
       [...m].sort((a, b) => a.messageId.localeCompare(b.messageId));
     if (
       new Set(messages.map((m) => m.messageId)).size !== messages.length ||
-      (await digest(sort(messages))) !== (await digest(sort(normalized)))
+      (await digest(sort(file.version === 2 ? messages.filter(m => normalized.some(n => n.messageId === m.messageId)) : messages))) !== (await digest(sort(normalized)))
     )
       throw new Error('BACKUP_COLD_FILES_MESSAGES_MISMATCH');
   }
@@ -239,9 +255,26 @@ export async function packColdFiles(
   });
   if (!found.length) return bundle;
   const files: ColdBackupAttachment[] = [];
+  // The atomic path stays small. Refuse before accumulating a complete v2
+  // history larger than the bundle budget; large backups stream its parts.
+  let packedBytes = bytes(bundle) + 256;
+  const append = (attachment: ColdBackupAttachment) => {
+    packedBytes += bytes(attachment) + 1;
+    if (packedBytes > 5_000_000) throw new Error('BACKUP_COLD_FILES_REQUIRES_CHUNKED_ARCHIVE');
+    files.push(attachment);
+  };
   for (const { owner, archive } of found) {
+    if (archive.manifest.version === 2) {
+      if (files.length + archive.manifest.chunkCount > 100 || packedBytes + archive.manifest.bytes > 5_000_000)
+        throw new Error('BACKUP_COLD_FILES_REQUIRES_CHUNKED_ARCHIVE');
+      for (let index = 0; index < archive.manifest.chunkCount; index++) {
+        const file: PortableColdPart = await ctx.runAction(actionRef('coldHistoryChunks/exportPart'), { ...owner, adminToken, index });
+        append({ owner, file, authorAliases: archive.authorAliases ?? [] });
+      }
+      continue;
+    }
     const payload = await load(ctx, archive);
-    files.push({
+    append({
       owner,
       file: {
         format: 'ai-town-cold-history-file',
@@ -290,7 +323,7 @@ export async function restoreColdFiles(
       agentGlobalId: a.owner.agentGlobalId ? map(a.owner.agentGlobalId) : undefined,
       memoryId: map(a.owner.memoryId) as Id<'memories'>,
     };
-    const original = new Set(a.file.payload.messages.map(actor));
+    const original = new Set([...a.file.payload.messages.map(actor), ...a.authorAliases.map(a => a.sourceAuthor)]);
     if (a.file.manifest.kind === 'travel') original.add(JSON.parse(a.file.manifest.sourceKey)[2]);
     const prior = new Map(a.authorAliases.map((a) => [a.sourceAuthor, a.targetAuthor]));
     const authorAliases = [...original]
@@ -317,5 +350,5 @@ export const referenced = internalQuery({
     !!(await ctx.db
       .query('coldHistoryArchives')
       .withIndex('storage', (q) => q.eq('storageId', args.storageId))
-      .first()),
+      .first()) || !!(await ctx.db.query('coldHistoryChunks').withIndex('storage', q => q.eq('storageId', args.storageId)).first()),
 });

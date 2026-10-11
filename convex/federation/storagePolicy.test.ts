@@ -6,6 +6,7 @@ import { defaultStoragePolicy, estimateRecordBytes } from './storagePolicy';
 import { mutationRef, queryRef } from './refs';
 
 const modules = {
+  '../models/usage.ts': () => import('../models/usage'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/storagePolicy.ts': () => import('./storagePolicy'),
   '../models/embeddings.ts': () => import('../models/embeddings'),

@@ -11,6 +11,7 @@ import { Id } from '../_generated/dataModel';
 import { ActionCtx } from '../_generated/server';
 
 const modules = {
+  '../models/usage.ts': () => import('../models/usage'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../agent/memory.ts': () => import('./memory'),
   '../agent/conversation.ts': () => import('./conversation'),

@@ -11,6 +11,7 @@ import {
 import { digest, verifySignature } from './security';
 import schema from '../schema';
 import { validateResourceLimits } from './resources';
+import { validateModelPolicyPortable } from '../models/usageSchema';
 
 // Derived vectors are deliberately omitted: canonical memories are the complete rebuilding source.
 export const largeTables = [
@@ -36,6 +37,7 @@ export const oldTables = [
   'memoryEmbeddings',
   'embeddingsCache',
   'coldHistoryArchives',
+  'coldHistoryChunks',
   'pairRequests',
   'migrationPeerExchanges',
   'federationReplayNonces',
@@ -77,6 +79,7 @@ export function sanitizeLargeValue(value: any): any {
     Object.entries(value)
       .filter(
         ([key]) =>
+          !['coverageJobId', 'validationJobId'].includes(key) &&
           !/(privateKey|secretEncrypted|credentialEncrypted|ephemeralPrivate|apiKey$|adminToken|fencingToken)/i.test(
             key,
           ),
@@ -140,7 +143,7 @@ export async function validateManifest(manifest: LargeManifest, signature: strin
     bytes += entry.bytes;
   }
   if (bytes > MAX_ARCHIVE_BYTES) throw new Error('LARGE_BACKUP_ARCHIVE_BUDGET');
-  if (largeTables.some((table) => !['coldHistoryFiles', 'federationIdentityKeyHistory', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(table) && !tables.has(table)))
+  if (largeTables.some((table) => !['modelProviderQuotas', 'coldHistoryFiles', 'federationIdentityKeyHistory', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'federationTranscriptJobs', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(table) && !tables.has(table)))
     throw new Error('INCOMPLETE_LARGE_BACKUP_MANIFEST');
   validateSourceRow('federationIdentity', manifest.source);
   if (manifest.source.fingerprint !== `sha256:${await digest(manifest.source.publicKey)}`)
@@ -218,13 +221,16 @@ export function validateSourceRow(table: string, row: BackupRow) {
     (!Number.isSafeInteger(fields.identityVersion) || fields.identityVersion < 1))
     throw new Error('INVALID_IDENTITY_VERSION');
   if (table === 'federationResourcePolicy') validateResourcePolicy(fields);
+  validateModelPolicyPortable(table, fields);
   if (table === 'federationIdentity' && fields.resourceLimits !== undefined)
     validateResourceLimits(fields.resourceLimits);
   // Runtime snapshots intentionally contain source IDs, never executable target references.
   return (snapshotTables as readonly string[]).includes(table)
     ? []
     : referencesFor(
-        table === 'memories'
+        table === 'embeddingSpaces'
+          ? { ...fields, coverageJobId: undefined, validationJobId: undefined }
+          : table === 'memories'
           ? { ...fields, embeddingId: undefined, embeddingSpaceId: undefined }
           : fields,
         validator,
@@ -233,7 +239,12 @@ export function validateSourceRow(table: string, row: BackupRow) {
 
 /** Only metadata required for cross-chunk preflight; payloads remain in private storage. */
 export function rowMetadata(table: string, row: BackupRow): BackupRow {
-  if (table === 'coldHistoryFiles') return {owner:row.owner,kind:row.file.manifest.kind,digest:row.file.manifest.digest};
+  if (table === 'coldHistoryFiles') return {owner:row.owner,kind:row.file.manifest.kind,digest:row.file.manifest.digest,
+    ...(row.file.version === 2 ? { manifest: row.file.manifest, descriptor: row.file.descriptor,
+      publicKey: row.file.publicKey, signature: row.file.signature,
+      sourcePageNumber: row.file.payload.sourcePageNumber,
+      aliases: row.authorAliases, messageIds: row.file.payload.messages.map((m: BackupRow) => m.messageId),
+      messageAuthors: row.file.payload.messages.map((m: BackupRow) => m.authorGlobalId ?? m.authorPlayerId) } : {})};
   const keys = [
     'worldId',
     'playerId',
@@ -254,14 +265,24 @@ export function rowMetadata(table: string, row: BackupRow): BackupRow {
     'data',
     'conversationId',
     'transcriptId',
+    'messageUuid',
+    'pageNumber',
+    'finalPage',
+    'finalPageNumber',
   ];
   const metadata: BackupRow = {};
   for (const key of keys) if (row[key] !== undefined) metadata[key] = row[key];
+  if (table === 'homeTravelTranscriptPages') metadata.messageCount = row.messages.length;
   if (table === 'worlds')
     metadata.agents = row.agents.map((a: BackupRow) => ({ id: a.id, playerId: a.playerId }));
   return metadata;
 }
 export function relationKey(table: string, row: BackupRow): string | undefined {
+  if (table === 'modelProviderQuotas') return JSON.stringify([row.kind, row.providerKey]);
+  if (table === 'messages') return JSON.stringify([row.worldId, row.conversationId, row.messageUuid]);
+  if (table === 'archivedConversations') return JSON.stringify([row.worldId, row.id]);
+  if (table === 'homeTravelTranscripts') return JSON.stringify([row.agentGlobalId, row.transcriptId]);
+  if (table === 'homeTravelTranscriptPages') return JSON.stringify([row.agentGlobalId, row.transcriptId, row.pageNumber]);
   if (table === 'autonomousTravelPolicies') return row.agentGlobalId;
   if (table === 'visitLedger') return `visit:${row.visitId}`;
   if (['maps', 'worldStatus'].includes(table)) return row.worldId;

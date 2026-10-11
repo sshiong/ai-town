@@ -3,6 +3,7 @@ import { convexToJson, jsonToConvex, Value } from 'convex/values';
 import { digest, verifySignature } from './security';
 import { validateResourceLimits } from './resources';
 import { validateHostResourceThresholds } from './resourceValidators';
+import { validateModelPolicyPortable } from '../models/usageSchema';
 
 export const dataTables = [
   'engines',
@@ -18,6 +19,7 @@ export const dataTables = [
   'messages',
   'chatProfiles',
   'embeddingProfiles',
+  'modelProviderQuotas',
   'embeddingSpaces',
   'modelSettings',
   'residentModelBindings',
@@ -148,7 +150,12 @@ export async function createBundle(
   const sections: BackupBundle['sections'] = {};
   const summaries: BackupBundle['manifest']['sections'] = {};
   for (const [name, values] of Object.entries(rows)) {
-    sections[name] = values.map(encodeRow);
+    sections[name] = values.map(row => {
+      if (name !== 'embeddingSpaces') return encodeRow(row);
+      // Validation jobs are local transaction certificates, never portable references.
+      const { coverageJobId, validationJobId, ...portable } = row;
+      return encodeRow(portable);
+    });
     summaries[name] = {
       digest: await digest(sections[name]),
       count: values.length,
@@ -212,6 +219,7 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
       const doc = decodeRow(row);
       assertNoSecrets(doc);
       if (name === 'federationResourcePolicy') validateResourcePolicy(doc);
+      validateModelPolicyPortable(name, doc);
       if (typeof doc._id !== 'string' || ids.has(doc._id))
         throw new Error('INVALID_BACKUP_DOCUMENT_ID');
       ids.add(doc._id);
@@ -219,13 +227,16 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
   }
   count += bundle.coldHistoryFiles?.length ?? 0;
   if (count > 500) throw new Error('BACKUP_ATOMIC_RECORD_LIMIT');
-  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['federationIdentityKeyHistory', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t) && !bundle.sections[t]))
+  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['modelProviderQuotas', 'federationIdentityKeyHistory', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit'].includes(t) && !bundle.sections[t]))
     throw new Error('INCOMPLETE_TOWN_BACKUP');
   if ((bundle.sections.federationResourcePolicy?.length ?? 0) > 1)
     throw new Error('BACKUP_SINGLETON_MISMATCH');
   if (bundle.manifest.scope === 'resident' &&
-    ['federationResourcePolicy', 'federationResourceAudit'].some(t => bundle.sections[t]?.length))
+    ['modelProviderQuotas', 'federationResourcePolicy', 'federationResourceAudit'].some(t => bundle.sections[t]?.length))
     throw new Error('RESIDENT_BACKUP_CONTAINS_TOWN_RESOURCE_POLICY');
+  const providerQuotas = bundle.sections.modelProviderQuotas?.map(decodeRow) ?? [];
+  if (new Set(providerQuotas.map(row => JSON.stringify([row.kind, row.providerKey]))).size !== providerQuotas.length)
+    throw new Error('DUPLICATE_MODEL_PROVIDER_QUOTA');
   const identities = bundle.sections.federationIdentity?.map(decodeRow) ?? [];
   if (identities.length !== 1 || identities[0].townId !== bundle.manifest.sourceTownId)
     throw new Error('BACKUP_IDENTITY_MISMATCH');

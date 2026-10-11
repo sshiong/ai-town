@@ -1,6 +1,7 @@
 import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
+import { packColdFiles } from './coldBackup';
 import { makeFunctionReference } from 'convex/server';
 import schema from '../schema';
 import { Id } from '../_generated/dataModel';
@@ -9,12 +10,22 @@ import { createIdentityKeys, digest, sign } from './security';
 import { BackupBundle, decodeRow, encodeRow, validateBundle } from './backupHelpers';
 import { embeddingFingerprint } from '../models/compatibility';
 import { applyBackupData, importBackup } from './backup';
+
+test('atomic cold packing rejects a large v2 root before fetching or combining its parts', async () => {
+  let partReads = 0;
+  const ctx = { runQuery: async () => [{ owner: {}, archive: { manifest: { version: 2, chunkCount: 20, bytes: 5_000_000 } } }],
+    runAction: async () => { partReads++; throw new Error('PART_SHOULD_NOT_BE_READ'); } } as unknown as ActionCtx;
+  await expect(packColdFiles(ctx, adminToken, { manifest: {}, sections: {} } as BackupBundle))
+    .rejects.toThrow('BACKUP_COLD_FILES_REQUIRES_CHUNKED_ARCHIVE');
+  expect(partReads).toBe(0);
+});
 import { defaultStoragePolicy } from './storagePolicy';
 import { receiveConversationEnded } from '../agent/travelTranscript';
 import { DEFAULT_RESOURCE_LIMITS } from './resources';
 import { Game } from '../aiTown/game';
 import { engineInsertInput } from '../engine/abstractGame';
 import type { ActionCtx } from '../_generated/server';
+import { providerUsageKey } from '../models/usage';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
@@ -487,6 +498,64 @@ test('atomic restore keeps autonomous authorization and audit while marking the 
   expect(result.decisions.find(d => d.operationId === 'operation-RUNNING')).toMatchObject({ state: 'STALE', error: 'BACKUP_RESTORE_INTERRUPTED_DECISION' });
   expect(result.decisions.find(d => d.operationId === 'operation-STAY')).toMatchObject({ state: 'STAY', completedAt: 2, reason: 'Stay home' });
 });
+
+test('model policies survive town restore while call receipts and usage buckets stay outside portable archives', async () => {
+  const { t, worldId } = await town();
+  const providerKey = await t.run(async ctx => {
+    const chat = (await ctx.db.query('chatProfiles').unique())!;
+    const embedding = (await ctx.db.query('embeddingProfiles').unique())!;
+    const binding = (await ctx.db.query('residentModelBindings').unique())!;
+    await ctx.db.patch(chat._id, { dailyRequestLimit: 12 });
+    await ctx.db.patch(embedding._id, { dailyRequestLimit: 8 });
+    await ctx.db.patch(binding._id, { requestQuotas: { chat: 3, embedding: null } });
+    await ctx.db.insert('chatProfiles', { ...Object.fromEntries(Object.entries(chat).filter(([k]) => !k.startsWith('_'))),
+      name: 'Paused unused profile', disabled: true, dailyRequestLimit: 0 } as never);
+    const providerKey = providerUsageKey(chat);
+    await ctx.db.insert('modelProviderQuotas', { kind: 'CHAT', providerKey, maxRequestsPerDay: 20, updatedAt: 1 });
+    await ctx.db.insert('modelCallReceipts', { kind: 'CHAT', profileId: chat._id, providerKey, day: 0, startedAt: 1 });
+    await ctx.db.insert('modelUsageBuckets', { kind: 'CHAT', dimension: 'PROVIDER', key: providerKey, day: 0,
+      started: 1, succeeded: 0, failed: 0, denied: 0, reportedTokenCalls: 0, unknownTokenCalls: 0, totalTokens: 0, retries: 0 });
+    return providerKey;
+  });
+  const bundle = await t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(bundle.sections.modelCallReceipts).toBeUndefined();
+  expect(bundle.sections.modelUsageBuckets).toBeUndefined();
+  expect(decodeRow(bundle.sections.modelProviderQuotas[0])).toMatchObject({ providerKey, maxRequestsPerDay: 20 });
+  const resident = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  expect(resident.sections.modelProviderQuotas?.length ?? 0).toBe(0);
+  expect(decodeRow(resident.sections.residentModelBindings[0]).requestQuotas).toEqual({ chat: 3, embedding: null });
+  await t.run(async ctx => {
+    const quota = (await ctx.db.query('modelProviderQuotas').unique())!;
+    await ctx.db.patch(quota._id, { maxRequestsPerDay: null });
+  });
+  await t.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'restore', sourceStopped: true });
+  expect(await t.run(ctx => ctx.db.query('modelProviderQuotas').unique())).toMatchObject({ providerKey, maxRequestsPerDay: 20 });
+  expect((await t.run(ctx => ctx.db.query('residentModelBindings').unique()))?.requestQuotas).toEqual({ chat: 3, embedding: null });
+  expect((await t.run(ctx => ctx.db.query('embeddingProfiles').unique()))?.dailyRequestLimit).toBe(8);
+  expect(await t.run(ctx => ctx.db.query('chatProfiles').collect())).toEqual(expect.arrayContaining([
+    expect.objectContaining({ name: 'Fixed Chat', dailyRequestLimit: 12 }),
+    expect.objectContaining({ name: 'Paused unused profile', disabled: true, dailyRequestLimit: 0 }),
+  ]));
+});
+
+test.each(['chatProfiles', 'embeddingProfiles', 'residentModelBindings', 'modelProviderQuotas'])(
+  'invalid %s request quotas fail before restoring any live data', async section => {
+    const { t } = await town();
+    if (section === 'modelProviderQuotas') await t.run(ctx => ctx.db.insert('modelProviderQuotas', {
+      kind: 'CHAT', providerKey: '["custom","https://chat.example"]', maxRequestsPerDay: 5, updatedAt: 1,
+    }));
+    const original = await t.action(action('federation/backup:exportTown'), { adminToken });
+    const invalid = await rewrite(original, section, row => {
+      if (section === 'residentModelBindings') row.requestQuotas = { chat: -1, embedding: null };
+      else if (section === 'modelProviderQuotas') row.maxRequestsPerDay = 1.5;
+      else row.dailyRequestLimit = -1;
+    });
+    const before = await t.run(ctx => ctx.db.query('worlds').collect());
+    await expect(t.action(action('federation/backup:importBackup'), { adminToken, bundle: invalid, mode: 'restore', sourceStopped: true }))
+      .rejects.toThrow('INVALID_MODEL_REQUEST_QUOTA');
+    expect(await t.run(ctx => ctx.db.query('worlds').collect())).toEqual(before);
+  },
+);
 
 test('restore atomically remaps core data while preserving identities, profiles, maps, conversations and reflection pointers', async () => {
   const { t, agentGlobalId, worldId } = await town();

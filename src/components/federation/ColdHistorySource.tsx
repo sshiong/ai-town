@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ColdHistoryFileTransfer } from './ColdHistoryFileTransfer';
+import { ColdHistoryJob } from './ColdHistoryJob';
 import { useAction, useQuery } from 'convex/react';
 import { makeFunctionReference, type ApiFromModules, type FunctionReturnType } from 'convex/server';
 import type * as cold from '../../../convex/federation/coldHistory';
@@ -56,6 +57,8 @@ export function ColdHistorySource({
                 Read original messages from archive
               </AdminButton>
             </>
+          ) : status?.jobId ? (
+            <ColdHistoryJob owner={args} jobId={status.jobId} />
           ) : (
             <AdminButton
               disabled={!!task.pending}
@@ -63,7 +66,7 @@ export function ColdHistorySource({
                 void task.run(
                   'Verifying private archive',
                   () => publish(args),
-                  'Private archive verified. Hot records retained.',
+                  'Archive request saved. Review verification status below; hot records retained.',
                 )
               }
             >
@@ -80,6 +83,8 @@ export function ColdHistorySource({
           owner={owner}
           memoryId={memoryId}
           hasArchive={status?.state === 'VERIFIED'}
+          version={status?.version}
+          chunkCount={status?.chunkCount}
         />
       )}
       {page && (

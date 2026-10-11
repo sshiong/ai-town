@@ -19,6 +19,7 @@ const modules = {
   '../federation/backupLarge.ts': () => import('./backupLarge'),
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
+  '../federation/coldHistoryChunks.ts': () => import('./coldHistoryChunks'),
   '../models/embeddings.ts': async () => ({
     indexMemory: internalAction({ args: { memoryId: v.id('memories') }, handler: () => undefined }),
   }),
@@ -266,31 +267,123 @@ async function apply(f: Fixture, jobId: Id<'backupLargeJobs'>) {
   });
   return drive(f, jobId);
 }
-async function signedConversation(f: Fixture, index = 0, firstText?: string) {
+async function signedConversation(f: Fixture, index = 0, firstText?: string, count = 3, chunked = false, disjointAuthors = false) {
   const conversationId: `c:${number}` = `c:${40 + index}`;
   const memoryId = await f.t.run(async ctx => {
     const memoryId = await ctx.db.insert('memories', { worldId: f.worldId, playerId: `p:${index}`,
       agentGlobalId: f.globals[index], description: `Signed conversation owner ${index}`, importance: 8, lastAccess: 1,
       data: { type: 'conversation', conversationId, playerIds: index ? [] : ['p:1'] } });
     await ctx.db.insert('archivedConversations', { worldId: f.worldId, id: conversationId,
-      creator: `p:${index}`, created: 10, ended: 20, numMessages: 3, participants: index ? ['p:1'] : ['p:0', 'p:1'] });
-    for (let n = 0; n < 3; n++) await ctx.db.insert('messages', { worldId: f.worldId, conversationId,
-      author: index ? 'p:1' : n % 2 ? 'p:1' : 'p:0', text: n === 0 && firstText ? firstText : `Signed owner ${index} message ${n}`,
+      creator: `p:${index}`, created: 10, ended: 20, numMessages: count, participants: index ? ['p:1'] : ['p:0', 'p:1'] });
+    for (let n = 0; n < count; n++) await ctx.db.insert('messages', { worldId: f.worldId, conversationId,
+      author: index ? 'p:1' : disjointAuthors ? n < 25 ? 'p:1' : 'p:0' : n % 2 ? 'p:1' : 'p:0', text: n === 0 && firstText ? firstText : `Signed owner ${index} message ${n}`,
       messageUuid: `signed-owner-${index}-${n}` });
     return memoryId;
   });
   const owner = { adminToken, worldId: f.worldId, playerId: `p:${index}`, agentGlobalId: f.globals[index], memoryId };
-  const { archiveId } = await f.t.action(ref('coldHistory', 'archive', 'action'), owner);
-  const file = await f.t.action(ref('coldHistoryFiles', 'exportFile', 'action'), owner);
+  const started = chunked ? await f.t.mutation(ref('coldHistoryChunks', 'start', 'mutation'), owner)
+    : await f.t.action(ref('coldHistory', 'archive', 'action'), owner);
+  if ('jobId' in started) for (let n = 0; n < 300; n++) {
+    const state = await f.t.action(ref('coldHistoryChunks', 'advance', 'action'), { ...owner, jobId: started.jobId });
+    if (state.state === 'FAILED') throw new Error(state.error);
+    if (state.state === 'COMPLETE') break;
+  }
+  const archiveId = started.archiveId;
+  const file = await f.t.action(ref('jobId' in started ? 'coldHistoryChunks' : 'coldHistoryFiles', 'jobId' in started ? 'exportPart' : 'exportFile', 'action'),
+    { ...owner, ...('jobId' in started ? { index: 0 } : {}) });
   const original = (await f.t.run(ctx => ctx.db.get(archiveId as Id<'coldHistoryArchives'>)))!;
   return { owner, file, original };
 }
+test('v2 selective clone preflights and restores all parts of a >1000-message scope with unchanged source proof', async () => {
+  const source = await fixture('v2-selective-source'), cold = await signedConversation(source, 0, undefined, 1007), exported = await archive(source);
+  const attachments = exported.chunks.filter(c => c.table === 'coldHistoryFiles').flatMap(c => c.rows.map(decodeRow)).map(e => decodeRow(e.record));
+  expect(attachments).toHaveLength(cold.original.manifest.chunkCount);
+  const target = await fixture('v2-selective-target'), result = await apply(target, await start(target, exported));
+  const owner = await restoredColdOwner(target, result.targetOwners[0].agentGlobalId);
+  for (const a of attachments) expect(await target.t.action(ref('coldHistoryChunks', 'exportPart', 'action'), { ...owner, index: a.file.descriptor.index })).toEqual(a.file);
+  expect(await target.t.run(ctx => ctx.db.query('messages').collect())).toHaveLength(1007);
+}, 300000);
+test('v2 selective clone accumulates author mappings introduced only by a later part', async () => {
+  const source = await fixture('v2-disjoint-authors'), cold = await signedConversation(source, 0, undefined, 30, true, true), exported = await archive(source);
+  const attachments = exported.chunks.filter(c => c.table === 'coldHistoryFiles').flatMap(c => c.rows.map(decodeRow)).map(e => decodeRow(e.record));
+  expect(attachments).toHaveLength(2);
+  expect(attachments[0].file.payload.messages.every((m: any) => m.authorPlayerId === 'p:1')).toBe(true);
+  const target = await fixture('v2-disjoint-target'), result = await apply(target, await start(target, exported));
+  const owner = await restoredColdOwner(target, result.targetOwners[0].agentGlobalId);
+  expect(owner.playerId).not.toBe(cold.owner.playerId);
+  const archiveRow = (await target.t.run(ctx => ctx.db.query('coldHistoryArchives').unique()))!;
+  expect(archiveRow.authorAliases).toContainEqual({ sourceAuthor: 'p:0', targetAuthor: owner.playerId });
+  const page = await target.t.action(ref('coldHistory', 'read', 'action'), { ...owner, offset: 25, numItems: 25 });
+  expect(page.page.every((m: any) => m.targetAuthor === owner.playerId)).toBe(true);
+  for (const a of attachments) expect(await target.t.action(ref('coldHistoryChunks', 'exportPart', 'action'), { ...owner, index: a.file.descriptor.index })).toEqual(a.file);
+});
+test('v2 selective export checks the final source page before emitting any cold prefix', async () => {
+  const source = await fixture('v2-final-exclusion');
+  await signedConversation(source, 0, undefined, 130, true);
+  const { jobId } = await source.t.mutation(ref('backupSelective', 'startExport', 'mutation'), { adminToken,
+    scope: 'agent-one', agentGlobalIds: [source.globals[0]], categories: ['conversation'], operator: 'test', reason: 'Complete source scan' });
+  for (let n = 0; n < 200; n++) {
+    const state = await source.t.query(ref('backupSelective', 'status', 'query'), { adminToken, jobId });
+    if (state.phase === 'COLD_FILES') break;
+    if (state.state === 'FAILED') throw new Error(state.error);
+    await source.t.action(ref('backupSelective', 'advanceExport', 'action'), { adminToken, jobId });
+  }
+  await source.t.run(async ctx => {
+    const message = (await ctx.db.query('messages').withIndex('messageUuid', q => q.eq('conversationId', 'c:40').eq('messageUuid', 'signed-owner-0-129')).unique())!;
+    const marker = (await ctx.db.query('backupLargeRows').withIndex('job_source', q => q.eq('jobId', jobId).eq('sourceId', message._id)).unique())!;
+    await ctx.db.patch(marker._id, { state: 'EXCLUDED' });
+  });
+  await source.t.action(ref('backupSelective', 'advanceExport', 'action'), { adminToken, jobId });
+  expect(await source.t.run(ctx => ctx.db.query('backupLargeChunks').withIndex('job_index', q => q.eq('jobId', jobId))
+    .filter(q => q.eq(q.field('table'), 'coldHistoryFiles')).collect())).toEqual([]);
+  for (let n = 0; n < 20; n++) {
+    const state = await source.t.action(ref('backupSelective', 'advanceExport', 'action'), { adminToken, jobId });
+    if (state.state === 'FAILED') throw new Error(state.error);
+    if (state.state === 'COMPLETE') break;
+  }
+  const result = await source.t.action(ref('backupSelective', 'getManifest', 'action'), { adminToken, jobId });
+  expect(result.manifest.coldHistoryFiles).toMatchObject({ included: 0, excluded: { SOURCE_SCOPE_INCOMPLETE: 1 } });
+  expect(result.manifest.chunks.some((c: any) => c.table === 'coldHistoryFiles')).toBe(false);
+});
 async function restoredColdOwner(f: Fixture, globalId: string) {
   const binding = (await f.t.run(ctx => ctx.db.query('residentModelBindings').withIndex('globalAgent', q => q.eq('agentGlobalId', globalId)).unique()))!;
   const memory = (await f.t.run(ctx => ctx.db.query('memories').withIndex('globalAgent', q => q.eq('agentGlobalId', globalId))
     .filter(q => q.eq(q.field('description'), 'Signed conversation owner 0')).unique()))!;
   return { adminToken, worldId: binding.worldId, playerId: binding.playerId, agentGlobalId: globalId, memoryId: memory._id };
 }
+test('selective resident cloning retains resident quotas and draft profile lifecycle policy', async () => {
+  const src = await fixture('quota-source'), dst = await fixture('quota-target');
+  await src.t.run(async ctx => {
+    const binding = (await ctx.db.query('residentModelBindings').withIndex('globalAgent', q => q.eq('agentGlobalId', src.globals[0])).unique())!;
+    await ctx.db.patch(binding._id, { requestQuotas: { chat: 2, embedding: 4 } });
+    await ctx.db.patch(src.profileId, { disabled: true, dailyRequestLimit: 7 });
+  });
+  const exported = await archive(src), configured = options(dst, exported);
+  configured.profiles[0] = { sourceId: src.profileId, operation: 'draft' };
+  const result = await apply(dst, await start(dst, exported, configured));
+  const binding = await dst.t.run(ctx => ctx.db.query('residentModelBindings').withIndex('globalAgent', q =>
+    q.eq('agentGlobalId', result.targetOwners[0].agentGlobalId)).unique());
+  expect(binding).toMatchObject({ requestQuotas: { chat: 2, embedding: 4 } });
+  expect(await dst.t.run(ctx => ctx.db.get(binding!.chatProfileId))).toMatchObject({ disabled: true, dailyRequestLimit: 7 });
+});
+
+test('configuration-only import applies provider quota only when explicitly selected', async () => {
+  const src = await fixture('provider-source');
+  const providerKey = '["custom","https://provider.example"]';
+  await src.t.run(ctx => ctx.db.insert('modelProviderQuotas', { kind: 'CHAT', providerKey, maxRequestsPerDay: 15, updatedAt: 1 }));
+  const exported = await archive(src, { scope: 'config-only', agentGlobalIds: [], categories: ['configuration'] });
+  expect(exported.chunks.find(c => c.table === 'modelProviderQuotas')?.rows).toHaveLength(1);
+  for (const include of [false, true]) {
+    const dst = await fixture(`provider-target-${include}`);
+    await dst.t.run(ctx => ctx.db.insert('modelProviderQuotas', { kind: 'CHAT', providerKey, maxRequestsPerDay: 1, updatedAt: 2 }));
+    const configured: Options = { mode: 'merge', owners: [], profiles: [], externalReferences: [],
+      configuration: include ? ['modelProviderQuotas'] : [], worlds: [], sourceStopped: false,
+      operator: 'test-admin', reason: 'Explicit provider quota transfer' };
+    await apply(dst, await start(dst, exported, configured));
+    expect((await dst.t.run(ctx => ctx.db.query('modelProviderQuotas').unique()))?.maxRequestsPerDay).toBe(include ? 15 : 1);
+  }
+});
+
 test('selective clone carries only the selected complete signed cold scope and preserves source proof through re-export', async () => {
   const source = await fixture('cold-source'), cold = await signedConversation(source);
   await signedConversation(source, 1, 'Other resident private cold original');

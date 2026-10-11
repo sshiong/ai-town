@@ -13,6 +13,7 @@ import { LLMMessage, ChatConfig } from '../util/llm';
 import { chatConfigForResident } from '../models/profiles';
 import { activeRoute, ensureEmbeddingSpace } from '../models/embeddings';
 import { cosineSimilarity, validateVector } from '../models/compatibility';
+import { memorySourceDigest } from '../models/embeddingDataRevision';
 import * as embeddingsCache from './embeddingsCache';
 import { asyncMap } from '../util/asyncMap';
 import { GameId, agentId, conversationId, playerId } from '../aiTown/ids';
@@ -162,7 +163,7 @@ export async function rememberConversation(
   ).toLocaleString()}: ${content}`;
   const importance = await calculateImportance(ctx, description, chatConfig);
   const route = await activeRoute(ctx);
-  const embedding = await embeddingsCache.fetch(ctx, description, { route, inputMode: 'document' });
+  const embedding = await embeddingsCache.fetch(ctx, description, { route, inputMode: 'document', owner: { worldId, playerId } });
   authors.delete(player.id as GameId<'players'>);
   await ctx.runMutation(selfInternal.insertMemory, {
     agentId,
@@ -587,6 +588,7 @@ export const insertMemory = internalMutation({
       worldId: memory.worldId,
       playerId: memory.playerId,
       agentGlobalId: binding?.agentGlobalId,
+      sourceDigest: await memorySourceDigest({ ...memory, agentGlobalId: binding?.agentGlobalId }),
       embedding,
     });
     if (memory.data.type === 'conversation') {
@@ -638,6 +640,7 @@ export const insertReflectionMemories = internalMutation({
         worldId,
         playerId,
         agentGlobalId: binding?.agentGlobalId,
+        sourceDigest: await memorySourceDigest({ worldId, playerId, description: rest.description, agentGlobalId: binding?.agentGlobalId }),
         embedding,
       });
       await ctx.scheduler.runAfter(0, internal.models.embeddings.indexMemory, { memoryId });
@@ -705,6 +708,7 @@ export async function reflectOnMemories(
       const embedding = await embeddingsCache.fetch(ctx, item.insight, {
         route,
         inputMode: 'document',
+        owner: { worldId, playerId },
       });
       console.debug('adding reflection memory...', item.insight);
       return {

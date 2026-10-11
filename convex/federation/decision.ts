@@ -218,6 +218,7 @@ export async function recallHomeMemories(
     queryEmbedding = await embeddingsCache.fetch(ctx, searchText, {
       route,
       inputMode: 'query',
+      owner: { worldId: args.worldId, playerId: args.playerId },
     });
   } catch (error) {
     // Embedding is a derived retrieval service, independent of the resident's bound Chat model.

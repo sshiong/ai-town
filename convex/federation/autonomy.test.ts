@@ -9,6 +9,7 @@ import { GameId } from '../aiTown/ids';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 const modules = {
+  '../models/usage.ts': () => import('../models/usage'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/autonomy.ts': () => import('./autonomy'),
   '../federation/resources.ts': () => import('./resources'),

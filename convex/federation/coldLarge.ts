@@ -1,6 +1,6 @@
 import type { QueryCtx } from '../_generated/server';
 import type { Doc, Id } from '../_generated/dataModel';
-import { captureSource } from './coldHistory';
+import { captureSource, source, archiveFor } from './coldHistory';
 import { plan, validateFile } from './coldHistoryFiles';
 import { digest } from './security';
 import type { ColdBackupAttachment } from './coldBackup';
@@ -113,7 +113,9 @@ export async function coldLargeOwner(
     agentGlobalId: binding.agentGlobalId,
     memoryId: memory._id,
   };
-  const captured = await captureSource(ctx, { ...owner, adminToken }, true);
+  const captured = archive.manifest.version === 2
+    ? { existing: await archiveFor(ctx, (await source(ctx, { ...owner, adminToken })).sourceKey) }
+    : await captureSource(ctx, { ...owner, adminToken }, true);
   if (captured.existing?._id !== archive._id) throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
   return owner;
 }

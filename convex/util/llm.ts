@@ -1,7 +1,9 @@
 // Chat and Embedding connections are deliberately independent.
 export const EMBEDDING_DIMENSION = 1024; // Legacy Convex vector index only.
 export type ModelProvider = 'openai' | 'together' | 'ollama' | 'custom';
+import type { UsageRoute } from '../models/usage';
 export interface ChatConfig {
+  modelUsage?: UsageRoute;
   provider: ModelProvider;
   url: string;
   chatModel: string;
@@ -113,7 +115,7 @@ export async function chatCompletion(
   },
   configOverride?: ChatConfig,
   options?: ChatRequestOptions,
-): Promise<{ content: string; retries: number; ms: number }>;
+): Promise<{ content: string; retries: number; ms: number; totalTokens?: number }>;
 // Overload for streaming
 export async function chatCompletion(
   body: Omit<CreateChatCompletionRequest, 'model'> & {
@@ -129,8 +131,9 @@ export async function chatCompletion(
   },
   configOverride?: ChatConfig,
   options?: ChatRequestOptions,
-) {
+): Promise<{ content: string | ChatCompletionContent; retries: number; ms: number; totalTokens?: number }> {
   const config = configOverride ?? getChatConfig();
+  let totalTokens: number | undefined;
   body.model = body.model ?? config.chatModel;
   body = {
     ...body,
@@ -166,19 +169,20 @@ export async function chatCompletion(
       });
       if (!result.ok) {
         const error = await result.text();
-        console.error({ error });
         if (result.status === 404 && config.provider === 'ollama') {
           await tryPullOllama(body.model!, error, config.url, controller?.signal);
         }
         throw {
           retry: result.status === 429 || result.status >= 500,
-          error: new Error(`Chat completion failed with code ${result.status}: ${error}`),
+          // Provider bodies may echo private input or credentials.
+          error: new Error(`Chat completion failed with code ${result.status}`),
         };
       }
       if (body.stream) {
         return new ChatCompletionContent(result.body!, stopWords);
       } else {
         const json = (await result.json()) as CreateChatCompletionResponse;
+        totalTokens = json.usage?.total_tokens;
         const choice = json.choices?.[0];
         const content = choice?.message?.content;
         if (typeof content !== 'string' || !content.trim()) {
@@ -203,6 +207,7 @@ export async function chatCompletion(
       content,
       retries,
       ms,
+      totalTokens,
     };
   } catch (error) {
     if (controller?.signal.aborted) throw new Error('CHAT_REQUEST_DEADLINE');
@@ -269,13 +274,12 @@ export async function fetchEmbeddingBatch(
     if (!result.ok) {
       throw {
         retry: result.status === 429 || result.status >= 500,
-        error: new Error(`Embedding failed with code ${result.status}: ${await result.text()}`),
+        error: new Error(`Embedding failed with code ${result.status}`),
       };
     }
     return (await result.json()) as CreateEmbeddingResponse;
   });
   if (json.data.length !== texts.length) {
-    console.error(json);
     throw new Error('Unexpected number of embeddings');
   }
   if (

@@ -13,6 +13,8 @@ import { requireAdmin, sign } from './security';
 import { assertTownUnlocked } from './maintenanceLock';
 import { selectiveColdCandidate, selectiveColdScope } from './coldSelective';
 import { load as loadColdHistory } from './coldHistory';
+import { coldExportSourcePage } from './coldExportProgress';
+import { actionRef } from './refs';
 import { checkColdLargeExport, type ColdLargeRow } from './coldLarge';
 import { BackupRow, decodeRow, encodeRow } from './backupHelpers';
 import {
@@ -603,6 +605,8 @@ export const savePage = internalMutation({
       job.chunkCount !== a.expectedChunkCount
     )
       throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    if (job.phase === 'COLD_FILES' && a.page.expectedColdRevision !== undefined && a.page.expectedColdRevision !== (job.metadata?.coldRevision ?? 0))
+      throw new Error('BACKUP_CHECKPOINT_CHANGED');
     let bytes = job.bytes;
     let records = job.recordCount;
     for (const [offset, chunk] of a.chunks.entries()) {
@@ -712,7 +716,8 @@ export const savePage = internalMutation({
       updatedAt: Date.now(),
       ...(job.phase === 'COLD_FILES' ? {
         cursor: a.page.done ? null : a.page.cursor,
-        metadata: { ...job.metadata, coldHistoryFiles: {
+        metadata: { ...job.metadata, ...a.page.coldProgress,
+          coldRevision: (job.metadata?.coldRevision ?? 0) + 1, coldHistoryFiles: {
           policy: 'complete-selected-source-only',
           included: (job.metadata.coldHistoryFiles?.included ?? 0) + a.page.rows.length,
           excluded: {
@@ -857,10 +862,34 @@ export const advanceExport = action({
       } else {
         const page = await ctx.runQuery(refQ('page'), { jobId: a.jobId });
         if (page.table === 'coldHistoryFiles') {
+          page.expectedColdRevision = job.metadata?.coldRevision ?? 0;
           page.excluded = { CANONICAL_MEMORY_NOT_SELECTED: 0, SOURCE_SCOPE_INCOMPLETE: 0, SOURCE_SCOPE_NOT_SELECTED: 0 };
           for (const candidate of page.candidates) {
             const { archive, owner, exclusion } = candidate;
             if (!candidate.verifyOriginal) { page.excluded[exclusion]++; continue; }
+            if (archive.manifest.version === 2) {
+              if (!job.metadata?.coldScopeChecked) {
+                const checked = await ctx.runQuery(refQ('checkColdScope'), { jobId: job._id, archiveId: archive._id, owner, adminToken: a.adminToken });
+                if (checked.done && (exclusion || checked.scan.excluded)) {
+                  page.excluded[exclusion ?? 'SOURCE_SCOPE_INCOMPLETE']++;
+                  page.coldProgress = { coldScopeScan: null, coldScopeChecked: false, coldPartIndex: 0 };
+                } else {
+                  page.coldProgress = { coldScopeScan: checked.scan, coldScopeChecked: checked.done };
+                  page.cursor = job.cursor; page.done = false;
+                }
+                continue;
+              }
+              const index = job.metadata?.coldPartIndex ?? 0;
+              const file = await ctx.runAction(actionRef('coldHistoryChunks/exportPart'), { ...owner, adminToken: a.adminToken, index });
+              const row: ColdLargeRow = { _id: `${archive._id}/part/${index}`, _creationTime: archive._creationTime,
+                owner, file, authorAliases: archive.authorAliases ?? [] };
+              await ctx.runQuery(refQ('checkColdFile'), { row, adminToken: a.adminToken });
+              page.rows.push({ kind: 'record', role: 'dependency', record: encodeRow(row), references: validateSourceRow('coldHistoryFiles', row) });
+              if (index + 1 < archive.manifest.chunkCount) {
+                page.coldProgress = { coldPartIndex: index + 1 }; page.cursor = job.cursor; page.done = false;
+              } else page.coldProgress = { coldPartIndex: 0, coldScopeScan: null, coldScopeChecked: false };
+              continue;
+            }
             const payload = await loadColdHistory(ctx, archive);
             const row: ColdLargeRow = { _id: archive._id, _creationTime: archive._creationTime,
               owner, file: { format: 'ai-town-cold-history-file', version: 1,
@@ -921,6 +950,16 @@ export const advanceExport = action({
     }
     job = await ctx.runQuery(refQ('jobData'), { jobId: a.jobId });
     return view(job);
+  },
+});
+export const checkColdScope = internalQuery({
+  args: { jobId: v.id('backupLargeJobs'), archiveId: v.id('coldHistoryArchives'), owner: v.any(), adminToken: v.string() },
+  handler: async (ctx, a) => {
+    requireAdmin(a.adminToken); const job = await owned(ctx, a.jobId); await stable(ctx);
+    if (job.phase !== 'COLD_FILES') throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    const archive = await ctx.db.get(a.archiveId);
+    if (!archive || archive.state !== 'VERIFIED') throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
+    return coldExportSourcePage(ctx, job, archive, { ...a.owner, adminToken: a.adminToken }, true);
   },
 });
 export const checkColdFile = internalQuery({

@@ -11,6 +11,7 @@ import {
 import { sleep } from '../util/sleep';
 import { mutationRef } from './refs';
 import { recordResourceMetric } from './resourceMonitoring';
+import { trackedModelCall } from '../models/usage';
 import {
   chatSource,
   LOCAL_CHAT_SOURCE,
@@ -202,8 +203,11 @@ export async function residentChatCompletion(
   try {
     while (!(await ctx.runMutation(mutationRef('resources/claimChat'), { requestId })))
       await sleep(250);
-    providerStartedAt = Date.now();
-    const result = await chatCompletion(body, config, { deadline });
+    const result = await trackedModelCall(ctx, 'CHAT', config.modelUsage,
+      () => {
+        providerStartedAt = Date.now();
+        return chatCompletion(body, config, { deadline });
+      }, result => result.totalTokens);
     outcome = 'SUCCESS';
     return result;
   } finally {

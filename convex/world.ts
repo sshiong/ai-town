@@ -1,5 +1,6 @@
 import { ConvexError, v } from 'convex/values';
-import { internalMutation, mutation, query } from './maintenanceFunctions';
+import { internalMutation, mutation, query, trackedMutation } from './maintenanceFunctions';
+import { townMaintenanceLock } from './federation/maintenanceLock';
 import { characters } from '../data/characters';
 import { insertInput } from './aiTown/insertInput';
 import {
@@ -23,11 +24,13 @@ export const defaultWorldStatus = query({
   },
 });
 
-export const heartbeatWorld = mutation({
+export const heartbeatWorld = trackedMutation({
   args: {
     worldId: v.id('worlds'),
   },
   handler: async (ctx, args) => {
+    // Viewing a paused archive must neither mutate its snapshot nor reject the browser's timer.
+    if (await townMaintenanceLock(ctx)) return;
     const worldStatus = await ctx.db
       .query('worldStatus')
       .withIndex('worldId', (q) => q.eq('worldId', args.worldId))

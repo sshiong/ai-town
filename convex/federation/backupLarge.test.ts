@@ -32,6 +32,7 @@ const modules = {
   '../federation/backup.ts': () => import('./backup'),
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
+  '../federation/coldHistoryChunks.ts': () => import('./coldHistoryChunks'),
   '../models/embeddings.ts': () => import('../models/embeddings'),
   '../engine/abstractGame.ts': () => import('../engine/abstractGame'),
   '../aiTown/game.ts': () => import('../aiTown/game'),
@@ -161,7 +162,7 @@ async function town(memoryCount = 2) {
 type Town = Awaited<ReturnType<typeof town>>;
 const historyAction = (name: string) => makeFunctionReference<'action'>(`federation/${name}`);
 const historyQuery = (name: string) => makeFunctionReference<'query'>(`federation/${name}`);
-async function coldConversation(source: Town, firstMessage?: string) {
+async function coldConversation(source: Town, firstMessage?: string, count = 3, chunked = false) {
   const memoryId = await source.t.run(async ctx => {
     const embeddingId = await ctx.db.insert('memoryEmbeddings', {
       playerId: 'p:0', embedding: Array.from({ length: EMBEDDING_DIMENSION }, () => 0.25),
@@ -173,12 +174,12 @@ async function coldConversation(source: Town, firstMessage?: string) {
     });
     await ctx.db.insert('archivedConversations', {
       worldId: source.worldId, id: 'c:4', creator: 'p:0', created: 10, ended: 20,
-      numMessages: 3, participants: ['p:0', 'p:1'],
+      numMessages: count, participants: ['p:0', 'p:1'],
     });
     await ctx.db.insert('participatedTogether', {
       worldId: source.worldId, conversationId: 'c:4', player1: 'p:0', player2: 'p:1', ended: 20,
     });
-    for (let index = 0; index < 3; index++)
+    for (let index = 0; index < count; index++)
       await ctx.db.insert('messages', {
         worldId: source.worldId, conversationId: 'c:4', author: index % 2 ? 'p:1' : 'p:0',
         text: index === 0 && firstMessage !== undefined ? firstMessage : `Retained original message ${index}`,
@@ -189,11 +190,57 @@ async function coldConversation(source: Town, firstMessage?: string) {
   const owner = {
     adminToken, worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId, memoryId,
   };
-  const { archiveId } = await source.t.action(historyAction('coldHistory:archive'), owner);
-  const file: PortableHistory = await source.t.action(historyAction('coldHistoryFiles:exportFile'), owner);
+  const started = chunked
+    ? await source.t.mutation(makeFunctionReference<'mutation'>('federation/coldHistoryChunks:start'), owner)
+    : await source.t.action(historyAction('coldHistory:archive'), owner);
+  if ('jobId' in started) for (let n = 0; n < 300; n++) {
+    const state = await source.t.action(historyAction('coldHistoryChunks:advance'), { ...owner, jobId: started.jobId });
+    if (state.state === 'FAILED') throw new Error(state.error);
+    if (state.state === 'COMPLETE') break;
+  }
+  const archiveId = started.archiveId;
+  const file: PortableHistory = await source.t.action(historyAction('jobId' in started ? 'coldHistoryChunks:exportPart' : 'coldHistoryFiles:exportFile'),
+    { ...owner, ...('jobId' in started ? { index: 0 } : {}) });
   const original = await source.t.run(ctx => ctx.db.get(archiveId as Id<'coldHistoryArchives'>));
   return { owner, file, original: original! };
 }
+test('v2 full-town clone restores every part of a >1000-message scope with original portable signatures', async () => {
+  const source = await town(), cold = await coldConversation(source, undefined, 1007);
+  const archive = await exported(source.t), attachments = archive.chunks.filter(c => c.table === 'coldHistoryFiles').flatMap(c => c.rows.map(decodeRow));
+  expect(attachments.length).toBe(cold.original.manifest.chunkCount);
+  expect(attachments.every(a => a.file.version === 2)).toBe(true);
+  const destination = convexTest(schema, modules), jobId = await staged(destination, archive, 'clone');
+  await drive(destination, jobId, 'import', 'READY');
+  await destination.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(destination, jobId, 'import', 'COMPLETE');
+  const restored = await retainedState(destination), binding = restored.bindings[0];
+  const memory = restored.memories.find(m => m.description === 'Retained closed conversation')!;
+  const owner = { adminToken, worldId: binding.worldId, playerId: binding.playerId, agentGlobalId: binding.agentGlobalId, memoryId: memory._id };
+  expect(restored.messages).toHaveLength(1007);
+  expect(restored.coldArchives[0].state).toBe('VERIFIED');
+  for (const a of attachments) expect(await destination.action(historyAction('coldHistoryChunks:exportPart'), { ...owner, index: a.file.descriptor.index })).toEqual(a.file);
+  expect(await source.t.run(ctx => ctx.db.query('messages').collect())).toHaveLength(1007);
+}, 300000);
+test.each(['missing part', 'extra hot original'])('v2 full-town %s fails preflight without writing target history', async variant => {
+  const source = await town(), cold = await coldConversation(source, undefined, 30, true), archive = await exported(source.t);
+  if (variant === 'missing part') {
+    const coldChunks = archive.chunks.filter(c => c.table === 'coldHistoryFiles');
+    archive.chunks = archive.chunks.filter(c => c.index !== coldChunks[coldChunks.length - 1].index);
+  } else {
+    const chunk = archive.chunks.find(c => c.table === 'messages' && c.rows.length < 20)!;
+    const original = decodeRow(chunk.rows[0]);
+    chunk.rows.push(encodeRow({ ...original, _id: `${original._id}:extra`, messageUuid: 'extra-hot-original' }));
+  }
+  for (const [index, chunk] of archive.chunks.entries()) chunk.index = index;
+  archive.manifest.chunks = await Promise.all(archive.chunks.map(descriptor));
+  archive.signature = await sign(archive.manifest, source.keys.privateKeyEncrypted);
+  const destination = convexTest(schema, modules), jobId = await staged(destination, archive, 'clone');
+  await expect(drive(destination, jobId, 'import', 'READY')).rejects.toThrow(
+    variant === 'missing part' ? 'COLD_HISTORY_INCOMPLETE_CHUNKS' : 'BACKUP_COLD_FILES_MESSAGES_MISMATCH');
+  expect(await destination.run(ctx => ctx.db.query('messages').collect())).toEqual([]);
+  expect(await destination.run(ctx => ctx.db.query('coldHistoryArchives').collect())).toEqual([]);
+  expect(cold.original.state).toBe('VERIFIED');
+});
 async function coldTravel(source: Town) {
   const transcriptId = 'large-travel-conversation/completed-visit';
   const memoryId = await source.t.run(async ctx => {
@@ -287,6 +334,27 @@ async function staged(
     await t.action(action('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(chunk) });
   return jobId as Id<'backupLargeJobs'>;
 }
+
+test('chunked restore retains provider/profile/resident policy without exporting request telemetry', async () => {
+  const { t } = await town();
+  await t.run(async ctx => {
+    const profile = (await ctx.db.query('chatProfiles').unique())!;
+    const binding = (await ctx.db.query('residentModelBindings').unique())!;
+    await ctx.db.patch(profile._id, { dailyRequestLimit: 6 });
+    await ctx.db.patch(binding._id, { requestQuotas: { chat: 2, embedding: 0 } });
+    await ctx.db.insert('modelProviderQuotas', { kind: 'CHAT', providerKey: '["custom","https://chat.example"]', maxRequestsPerDay: 9, updatedAt: 1 });
+  });
+  const archive = await exported(t);
+  expect(archive.chunks.some(c => c.table === 'modelProviderQuotas' && c.rows.length === 1)).toBe(true);
+  expect(archive.chunks.some(c => ['modelUsageBuckets', 'modelCallReceipts'].includes(c.table))).toBe(false);
+  const jobId = await staged(t, archive);
+  await drive(t, jobId, 'import', 'READY');
+  await t.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(t, jobId, 'import', 'COMPLETE');
+  expect(await t.run(ctx => ctx.db.query('modelProviderQuotas').unique())).toMatchObject({ maxRequestsPerDay: 9 });
+  expect(await t.run(ctx => ctx.db.query('chatProfiles').unique())).toMatchObject({ dailyRequestLimit: 6 });
+  expect(await t.run(ctx => ctx.db.query('residentModelBindings').unique())).toMatchObject({ requestQuotas: { chat: 2, embedding: 0 } });
+});
 
 test('large signed export and restore preserve all canonical memories, cyclic references and fixed model ownership', async () => {
   const { t, agentGlobalId } = await town(510);
