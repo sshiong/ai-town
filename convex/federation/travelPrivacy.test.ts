@@ -42,7 +42,7 @@ test.each(['INSPECTING', 'RUNNING'] as const)('archive admission cannot strand a
   await expect(t.run(ctx => assertArchiveCanStart(ctx))).resolves.toBeNull();
 });
 
-test('an archive lock rejects both a new privacy inspection and starting an existing plan', async () => {
+test('an archive lock rejects new privacy inspections, starts and retries', async () => {
   const t = convexTest(schema, modules);
   await fixture(t);
   const inspectionJobId = await t.mutation(mutationRef('travelPrivacy/inspect'), { adminToken, visitId: 'selected', scope: 'CACHE' });
@@ -56,6 +56,8 @@ test('an archive lock rejects both a new privacy inspection and starting an exis
   await expect(t.mutation(mutationRef('travelPrivacy/inspect'), { adminToken, visitId: 'selected', scope: 'CACHE' }))
     .rejects.toThrow('TOWN_BACKUP_MAINTENANCE_LOCKED');
   await expect(t.mutation(mutationRef('travelPrivacy/start'), { adminToken, jobId: inspectionJobId }))
+    .rejects.toThrow('TOWN_BACKUP_MAINTENANCE_LOCKED');
+  await expect(t.mutation(mutationRef('travelPrivacy/retry'), { adminToken, jobId: inspectionJobId }))
     .rejects.toThrow('TOWN_BACKUP_MAINTENANCE_LOCKED');
   expect(await t.run(ctx => ctx.db.query('travelPrivacyJobs').collect())).toHaveLength(1);
 });
@@ -238,6 +240,77 @@ async function preview(
   await drain(t);
   return { jobId, report: await t.query(queryRef('travelPrivacy/status'), { adminToken, jobId }) };
 }
+test.each(['failed-page', 'committed-page'] as const)('retry preserves the %s checkpoint and fences older scheduled work', async mode => {
+  const t = convexTest(schema, modules), ids = await fixture(t);
+  if (mode === 'failed-page') await t.run(async ctx => {
+    const { _id, _creationTime, ...inbox } = (await ctx.db.get(ids.inboxId))!;
+    await ctx.db.insert('federationInbox', { ...inbox, messageId: 'second-page-message',
+      envelope: { ...inbox.envelope, messageId: 'second-page-message' } });
+  });
+  const { jobId, report } = await preview(t);
+  expect(report.state).toBe('READY');
+  await t.mutation(mutationRef('travelPrivacy/start'), { adminToken, jobId });
+  const started = (await t.run(ctx => ctx.db.get(jobId)))!;
+  if (mode === 'failed-page') {
+    const originalDigest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle);
+    const digest = jest.spyOn(globalThis.crypto.subtle, 'digest')
+      .mockImplementationOnce(originalDigest)
+      .mockRejectedValueOnce(new Error('TEST_TRANSIENT_DIGEST_FAILURE'));
+    try {
+      await expect(t.mutation(mutationRef('travelPrivacy/page'), { jobId, revision: started.revision }))
+        .rejects.toThrow('TEST_TRANSIENT_DIGEST_FAILURE');
+    } finally { digest.mockRestore(); }
+    expect(await t.run(ctx => ctx.db.get(jobId))).toEqual(started);
+    expect((await t.run(ctx => ctx.db.get(ids.inboxId)))!.envelope.payload.text).toBe('network-secret');
+  } else {
+    await t.mutation(mutationRef('travelPrivacy/page'), { jobId, revision: started.revision });
+  }
+  const checkpoint = (await t.run(ctx => ctx.db.get(jobId)))!;
+  const graves = await t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect());
+  const generation = await t.run(ctx => ctx.db.query('embeddingDataRevisions')
+    .withIndex('key', q => q.eq('key', privacyCacheRevisionKey)).unique());
+  await t.mutation(mutationRef('travelPrivacy/retry'), { adminToken, jobId });
+  await t.mutation(mutationRef('travelPrivacy/retry'), { adminToken, jobId });
+  const retried = (await t.run(ctx => ctx.db.get(jobId)))!;
+  expect(retried).toMatchObject({ revision: checkpoint.revision + 2, phase: checkpoint.phase,
+    tableIndex: checkpoint.tableIndex, cursor: checkpoint.cursor, memoryIds: checkpoint.memoryIds,
+    processedRows: checkpoint.processedRows, counts: checkpoint.counts });
+  expect(await t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).toEqual(graves);
+  expect(await t.run(ctx => ctx.db.query('embeddingDataRevisions')
+    .withIndex('key', q => q.eq('key', privacyCacheRevisionKey)).unique())).toEqual(generation);
+  await t.mutation(mutationRef('travelPrivacy/page'), { jobId, revision: checkpoint.revision });
+  expect(await t.run(ctx => ctx.db.get(jobId))).toEqual(retried);
+  await drain(t);
+  const complete = (await t.run(ctx => ctx.db.get(jobId)))!;
+  expect(complete.state).toBe('COMPLETE');
+  expect(complete.counts.federationInbox).toBe(mode === 'failed-page' ? 2 : 1);
+  expect(await t.run(ctx => ctx.db.get(ids.memoryIds[0]))).toBeNull();
+  expect(await t.run(ctx => ctx.db.get(ids.otherId))).not.toBeNull();
+  await t.mutation(mutationRef('travelPrivacy/retry'), { adminToken, jobId });
+  expect(await t.run(ctx => ctx.db.get(jobId))).toEqual(complete);
+});
+test('retry inspection cannot bypass a new visit authority or an unconfirmed preview', async () => {
+  const t = convexTest(schema, modules), ids = await fixture(t);
+  const jobId: Id<'travelPrivacyJobs'> = await t.mutation(mutationRef('travelPrivacy/inspect'), { adminToken, visitId: 'selected', scope: 'SENSITIVE' });
+  await expect(t.mutation(mutationRef('travelPrivacy/retry'), { adminToken: 'invalid', jobId }))
+    .rejects.toThrow('ADMIN_UNAUTHORIZED');
+  const ledger = (await t.run(ctx => ctx.db.get(ids.ledgerId)))!;
+  await t.run(ctx => ctx.db.patch(ids.ledgerId, { state: 'ACTIVE', leaseExpiry: Date.now() + 60000 }));
+  await expect(t.mutation(mutationRef('travelPrivacy/retry'), { adminToken, jobId }))
+    .rejects.toThrow('TRAVEL_PRIVACY_VISIT_NOT_SAFE_TERMINAL');
+  await t.run(ctx => ctx.db.patch(ids.ledgerId, { state: ledger.state, leaseExpiry: ledger.leaseExpiry,
+    agentGlobalId: 'another-resident' }));
+  await expect(t.mutation(mutationRef('travelPrivacy/retry'), { adminToken, jobId }))
+    .rejects.toThrow('TRAVEL_PRIVACY_PREVIEW_STALE');
+  await t.run(ctx => ctx.db.patch(ids.ledgerId, { agentGlobalId: ledger.agentGlobalId }));
+  await t.mutation(mutationRef('travelPrivacy/retry'), { adminToken, jobId });
+  await drain(t);
+  expect((await t.run(ctx => ctx.db.get(jobId)))!.state).toBe('READY');
+  await expect(t.mutation(mutationRef('travelPrivacy/retry'), { adminToken, jobId }))
+    .rejects.toThrow('TRAVEL_PRIVACY_JOB_NOT_RETRYABLE');
+  expect(await t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).toEqual([]);
+  expect(await t.run(ctx => ctx.db.get(ids.memoryIds[0]))).not.toBeNull();
+});
 test('paged sensitive clearing removes exclusive original and derived copies but preserves ledger and replay evidence', async () => {
   const t = convexTest(schema, modules),
     ids = await fixture(t);

@@ -1,4 +1,8 @@
 export const federationMessages: Record<string, string> = {
+  'Resume from the saved checkpoint if a scheduled step failed.': '若后台步骤执行失败，可从已保存的进度重试。',
+  'Retrying travel privacy work': '正在重试旅行隐私任务',
+  'Travel privacy checkpoint requeued.': '已从保存的进度重新安排旅行隐私任务。',
+  'Retry pending travel privacy work': '重试未完成的旅行隐私任务',
   'privacy.MISSING_CONVERSATION_OWNERSHIP': '缺少已结束会话的参与者归属证据，无法安全清理。',
   'privacy.MISSING_MEMORY_OWNERSHIP': '旅行记忆缺少世界或居民归属证据，无法安全清理。',
   'privacy.SHARED_VISIT_OWNERSHIP': '同一旅行编号被其他世界或居民的记忆、对话副本使用，无法按本居民安全清理。',

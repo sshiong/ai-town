@@ -26,6 +26,11 @@ const startRef = makeFunctionReference<
   { adminToken: string; jobId: Id<'travelPrivacyJobs'> },
   Report
 >('federation/travelPrivacy:start');
+const retryRef = makeFunctionReference<
+  'mutation',
+  { adminToken: string; jobId: Id<'travelPrivacyJobs'> },
+  Report
+>('federation/travelPrivacy:retry');
 const statusRef = makeFunctionReference<
   'query',
   { adminToken: string; jobId: Id<'travelPrivacyJobs'> },
@@ -38,7 +43,8 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
     [scope, setScope] = useState<'CACHE' | 'SENSITIVE'>('CACHE');
   const [jobId, setJobId] = useState<Id<'travelPrivacyJobs'>>();
   const inspect = useMutation(inspectRef),
-    start = useMutation(startRef);
+    start = useMutation(startRef),
+    retry = useMutation(retryRef);
   const report = useQuery(statusRef, jobId ? { adminToken, jobId } : 'skip');
   return (
     <details className="admin-disclosure">
@@ -149,6 +155,21 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
             >
               {t('Clear this previewed visit locally')}
             </AdminButton>
+          )}
+          {['INSPECTING', 'RUNNING'].includes(report.state) && (
+            <>
+              <p className="admin-muted">{t('Resume from the saved checkpoint if a scheduled step failed.')}</p>
+              <AdminButton
+                disabled={!!task.pending}
+                onClick={() => void task.run(
+                  t('Retrying travel privacy work'),
+                  () => retry({ adminToken, jobId: report.jobId }),
+                  t('Travel privacy checkpoint requeued.'),
+                )}
+              >
+                {t('Retry pending travel privacy work')}
+              </AdminButton>
+            </>
           )}
         </div>
       )}

@@ -211,6 +211,30 @@ export const inspect = mutation({
     return jobId;
   },
 });
+export const retry = mutation({
+  args: { adminToken: v.string(), jobId: v.id('travelPrivacyJobs') },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    const job = await ctx.db.get(args.jobId);
+    if (!job) throw new Error('TRAVEL_PRIVACY_JOB_NOT_FOUND');
+    if (job.state === 'COMPLETE') return publicJob(job);
+    if (!['INSPECTING', 'RUNNING'].includes(job.state))
+      throw new Error('TRAVEL_PRIVACY_JOB_NOT_RETRYABLE');
+    const ledger = await assertTerminal(ctx, job.visitId);
+    if (ledger.worldId !== job.worldId || ledger.agentGlobalId !== job.ownerGlobalId || ledger.role !== job.role)
+      throw new Error('TRAVEL_PRIVACY_PREVIEW_STALE');
+    // A failed mutation leaves its entire page uncommitted. Preserve that
+    // checkpoint and fence any older scheduled invocation with a new revision.
+    const next = { ...job, revision: job.revision + 1, updatedAt: Date.now() };
+    await ctx.db.patch(job._id, { revision: next.revision, updatedAt: next.updatedAt });
+    await ctx.db.insert('federationTravelAudit', {
+      visitId: job.visitId, source: 'travelPrivacy', operation: 'ADMIN_LOCAL_CLEAR_RETRY',
+      at: Date.now(), next: { state: job.state, role: job.role },
+    });
+    await scheduled(ctx, next);
+    return publicJob(next);
+  },
+});
 export const start = mutation({
   args: { adminToken: v.string(), jobId: v.id('travelPrivacyJobs') },
   handler: async (ctx, args) => {
