@@ -311,6 +311,35 @@ test('retry inspection cannot bypass a new visit authority or an unconfirmed pre
   expect(await t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).toEqual([]);
   expect(await t.run(ctx => ctx.db.get(ids.memoryIds[0]))).not.toBeNull();
 });
+test.each(['active-source', 'unexpired-source', 'nonfinite-source', 'resident-away', 'wrong-owner', 'current-ledger'] as const)(
+  'ordinary historical evidence rejects %s before creating a clear job', async mode => {
+    const t = convexTest(schema, modules), ids = await fixture(t);
+    const history = await t.run(async ctx => {
+      const { _id, _creationTime, ...ledger } = (await ctx.db.get(ids.ledgerId))!;
+      if (mode !== 'current-ledger') await ctx.db.delete(ids.ledgerId);
+      const chatProfileId = await ctx.db.insert('chatProfiles', { name: 'local-test', provider: 'ollama',
+        url: 'http://localhost:11434', model: 'test-model', stopWords: [], createdAt: 1 });
+      await ctx.db.insert('residentModelBindings', { worldId: ids.worldId, playerId: 'p:0',
+        agentGlobalId: 'resident-global', chatProfileId, createdAt: 1, updatedAt: 1 });
+      await ctx.db.insert('federationAgentRuntimes', { worldId: ids.worldId, playerId: 'p:0', agentId: 'a:0',
+        agentGlobalId: 'resident-global', homeTownId: 'home', state: mode === 'resident-away' ? 'HOME_FROZEN' : 'HOME_ACTIVE',
+        agentAuthorityEpoch: 1, updatedAt: 1 });
+      if (mode === 'active-source') ledger.state = 'ACTIVE';
+      if (mode === 'unexpired-source') ledger.leaseExpiry = Date.now() + 60000;
+      if (mode === 'nonfinite-source') ledger.leaseExpiry = NaN;
+      const importId = await ctx.db.insert('backupImports', { sourceTownId: 'source', mode: 'clone',
+        exportedAt: 1, importedAt: 2, mapping: {}, manifest: {},
+        runtimeSnapshot: { visitLedger: [encodeRow(ledger)] } });
+      return { importId, worldId: ids.worldId, ownerGlobalId: mode === 'wrong-owner' ? 'other-owner' : 'resident-global' };
+    });
+    const error = mode === 'current-ledger' ? 'TRAVEL_PRIVACY_HISTORY_HAS_CURRENT_LEDGER'
+      : mode === 'resident-away' ? 'TRAVEL_PRIVACY_HISTORY_RESIDENT_NOT_HOME' : 'TRAVEL_PRIVACY_VISIT_NOT_SAFE_TERMINAL';
+    await expect(t.mutation(mutationRef('travelPrivacy/inspect'), { adminToken, visitId: 'selected', scope: 'SENSITIVE', history }))
+      .rejects.toThrow(error);
+    expect(await t.run(ctx => ctx.db.query('travelPrivacyJobs').collect())).toEqual([]);
+    expect(await t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).toEqual([]);
+    expect(await t.run(ctx => ctx.db.get(ids.memoryIds[0]))).not.toBeNull();
+  });
 test('paged sensitive clearing removes exclusive original and derived copies but preserves ledger and replay evidence', async () => {
   const t = convexTest(schema, modules),
     ids = await fixture(t);

@@ -1,5 +1,6 @@
 import { messageDigest } from './transport';
 import { v } from 'convex/values';
+import { paginationOptsValidator } from 'convex/server';
 import {
   internalMutation,
   mutation,
@@ -25,6 +26,7 @@ const PAGE = 5,
   MAX_SELECTION = 1000;
 const runtimeTypes = new Set(['OBSERVATION', 'DECISION', 'ACTION_RESULT', 'CONVERSATION_ENDED']);
 const scope = v.union(v.literal('CACHE'), v.literal('SENSITIVE'));
+const history = v.object({ importId: v.id('backupImports'), worldId: v.id('worlds'), ownerGlobalId: v.string() });
 type Job = Doc<'travelPrivacyJobs'>;
 const discoveryTables: TableNames[] = [
   'federationTurns',
@@ -78,15 +80,38 @@ const purgeTables: TableNames[] = [
   'memories',
 ];
 
-async function assertTerminal(ctx: QueryCtx | MutationCtx, visitId: string) {
+function safeTerminal(ledger: any) {
+  return ledger && ['COMPLETED', 'REJECTED'].includes(ledger.state) &&
+    Number.isFinite(ledger.leaseExpiry) && Number.isFinite(ledger.leaseSafetyMs ?? 0) &&
+    ledger.leaseExpiry + Math.max(60000, ledger.leaseSafetyMs ?? 0) < Date.now();
+}
+async function assertTerminal(ctx: QueryCtx | MutationCtx, visitId: string, source?: Job['history']) {
   const ledger = await visit(ctx, visitId);
-  if (
-    !ledger ||
-    !['COMPLETED', 'REJECTED'].includes(ledger.state) ||
-    ledger.leaseExpiry + Math.max(60000, ledger.leaseSafetyMs ?? 0) >= Date.now()
-  )
+  if (source) {
+    // Historical evidence is never inserted into the execution ledger. A
+    // current ledger always takes precedence over imported authority claims.
+    if (ledger) throw new Error('TRAVEL_PRIVACY_HISTORY_HAS_CURRENT_LEDGER');
+    const imported = await ctx.db.get(source.importId);
+    if (!imported || !Array.isArray(imported.runtimeSnapshot?.visitLedger))
+      throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+    const candidates = imported.runtimeSnapshot.visitLedger.map(decodeRow).filter((row: any) =>
+      row.visitId === visitId && (imported.mapping[row.worldId] ?? row.worldId) === source.worldId &&
+      (imported.mapping[row.agentGlobalId] ?? row.agentGlobalId) === source.ownerGlobalId);
+    if (candidates.length !== 1 || candidates[0].role !== 'home' || !safeTerminal(candidates[0]))
+      throw new Error('TRAVEL_PRIVACY_VISIT_NOT_SAFE_TERMINAL');
+    const bindings = await ctx.db.query('residentModelBindings')
+      .withIndex('globalAgent', q => q.eq('agentGlobalId', source.ownerGlobalId)).take(2);
+    const runtime = await ctx.db.query('federationAgentRuntimes')
+      .withIndex('globalId', q => q.eq('agentGlobalId', source.ownerGlobalId)).unique();
+    if (bindings.length !== 1 || bindings[0].worldId !== source.worldId ||
+      (imported.mapping[candidates[0].homePlayerId] ?? candidates[0].homePlayerId) !== bindings[0].playerId ||
+      !runtime || runtime.worldId !== source.worldId || runtime.playerId !== bindings[0].playerId ||
+      runtime.state !== 'HOME_ACTIVE') throw new Error('TRAVEL_PRIVACY_HISTORY_RESIDENT_NOT_HOME');
+    return { worldId: source.worldId, agentGlobalId: source.ownerGlobalId, role: 'home' };
+  }
+  if (!safeTerminal(ledger))
     throw new Error('TRAVEL_PRIVACY_VISIT_NOT_SAFE_TERMINAL');
-  return ledger;
+  return ledger!;
 }
 function inConversation(job: Job, row: any) {
   return row.worldId === job.worldId && job.conversationIds.includes(row.conversationId);
@@ -174,11 +199,45 @@ export const status = query({
     return job ? publicJob(job) : null;
   },
 });
-export const inspect = mutation({
-  args: { adminToken: v.string(), visitId: v.string(), scope },
+export const historicalCandidates = query({
+  args: { adminToken: v.string(), visitId: v.string(), paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
     requireAdmin(args.adminToken);
-    const ledger = await assertTerminal(ctx, args.visitId);
+    const records = await ctx.db.query('backupImports').order('desc').paginate({
+      ...args.paginationOpts, numItems: Math.max(1, Math.min(5, args.paginationOpts.numItems)),
+      maximumRowsRead: 5, maximumBytesRead: 2 * 1024 * 1024,
+    });
+    const page = [];
+    for (const imported of records.page) {
+      if (!Array.isArray(imported.runtimeSnapshot?.visitLedger)) continue;
+      for (const row of imported.runtimeSnapshot.visitLedger.map(decodeRow)) {
+        if (row.visitId !== args.visitId || row.role !== 'home' || !safeTerminal(row)) continue;
+        const worldId = ctx.db.normalizeId('worlds', imported.mapping[row.worldId] ?? row.worldId);
+        const ownerGlobalId = imported.mapping[row.agentGlobalId] ?? row.agentGlobalId;
+        if (!worldId || typeof ownerGlobalId !== 'string') continue;
+        const source = { importId: imported._id, worldId, ownerGlobalId };
+        try { await assertTerminal(ctx, args.visitId, source); }
+        catch (error) {
+          if (error instanceof Error && ['TRAVEL_PRIVACY_HISTORY_HAS_CURRENT_LEDGER',
+            'TRAVEL_PRIVACY_VISIT_NOT_SAFE_TERMINAL', 'TRAVEL_PRIVACY_HISTORY_RESIDENT_NOT_HOME'].includes(error.message)) continue;
+          throw error;
+        }
+        const binding = await ctx.db.query('residentModelBindings')
+          .withIndex('globalAgent', q => q.eq('agentGlobalId', ownerGlobalId)).unique();
+        const description = binding ? await ctx.db.query('playerDescriptions')
+          .withIndex('worldId', q => q.eq('worldId', worldId).eq('playerId', binding.playerId)).unique() : null;
+        page.push({ history: source, residentName: description?.name ?? ownerGlobalId,
+          sourceTownId: imported.sourceTownId, importedAt: imported.importedAt });
+      }
+    }
+    return { ...records, page };
+  },
+});
+export const inspect = mutation({
+  args: { adminToken: v.string(), visitId: v.string(), scope, history: v.optional(history) },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    const ledger = await assertTerminal(ctx, args.visitId, args.history);
     const jobId = await ctx.db.insert('travelPrivacyJobs', {
       visitId: args.visitId,
       scope: args.scope,
@@ -193,6 +252,7 @@ export const inspect = mutation({
       worldId: ledger.worldId,
       role: ledger.role,
       ownerGlobalId: ledger.agentGlobalId,
+      history: args.history,
       conversationIds: [],
       conversationOwners: [],
       transcriptIds: [],
@@ -220,7 +280,7 @@ export const retry = mutation({
     if (job.state === 'COMPLETE') return publicJob(job);
     if (!['INSPECTING', 'RUNNING'].includes(job.state))
       throw new Error('TRAVEL_PRIVACY_JOB_NOT_RETRYABLE');
-    const ledger = await assertTerminal(ctx, job.visitId);
+    const ledger = await assertTerminal(ctx, job.visitId, job.history);
     if (ledger.worldId !== job.worldId || ledger.agentGlobalId !== job.ownerGlobalId || ledger.role !== job.role)
       throw new Error('TRAVEL_PRIVACY_PREVIEW_STALE');
     // A failed mutation leaves its entire page uncommitted. Preserve that
@@ -251,7 +311,7 @@ export const start = mutation({
         .first()
     )
       throw new Error('TRAVEL_PRIVACY_CLEAR_IN_PROGRESS');
-    await assertTerminal(ctx, job.visitId);
+    await assertTerminal(ctx, job.visitId, job.history);
     if (
       job.sourceRevision !== (await dataRevision(ctx.db, sourceKey)) ||
       job.privacyRevision !== (await dataRevision(ctx.db, privacyRevisionKey))
@@ -751,6 +811,7 @@ export const page = internalMutation({
       !['INSPECTING', 'RUNNING'].includes(stored.state)
     )
       return;
+    if (stored.history) await assertTerminal(ctx, stored.visitId, stored.history);
     const job = {
       ...stored,
       conversationIds: [...stored.conversationIds],

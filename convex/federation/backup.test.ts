@@ -34,6 +34,7 @@ const modules = {
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../federation/backup.ts': () => import('./backup'),
+  '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
   '../federation/admin.ts': () => import('./admin'),
   '../federation/backupExportAudit.ts': () => import('./backupExportAudit'),
   '../models/embeddings.ts': () => import('../models/embeddings'),
@@ -331,6 +332,66 @@ test('clean town clone carries deletion history and rejects importing an older b
   expect(await dst.run(ctx => ctx.db.query('memories').collect())).toEqual(before);
 });
 
+test('ordinary clone historical travel clears through the formal privacy entry without creating an executable ledger', async () => {
+  const source = await town();
+  await source.t.run(ctx => ctx.db.insert('visitLedger', {
+    visitId: 'visit-1', worldId: source.worldId, agentGlobalId: source.agentGlobalId,
+    homeTownId: 'town:original', hostTownId: 'town:foreign', homeDeploymentEpoch: 4,
+    hostDeploymentEpoch: 2, agentAuthorityEpoch: 3, visitLeaseVersion: 1,
+    leaseExpiry: Date.now() - 120000, fencingToken: 'source-fence', state: 'COMPLETED',
+    role: 'home', homePlayerId: 'p:0', profile: {}, createdAt: 1, updatedAt: 1,
+  }));
+  const bundle = await source.t.action(action('federation/backup:exportTown'), { adminToken });
+  const target = convexTest(schema, modules);
+  const result = await target.action(action('federation/backup:importBackup'), {
+    adminToken, bundle, mode: 'clone', targetEndpoint: 'https://history-clone.example/federation/v1',
+  });
+  // Embedding provider probes have separate integration coverage. Pause the
+  // import's scheduled vector work before exercising the actual privacy worker.
+  await target.run(async ctx => {
+    for (const job of await ctx.db.system.query('_scheduled_functions').collect())
+      await ctx.scheduler.cancel(job._id);
+  });
+  expect(await target.run(ctx => ctx.db.query('visitLedger').collect())).toEqual([]);
+  await target.run(async ctx => {
+    for (let i = 0; i < 12; i++) await ctx.db.insert('backupImports', {
+      sourceTownId: 'unrelated-config-import', mode: 'merge', exportedAt: 1, importedAt: 2,
+      mapping: {}, manifest: {}, runtimeSnapshot: {},
+    });
+  });
+  let cursor: string | null = null, done = false, pages = 0;
+  const choices: unknown[] = [];
+  while (!done) {
+    const candidates: { page: unknown[]; isDone: boolean; continueCursor: string } = await target.query(makeFunctionReference<'query'>('federation/travelPrivacy:historicalCandidates'), {
+      adminToken, visitId: 'visit-1', paginationOpts: { cursor, numItems: 100 },
+    });
+    expect(candidates.page.length).toBeLessThanOrEqual(5);
+    choices.push(...candidates.page);
+    cursor = candidates.continueCursor; done = candidates.isDone;
+    if (++pages > 5) throw new Error('historical candidate cursor did not advance');
+  }
+  expect(pages).toBeGreaterThan(1);
+  expect(choices).toEqual([expect.objectContaining({ residentName: 'Ada',
+    history: { importId: result.importId, worldId: result.mapping[source.worldId], ownerGlobalId: result.mapping[source.agentGlobalId] } })]);
+  const jobId: Id<'travelPrivacyJobs'> = await target.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:inspect'), {
+    adminToken, visitId: 'visit-1', scope: 'SENSITIVE', history: {
+      importId: result.importId, worldId: result.mapping[source.worldId],
+      ownerGlobalId: result.mapping[source.agentGlobalId],
+    },
+  });
+  await target.finishAllScheduledFunctions(() => jest.runAllTimers());
+  expect((await target.run(ctx => ctx.db.get(jobId)))!.state).toBe('READY');
+  await target.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:start'), { adminToken, jobId });
+  await target.finishAllScheduledFunctions(() => jest.runAllTimers());
+  await target.run(async ctx => {
+    expect((await ctx.db.get(jobId))!.state).toBe('COMPLETE');
+    expect(await ctx.db.get(result.mapping[source.memoryId] as Id<'memories'>)).toBeNull();
+    expect(await ctx.db.query('visitLedger').collect()).toEqual([]);
+    expect(await ctx.db.query('federationAgentRuntimes').first()).toMatchObject({ state: 'HOME_ACTIVE' });
+    const snapshot = (await ctx.db.get(result.importId as Id<'backupImports'>))!.runtimeSnapshot;
+    expect(snapshot.visitLedger.map(decodeRow)[0]).toMatchObject({ state: 'COMPLETED', visitId: 'visit-1' });
+  });
+});
 test('resident export carries only its deletion history including shared conversation participants', async () => {
   const { t, worldId, agentGlobalId } = await town();
   await t.run(async ctx => {

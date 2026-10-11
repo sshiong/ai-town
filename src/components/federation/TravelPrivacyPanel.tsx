@@ -1,9 +1,15 @@
 import { useState } from 'react';
-import { useMutation, useQuery } from 'convex/react';
-import { makeFunctionReference } from 'convex/server';
+import { useMutation, useQuery, usePaginatedQuery } from 'convex/react';
+import { makeFunctionReference, type PaginationOptions, type PaginationResult } from 'convex/server';
 import type { Id } from '../../../convex/_generated/dataModel';
 import { useLocale } from '../../i18n';
-import { AdminButton, Field, TaskFeedback, useAdminTask } from './AdminShared';
+import { AdminButton, Field, TaskFeedback, formatTime, useAdminTask } from './AdminShared';
+
+type HistorySource = { importId: Id<'backupImports'>; worldId: Id<'worlds'>; ownerGlobalId: string };
+type HistoryChoice = { history: HistorySource; residentName: string; sourceTownId: string; importedAt: number };
+const historyRef = makeFunctionReference<'query',
+  { adminToken: string; visitId: string; paginationOpts: PaginationOptions }, PaginationResult<HistoryChoice>
+>('federation/travelPrivacy:historicalCandidates');
 
 type Report = {
   jobId: Id<'travelPrivacyJobs'>;
@@ -18,7 +24,7 @@ type Report = {
 };
 const inspectRef = makeFunctionReference<
   'mutation',
-  { adminToken: string; visitId: string; scope: 'CACHE' | 'SENSITIVE' },
+  { adminToken: string; visitId: string; scope: 'CACHE' | 'SENSITIVE'; history?: HistorySource },
   Id<'travelPrivacyJobs'>
 >('federation/travelPrivacy:inspect');
 const startRef = makeFunctionReference<
@@ -42,6 +48,11 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
   const [visitId, setVisitId] = useState(''),
     [scope, setScope] = useState<'CACHE' | 'SENSITIVE'>('CACHE');
   const [jobId, setJobId] = useState<Id<'travelPrivacyJobs'>>();
+  const [source, setSource] = useState('CURRENT'), [selectedHistory, setSelectedHistory] = useState('');
+  const history = usePaginatedQuery(historyRef,
+    source === 'IMPORTED' && visitId.trim() ? { adminToken, visitId: visitId.trim() } : 'skip',
+    { initialNumItems: 5 });
+  const choice = history.results.find(item => JSON.stringify(item.history) === selectedHistory);
   const inspect = useMutation(inspectRef),
     start = useMutation(startRef),
     retry = useMutation(retryRef);
@@ -58,9 +69,11 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
         className="admin-form-grid"
         onSubmit={(event) => {
           event.preventDefault();
+          if (source === 'IMPORTED' && !choice) return;
           void task.run(
             t('Checking travel privacy scope'),
-            async () => setJobId(await inspect({ adminToken, visitId: visitId.trim(), scope })),
+            async () => setJobId(await inspect({ adminToken, visitId: visitId.trim(), scope,
+              ...(source === 'IMPORTED' && choice ? { history: choice.history } : {}) })),
             t('Travel privacy preview started.'),
           );
         }}
@@ -72,9 +85,38 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
             onChange={(event) => {
               setVisitId(event.target.value);
               setJobId(undefined);
+              setSelectedHistory('');
             }}
           />
         </Field>
+        <Field label={t('Travel record source')}>
+          <select value={source} onChange={event => {
+            setSource(event.target.value); setSelectedHistory(''); setJobId(undefined);
+          }}>
+            <option value="CURRENT">{t('Current local travel ledger')}</option>
+            <option value="IMPORTED">{t('Imported ordinary backup history')}</option>
+          </select>
+        </Field>
+        {source === 'IMPORTED' && (
+          <>
+            <Field label={t('Imported resident and archive')}>
+              <select required value={selectedHistory} onChange={event => {
+                setSelectedHistory(event.target.value); setJobId(undefined);
+              }}>
+                <option value="">{t('Select imported history')}</option>
+                {history.results.map(item => <option key={JSON.stringify(item.history)} value={JSON.stringify(item.history)}>
+                  {item.residentName} · {item.sourceTownId} · {formatTime(item.importedAt)}
+                </option>)}
+              </select>
+            </Field>
+            <p className="admin-muted">{t('Only safely ended ordinary backup history for a resident currently at home is selectable.')}</p>
+            {history.status === 'CanLoadMore' && <AdminButton type="button" onClick={() => history.loadMore(5)}>
+              {t('Load more import records')}
+            </AdminButton>}
+            {(history.status === 'LoadingFirstPage' || history.status === 'LoadingMore') && <p role="status">{t('Checking imported travel history…')}</p>}
+            {history.status === 'Exhausted' && !history.results.length && <p className="admin-muted">{t('No safely completed imported travel was found.')}</p>}
+          </>
+        )}
         <Field label={t('Clear scope')}>
           <select
             value={scope}
@@ -109,7 +151,7 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
           )}
         </p>
         <div className="admin-form-actions">
-          <AdminButton type="submit" disabled={!!task.pending || !visitId.trim()}>
+          <AdminButton type="submit" disabled={!!task.pending || !visitId.trim() || (source === 'IMPORTED' && !choice)}>
             {t('Preview clear scope')}
           </AdminButton>
         </div>

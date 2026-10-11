@@ -139,6 +139,12 @@ export function adminErrorSummary(message: string, t: MessageTranslator = englis
       'A checkpointed archive task is holding the town maintenance lock. Finish it or cancel and complete rollback before changing town data.',
     TOWN_TRAVEL_PRIVACY_BUSY:
       'A travel privacy check or cleanup is running. Wait for it to finish before starting an archive.',
+    TRAVEL_PRIVACY_HISTORY_HAS_CURRENT_LEDGER:
+      'This visit has a current local ledger. Select the current travel record source.',
+    TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING:
+      'The selected import does not contain supported historical visit evidence.',
+    TRAVEL_PRIVACY_HISTORY_RESIDENT_NOT_HOME:
+      'The imported resident must be safely at home before clearing historical travel data.',
     BACKUP_PRIVACY_REDACTED:
       'This archive contains content marked as cleared. Import a backup exported after cleanup.',
     BACKUP_PRIVACY_HISTORY_LIMIT:

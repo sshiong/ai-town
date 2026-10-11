@@ -46,6 +46,7 @@ export const storagePolicyTables = {
     state: v.string(), phase: v.string(), tableIndex: v.number(), cursor: v.union(v.string(), v.null()),
     revision: v.number(), sourceRevision: v.number(), privacyRevision: v.number(), changed: v.boolean(),
     worldId: v.optional(v.id('worlds')), role: v.string(), ownerGlobalId: v.string(),
+    history: v.optional(v.object({ importId: v.id('backupImports'), worldId: v.id('worlds'), ownerGlobalId: v.string() })),
     conversationIds: v.array(v.string()), conversationOwners: v.array(v.object({ conversationId: v.string(), playerIds: v.array(v.string()) })), transcriptIds: v.array(v.string()),
     memoryIds: v.array(v.id('memories')), memoryOwners: v.array(v.object({ memoryId: v.id('memories'), worldId: v.optional(v.id('worlds')), playerId: v.string(), ownerGlobalId: v.optional(v.string()) })), archiveIds: v.array(v.id('coldHistoryArchives')),
     textHashes: v.array(v.string()), blockers: v.array(v.string()), externalCopies: v.number(),
