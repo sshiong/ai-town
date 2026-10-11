@@ -129,11 +129,16 @@ export const federationTables = {
     committedAck: v.optional(v.boolean()),
     messageId: v.string(), toTownId: v.string(), envelope: v.any(), attempts: v.number(),
     nextRetryAt: v.number(), ackedAt: v.optional(v.number()), failedAt: v.optional(v.number()), lastError: v.optional(v.string()),
-  }).index('visit', ['envelope.visitId']).index('historySequence', ['envelope.visitId', 'envelope.streamId', 'envelope.sequence']).index('messageId', ['messageId']).index('retry', ['ackedAt', 'failedAt', 'nextRetryAt']),
+  }).index('visit', ['envelope.visitId']).index('historySequence', ['envelope.visitId', 'envelope.streamId', 'envelope.sequence'])
+    .index('transportSequence', ['toTownId', 'envelope.visitId', 'envelope.streamId', 'envelope.senderDeploymentEpoch', 'envelope.sequence'])
+    .index('priorityRetry', ['envelope.type', 'ackedAt', 'failedAt', 'nextRetryAt'])
+    .index('messageId', ['messageId']).index('retry', ['ackedAt', 'failedAt', 'nextRetryAt']),
   federationInbox: defineTable({
     messageId: v.string(), fromTownId: v.string(), payloadDigest: v.string(), envelope: v.any(),
     status: v.string(), receivedAt: v.number(), processedAt: v.optional(v.number()), ack: v.optional(v.any()),
-  }).index('audit_time', ['receivedAt']).index('audit_visit_time', ['envelope.visitId', 'receivedAt']).index('visit', ['envelope.visitId']).index('messageId', ['messageId']).index('status', ['status', 'receivedAt']),
+  }).index('audit_time', ['receivedAt']).index('audit_visit_time', ['envelope.visitId', 'receivedAt']).index('visit', ['envelope.visitId'])
+    .index('visit_status', ['envelope.visitId', 'status'])
+    .index('messageId', ['messageId']).index('status', ['status', 'receivedAt']),
   messageStreamCursors: defineTable({
     streamKey: v.string(), peerTownId: v.string(), visitIdOrPairSessionId: v.string(), streamId: v.string(),
     senderTownId: v.string(), senderDeploymentEpoch: v.number(), direction: v.string(),

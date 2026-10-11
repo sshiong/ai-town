@@ -22,6 +22,7 @@ const VISIT_TYPES = new Set(['VISIT_RESERVE', 'VISIT_QUEUED', 'VISIT_RESERVED', 
 const RUNTIME_TYPES = new Set(['OBSERVATION', 'DECISION', 'ACTION_RESULT', 'CONVERSATION_ENDED']);
 const EPHEMERAL_RUNTIME_TYPES = new Set(['OBSERVATION', 'DECISION', 'ACTION_RESULT']);
 const CONTROL_TYPES = new Set(['STREAM_NACK', 'SESSION_RESYNC']);
+const PRIORITY_DELIVERY_TYPES = new Set(['VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_REJECT', 'VISIT_RENEW', 'CONVERSATION_ENDED', 'SESSION_RESYNC', 'STREAM_NACK']);
 const now = () => Date.now();
 function runtimeRetirementReason(message: FederationMessage, ledger: Doc<'visitLedger'> | null) {
   // History and lease cleanup have independent reliable recovery paths. Only
@@ -146,12 +147,13 @@ async function snapshot(ctx: MutationCtx, visitId: string, streamId: string) {
   const ledger = await visit(ctx, visitId);
   if (!ledger) throw new Error('VISIT_NOT_FOUND');
   const local = await identity(ctx);
-  const cursors = await ctx.db.query('messageStreamCursors').collect();
-  const cursor = cursors.find(c => c.direction === 'outbound' && c.visitIdOrPairSessionId === visitId && c.streamId === streamId && c.senderTownId === local!.townId);
-  const messages = await ctx.db.query('federationInbox').collect();
+  const peerTownId = ledger.role === 'home' ? ledger.hostTownId : ledger.homeTownId;
+  const key = streamKey({ visitId, streamId, fromTownId: local!.townId, senderDeploymentEpoch: local!.deploymentEpoch } as FederationMessage, peerTownId);
+  const cursor = await ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', key)).unique();
+  const messages = await ctx.db.query('federationInbox').withIndex('visit_status', q => q.eq('envelope.visitId', visitId).eq('status', 'COMMITTED')).order('desc').take(100);
   return { visitId, state: ledger.state, role: ledger.role, cleanupConfirmed: !!ledger.cleanupConfirmed, leaseExpiry: ledger.leaseExpiry,
     agentAuthorityEpoch: ledger.agentAuthorityEpoch, visitLeaseVersion: ledger.visitLeaseVersion, streamId, nextOutgoingSequence: cursor?.nextOutgoingSequence ?? 1,
-    committedMessageIds: messages.filter(m => m.envelope.visitId === visitId && m.status === 'COMMITTED').slice(-100).map(m => m.messageId) };
+    committedMessageIds: messages.reverse().map(m => m.messageId) };
 }
 async function requireResync(ctx: MutationCtx, message: FederationMessage, cursor: any, reason: string) {
   await ctx.db.patch(cursor._id, { resyncState: 'RESYNC_REQUIRED', gapSince: cursor.gapSince ?? now() });
@@ -166,9 +168,8 @@ async function dispatchControl(ctx: MutationCtx, message: FederationMessage) {
   if (typeof payload.streamId !== 'string' || payload.streamId.length > 100) throw new Error('INVALID_STREAM_CONTROL');
   if (message.type === 'STREAM_NACK') {
     if (!Number.isSafeInteger(payload.expectedSequence) || payload.expectedSequence < 1 || !Number.isSafeInteger(payload.receivedSequence) || payload.receivedSequence <= payload.expectedSequence || payload.receivedSequence - payload.expectedSequence > 16) throw new Error('INVALID_NACK');
-    const outbound = await ctx.db.query('federationOutbox').collect();
-    const matches = outbound.filter(o => o.toTownId === message.fromTownId && o.envelope.visitId === message.visitId && o.envelope.streamId === payload.streamId && o.envelope.senderDeploymentEpoch === message.expectedRecipientDeploymentEpoch && o.envelope.sequence >= payload.expectedSequence && o.envelope.sequence < payload.receivedSequence);
-    if (matches.length !== payload.receivedSequence - payload.expectedSequence || matches.some(o => o.failedAt || o.envelope.expiresAt <= now())) {
+    const matches = await ctx.db.query('federationOutbox').withIndex('transportSequence', q => q.eq('toTownId', message.fromTownId).eq('envelope.visitId', message.visitId).eq('envelope.streamId', payload.streamId).eq('envelope.senderDeploymentEpoch', message.expectedRecipientDeploymentEpoch).gte('envelope.sequence', payload.expectedSequence).lt('envelope.sequence', payload.receivedSequence)).take(17);
+    if (matches.length !== payload.receivedSequence - payload.expectedSequence || matches.some((o, index) => o.envelope.sequence !== payload.expectedSequence + index || o.failedAt || o.envelope.expiresAt <= now())) {
       await beginReturn(ctx, ledger, 'OUTBOX_HISTORY_UNAVAILABLE');
       await enqueueMessage(ctx, { peerTownId: message.fromTownId, type: 'SESSION_RESYNC', visitId: message.visitId, payload: { mode: 'snapshot', ...(await snapshot(ctx, ledger.visitId, payload.streamId)), reason: 'OUTBOX_HISTORY_UNAVAILABLE' } });
     } else for (const item of matches) {
@@ -193,10 +194,13 @@ async function dispatchControl(ctx: MutationCtx, message: FederationMessage) {
   }
   const safe = peerFinished || await canResume(ctx.db, ledger);
   if (safe) {
-    const cursors = await ctx.db.query('messageStreamCursors').collect();
-    for (const cursor of cursors.filter(c => c.direction === 'inbound' && c.peerTownId === message.fromTownId && c.visitIdOrPairSessionId === message.visitId && c.streamId === payload.streamId)) await ctx.db.patch(cursor._id, { nextExpectedSequence: Math.max(cursor.nextExpectedSequence, payload.nextOutgoingSequence), resyncState: 'ABORTED', gapSince: undefined });
-    const inbox = await ctx.db.query('federationInbox').withIndex('status', q => q.eq('status', 'BUFFERED')).collect();
-    for (const item of inbox.filter(i => i.envelope.visitId === message.visitId && i.envelope.streamId === payload.streamId)) await ctx.db.patch(item._id, { status: 'DISCARDED', processedAt: now(), ack: ackFor(item.envelope, 'DISCARDED') });
+    // Authentication and ledger authority have already fenced both deployment
+    // epochs. A snapshot must only reset the stream from that authenticated epoch.
+    const key = streamKey({ ...message, streamId: payload.streamId }, message.fromTownId);
+    const cursor = await ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', key)).unique();
+    if (cursor) await ctx.db.patch(cursor._id, { nextExpectedSequence: Math.max(cursor.nextExpectedSequence, payload.nextOutgoingSequence), resyncState: 'ABORTED', gapSince: undefined });
+    const inbox = await ctx.db.query('federationInbox').withIndex('status', q => q.eq('status', 'BUFFERED')).take(256);
+    for (const item of inbox.filter(i => streamKey(i.envelope, i.fromTownId) === key)) await ctx.db.patch(item._id, { status: 'DISCARDED', processedAt: now(), ack: ackFor(item.envelope, 'DISCARDED') });
   }
 }
 async function dispatch(ctx: MutationCtx, message: FederationMessage) {
@@ -369,9 +373,43 @@ export const deliver = internalAction({ args: { messageId: v.string() }, handler
   }
 } });
 export const pendingDeliveries = internalQuery({ args: {}, handler: async ctx => {
-  const items = await ctx.db.query('federationOutbox').withIndex('retry', q => q.eq('ackedAt', undefined).eq('failedAt', undefined).lte('nextRetryAt', now())).take(20);
-  return items.sort((a, b) => Number(!CLEANUP_TYPES.has(a.envelope.type)) - Number(!CLEANUP_TYPES.has(b.envelope.type))).map(i => i.messageId);
+  // Select priority work across the whole due queue, before taking the delivery
+  // batch. Sorting only the first ordinary page can starve lease/history recovery.
+  const priority: Doc<'federationOutbox'>[] = [];
+  for (const type of PRIORITY_DELIVERY_TYPES) priority.push(...await ctx.db.query('federationOutbox').withIndex('priorityRetry', q => q.eq('envelope.type', type).eq('ackedAt', undefined).eq('failedAt', undefined).lte('nextRetryAt', now())).take(20));
+  const ordinary = await ctx.db.query('federationOutbox').withIndex('retry', q => q.eq('ackedAt', undefined).eq('failedAt', undefined).lte('nextRetryAt', now())).take(20);
+  const items = [...new Map([...priority, ...ordinary].map(item => [item.messageId, item])).values()];
+  return items.sort((a, b) => Number(!PRIORITY_DELIVERY_TYPES.has(a.envelope.type)) - Number(!PRIORITY_DELIVERY_TYPES.has(b.envelope.type)) || a.nextRetryAt - b.nextRetryAt || a._creationTime - b._creationTime || a.messageId.localeCompare(b.messageId)).slice(0, 20).map(i => i.messageId);
 } });
+async function maintainSessionBatch(ctx: MutationCtx, cursor: string | null) {
+  const local = await identity(ctx), policy = configuredTimePolicy(local);
+  const page = await ctx.db.query('transportSessions').paginate({ cursor, numItems: 50 });
+  for (const connection of page.page) {
+    if (!ready(connection, now(), policy) && connection.channelState === 'TRANSPORT_READY') await ctx.db.patch(connection._id, { channelState: 'TRANSPORT_TESTING' });
+    const remote = await peer(ctx, connection.peerTownId);
+    if (remote?.trustState === 'TRUSTED' && Math.min(connection.outboundVerifiedAt ?? 0, connection.inboundVerifiedAt ?? 0) < now() - policy.probeIntervalMs) await ctx.scheduler.runAfter(0, actionRef('transport/probeInternal'), { peerTownId: connection.peerTownId });
+  }
+  // The continuation is committed with the page changes, so all later sessions
+  // are visited even when the session table grows past a single transaction.
+  if (!page.isDone) await ctx.scheduler.runAfter(0, mutationRef('transport/maintainSessions'), { cursor: page.continueCursor });
+  return { cursor: page.continueCursor, isDone: page.isDone };
+}
+export const maintainSessions = internalMutation({ args: { cursor: v.union(v.string(), v.null()) }, handler: async (ctx, { cursor }) => maintainSessionBatch(ctx, cursor) });
+async function recoverStreamGap(ctx: MutationCtx, messageId: string) {
+  const item = await ctx.db.query('federationInbox').withIndex('messageId', q => q.eq('messageId', messageId)).unique();
+  if (!item || item.status !== 'BUFFERED') return;
+  const key = streamKey(item.envelope, item.fromTownId);
+  const cursor = await ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', key)).unique();
+  if (!cursor || cursor.direction !== 'inbound' || !['OK', 'RESYNC_REQUIRED'].includes(cursor.resyncState) || !cursor.gapSince || cursor.gapSince + configuredTimePolicy(await identity(ctx)).gapTimeoutMs > now()) return;
+  try { await requireResync(ctx, item.envelope, cursor, 'STREAM_GAP_TIMEOUT'); }
+  catch (error) {
+    // Preserve the safe return and RESYNC_REQUIRED fence under backpressure.
+    // The buffered row remains a durable retry source for the next maintenance.
+    if (!(error instanceof Error) || error.message !== 'OUTBOX_CAPACITY_EXCEEDED') throw error;
+  }
+  await ctx.db.patch(cursor._id, { gapSince: now() });
+}
+export const retryStreamGap = internalMutation({ args: { messageId: v.string() }, handler: async (ctx, { messageId }) => recoverStreamGap(ctx, messageId) });
 export const maintenance = internalMutation({ args: {}, handler: async ctx => {
   const local = await identity(ctx);
   await observeClock(ctx, local);
@@ -379,22 +417,23 @@ export const maintenance = internalMutation({ args: {}, handler: async ctx => {
   await maintainIdentityKeyRotations(ctx);
   const nonces = await ctx.db.query('federationReplayNonces').withIndex('expiry', q => q.lte('expiresAt', now())).take(500);
   for (const nonce of nonces) await ctx.db.delete(nonce._id);
-  const sessions = await ctx.db.query('transportSessions').collect();
-  for (const connection of sessions) {
-    if (!ready(connection, now(), configuredTimePolicy(local)) && connection.channelState === 'TRANSPORT_READY') await ctx.db.patch(connection._id, { channelState: 'TRANSPORT_TESTING' });
-    const remote = await peer(ctx, connection.peerTownId);
-    if (remote?.trustState === 'TRUSTED' && Math.min(connection.outboundVerifiedAt ?? 0, connection.inboundVerifiedAt ?? 0) < now() - configuredTimePolicy(local).probeIntervalMs) await ctx.scheduler.runAfter(0, actionRef('transport/probeInternal'), { peerTownId: connection.peerTownId });
-  }
-  const cursors = await ctx.db.query('messageStreamCursors').collect();
+  await maintainSessionBatch(ctx, null);
   const buffered = await ctx.db.query('federationInbox').withIndex('status', q => q.eq('status', 'BUFFERED')).take(256);
-  for (const cursor of cursors.filter(c => c.direction === 'inbound' && ['OK', 'RESYNC_REQUIRED'].includes(c.resyncState) && c.gapSince && c.gapSince + configuredTimePolicy(local).gapTimeoutMs <= now())) {
-    const item = buffered.find(i => streamKey(i.envelope, i.fromTownId) === cursor.streamKey);
-    if (item) {
-      await requireResync(ctx, item.envelope, cursor, 'STREAM_GAP_TIMEOUT');
-      await ctx.db.patch(cursor._id, { gapSince: now() });
-    }
+  const streams = new Set<string>();
+  let recoveredInline = false;
+  // BUFFERED has an enforced global capacity of 256. Historical cursors need
+  // no periodic scan; every actionable gap is reachable from its buffered row.
+  for (const item of buffered) {
+    const key = streamKey(item.envelope, item.fromTownId);
+    if (streams.has(key)) continue;
+    streams.add(key);
+    const cursor = await ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', key)).unique();
+    if (!cursor || cursor.direction !== 'inbound' || !['OK', 'RESYNC_REQUIRED'].includes(cursor.resyncState) || !cursor.gapSince || cursor.gapSince + configuredTimePolicy(local).gapTimeoutMs > now()) continue;
+    // Each recovery may read the bounded pending Outbox twice. Split additional
+    // streams into separate transactions instead of multiplying that read budget.
+    if (!recoveredInline) { await recoverStreamGap(ctx, item.messageId); recoveredInline = true; }
+    else await ctx.scheduler.runAfter(0, mutationRef('transport/retryStreamGap'), { messageId: item.messageId });
   }
-
 } });
 export const tick = internalAction({ args: {}, handler: async ctx => {
   await ctx.runMutation(mutationRef('transport/maintenance'), {});

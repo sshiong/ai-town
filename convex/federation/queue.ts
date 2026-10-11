@@ -14,8 +14,10 @@ export async function enqueueMessage(ctx: MutationCtx, args: EnqueueArgs): Promi
   const queued = await ctx.db.query('federationOutbox').withIndex('retry', (q) => q.eq('ackedAt', undefined).eq('failedAt', undefined)).take(1001);
   const critical = ['VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_REJECT', 'SESSION_RESYNC', 'STREAM_NACK'].includes(args.type);
   if (local.mode !== 'ACTIVE' && !critical) throw new Error('DEPLOYMENT_NOT_ACTIVE');
-  // Keep admission headroom for lease termination and recovery controls.
-  if (queued.length >= (critical ? 1000 : 900)) throw new Error('OUTBOX_CAPACITY_EXCEEDED');
+  // Reserve capacity for lease renewal and durable social history as well as
+  // termination/recovery. This does not permit renewal from an inactive town.
+  const priorityCapacity = critical || ['VISIT_RENEW', 'CONVERSATION_ENDED'].includes(args.type);
+  if (queued.length >= (priorityCapacity ? 1000 : 900)) throw new Error('OUTBOX_CAPACITY_EXCEEDED');
   const ledger = args.visitId ? await visit(ctx, args.visitId) : null;
   const now = Date.now();
   const messageId = crypto.randomUUID();

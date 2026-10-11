@@ -45,19 +45,20 @@ const modules = {
 };
 const adminToken = 'federation-test-admin-token-32-bytes';
 type Town = Awaited<ReturnType<typeof town>>;
-async function town(townId: string, keys: Awaited<ReturnType<typeof createIdentityKeys>>) {
-  const t = convexTest(schema, modules);
+type ReadLimits = { documentsRead?: number; bytesRead?: number };
+async function town(townId: string, keys: Awaited<ReturnType<typeof createIdentityKeys>>, readLimits?: ReadLimits) {
+  const t = convexTest({ schema, modules, transactionLimits: readLimits ?? false });
   // Normal protocol fixtures include the UTC observation preceding their grants.
   await t.run(ctx => ctx.db.insert('federationClock', { observedAt: Date.now(), uncertain: false }));
   await t.run(async ctx => { await ctx.db.insert('federationIdentity', { ...keys, townId, townName: townId, endpoint: `https://${townId}.example/federation/v1`, deploymentInstanceId: `${townId}-instance`, deploymentEpoch: 1,
     enabled: true, allowIncomingPairRequests: true, allowUnencryptedHttp: false, allowPublicHttp: false, maxVisitors: 1, maxVisitDurationMs: 300000, mode: 'ACTIVE', createdAt: Date.now() }); });
   return { t, townId, keys };
 }
-async function setup() {
+async function setup(readLimits?: ReadLimits) {
   process.env.FEDERATION_ADMIN_TOKEN = adminToken;
   process.env.FEDERATION_KEY_ENCRYPTION_KEY = randomSecret();
   const [keysA, keysB] = await Promise.all([createIdentityKeys(), createIdentityKeys()]);
-  const a = await town('town-a', keysA), b = await town('town-b', keysB), credentialEncrypted = await sealSecret(randomSecret());
+  const a = await town('town-a', keysA, readLimits), b = await town('town-b', keysB, readLimits), credentialEncrypted = await sealSecret(randomSecret());
   for (const [local, remote] of [[a, b], [b, a]]) await local.t.run(async ctx => {
     await ctx.db.insert('federationPeers', { townId: remote.townId, townName: remote.townId, publicKey: remote.keys.publicKey, fingerprint: remote.keys.fingerprint, deploymentInstanceId: `${remote.townId}-instance`, deploymentEpoch: 1,
       endpoint: `https://${remote.townId}.example/federation/v1`, credentialId: 'credential-ab', credentialEncrypted, trustState: 'TRUSTED', inboundVisitsAllowed: true, outboundVisitsAllowed: true, pairedAt: Date.now() });
@@ -890,4 +891,195 @@ test('an alternate host with an invalid identity proof receives no business mess
   const outbox = (await a.t.run(ctx => ctx.db.query('federationOutbox').first()))!;
   expect(outbox.ackedAt).toBeUndefined(); expect(outbox.lastError).toBe('ENDPOINT_IDENTITY_UNVERIFIED');
   expect(await b.t.run(ctx => ctx.db.query('federationInbox').collect())).toHaveLength(0);
+});
+
+test('maintenance stays within read limits and its scheduled pages reach the final session', async () => {
+  const { a } = await setup({ documentsRead: 1200 });
+  await a.t.run(async ctx => {
+    for (let index = 0; index < 1800; index++) {
+      await ctx.db.insert('transportSessions', { peerTownId: `historical-peer-${index}`, channelState: 'TRANSPORT_READY', transportType: 'DIRECT_HTTPS', localDeploymentEpoch: 1, verifiedPeerDeploymentEpoch: 1, outboundVerifiedAt: 1, inboundVerifiedAt: 1 });
+      await ctx.db.insert('messageStreamCursors', { streamKey: `historical-stream-${index}`, peerTownId: 'historical-peer', visitIdOrPairSessionId: `historical-visit-${index}`, streamId: 'host-results', senderTownId: 'historical-peer', senderDeploymentEpoch: 1, direction: 'inbound', nextExpectedSequence: 1, nextOutgoingSequence: 1, lastAckedSequence: 0, resyncState: 'ABORTED' });
+    }
+  });
+  await expect(a.t.run(ctx => ctx.db.query('transportSessions').collect())).rejects.toThrow('Scanned too many documents');
+  await expect(a.t.run(ctx => ctx.db.query('messageStreamCursors').collect())).rejects.toThrow('Scanned too many documents');
+  await a.t.mutation(mutationRef('transport/maintenance'), {});
+  expect((await a.t.run(ctx => ctx.db.query('transportSessions').withIndex('peerTownId', q => q.eq('peerTownId', 'historical-peer-1799')).unique()))?.channelState).toBe('TRANSPORT_READY');
+  await a.t.finishAllScheduledFunctions(() => jest.runAllTimers());
+  expect((await a.t.run(ctx => ctx.db.query('transportSessions').withIndex('peerTownId', q => q.eq('peerTownId', 'historical-peer-1799')).unique()))?.channelState).toBe('TRANSPORT_TESTING');
+  let cursor: string | null = null, maintained = 0;
+  do {
+    const page = await a.t.run(ctx => ctx.db.query('transportSessions').paginate({ cursor, numItems: 500 }));
+    expect(page.page.every(connection => connection.channelState === 'TRANSPORT_TESTING')).toBe(true);
+    maintained += page.page.length; cursor = page.isDone ? null : page.continueCursor;
+  } while (cursor !== null);
+  expect(maintained).toBe(1800);
+}, 30000);
+
+test('resync snapshots use the current deployment stream and preserve the latest 100 committed IDs under read limits', async () => {
+  const { a, b } = await setup({ documentsRead: 1200, bytesRead: 256 * 1024 }); await seedVisit(a, b, 'home');
+  await a.t.run(async ctx => {
+    for (let index = 0; index < 1500; index++) {
+      await ctx.db.insert('messageStreamCursors', { streamKey: `historical-${index}`, peerTownId: b.townId, visitIdOrPairSessionId: `old-${index}`, streamId: 'host-results', senderTownId: a.townId, senderDeploymentEpoch: 1, direction: 'outbound', nextExpectedSequence: 1, nextOutgoingSequence: 99, lastAckedSequence: 0, resyncState: 'OK' });
+      await ctx.db.insert('federationInbox', { messageId: `historical-${index}`, fromTownId: b.townId, payloadDigest: 'historical', envelope: { visitId: `old-${index}` }, status: 'COMMITTED', receivedAt: Date.now() });
+    }
+    for (const epoch of [0, 1]) await ctx.db.insert('messageStreamCursors', { streamKey: streamKey(visitMessage(a, b, 'ACTION_RESULT', 1, 'host-results', { senderDeploymentEpoch: epoch }), b.townId), peerTownId: b.townId, visitIdOrPairSessionId: 'visit-1', streamId: 'host-results', senderTownId: a.townId, senderDeploymentEpoch: epoch, direction: 'outbound', nextExpectedSequence: 1, nextOutgoingSequence: epoch === 1 ? 42 : 99, lastAckedSequence: 0, resyncState: 'OK' });
+    for (let index = 0; index < 170; index++) await ctx.db.insert('federationInbox', { messageId: `visit-committed-${index}`, fromTownId: b.townId, payloadDigest: 'committed', envelope: { visitId: 'visit-1' }, status: 'COMMITTED', receivedAt: Date.now() });
+    for (let index = 0; index < 120; index++) await ctx.db.insert('federationInbox', { messageId: `visit-rejected-${index}`, fromTownId: b.townId, payloadDigest: 'rejected', envelope: { visitId: 'visit-1' }, status: 'REJECTED', receivedAt: Date.now() });
+  });
+  const expected = (await a.t.run(ctx => ctx.db.query('federationInbox').withIndex('visit', q => q.eq('envelope.visitId', 'visit-1')).collect())).filter(row => row.status === 'COMMITTED').slice(-100).map(row => row.messageId);
+  await accept(a, visitMessage(b, a, 'SESSION_RESYNC', 1, 'host-results', { sequence: undefined, streamId: undefined, payload: { mode: 'request', streamId: 'host-results' } }));
+  const response = (await a.t.run(ctx => ctx.db.query('federationOutbox').withIndex('visit', q => q.eq('envelope.visitId', 'visit-1')).collect())).find(row => row.envelope.type === 'SESSION_RESYNC')!;
+  expect(response.envelope.payload.nextOutgoingSequence).toBe(42);
+  expect(response.envelope.payload.committedMessageIds).toEqual(expected);
+  expect(expected).toHaveLength(100);
+});
+
+test('old deployment snapshots cannot abort a current stream and safe snapshots leave other epochs and streams untouched', async () => {
+  const { a, b } = await setup(); await seedVisit(a, b, 'home');
+  await a.t.run(async ctx => {
+    const remote = (await ctx.db.query('federationPeers').unique())!, ledger = (await ctx.db.query('visitLedger').unique())!;
+    await ctx.db.patch(remote._id, { deploymentEpoch: 2 }); await ctx.db.patch(ledger._id, { hostDeploymentEpoch: 2 });
+  });
+  const current = visitMessage(b, a, 'VISIT_ACTIVE', 18, 'host-results', { senderDeploymentEpoch: 2, payload: { fencingToken: 'test-fencing-token-32bytes', hostPlayerId: 'p:9' } });
+  await accept(a, current);
+  const old = { ...current, messageId: 'old-epoch-buffered', senderDeploymentEpoch: 1 };
+  const other = { ...current, messageId: 'other-stream-buffered', streamId: 'host-history' };
+  for (const msg of [old, other]) await a.t.run(async ctx => {
+    await ctx.db.insert('messageStreamCursors', { streamKey: streamKey(msg, b.townId), peerTownId: b.townId, visitIdOrPairSessionId: msg.visitId!, streamId: msg.streamId!, senderTownId: b.townId, senderDeploymentEpoch: msg.senderDeploymentEpoch, direction: 'inbound', nextExpectedSequence: 1, nextOutgoingSequence: 1, lastAckedSequence: 0, resyncState: 'OK', gapSince: Date.now() });
+    await ctx.db.insert('federationInbox', { messageId: msg.messageId, fromTownId: b.townId, payloadDigest: await digest(msg), envelope: msg, status: 'BUFFERED', receivedAt: Date.now() });
+  });
+  const snapshot = visitMessage(b, a, 'SESSION_RESYNC', 1, 'host-results', { sequence: undefined, streamId: undefined, senderDeploymentEpoch: 2, payload: { mode: 'snapshot', streamId: 'host-results', state: 'COMPLETED', role: 'host', cleanupConfirmed: true, agentAuthorityEpoch: 2, visitLeaseVersion: 1, nextOutgoingSequence: 42, committedMessageIds: [] } });
+  await expect(accept(a, { ...snapshot, senderDeploymentEpoch: 1 })).rejects.toThrow('SENDER_DEPLOYMENT_MISMATCH');
+  expect((await a.t.run(ctx => ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', streamKey(current, b.townId))).unique()))?.resyncState).toBe('RESYNC_REQUIRED');
+  await accept(a, snapshot);
+  const cursor = await a.t.run(ctx => ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', streamKey(current, b.townId))).unique());
+  expect(cursor?.resyncState).toBe('ABORTED'); expect(cursor?.nextExpectedSequence).toBe(42);
+  expect((await a.t.run(ctx => ctx.db.query('federationInbox').withIndex('messageId', q => q.eq('messageId', current.messageId)).unique()))?.status).toBe('DISCARDED');
+  for (const msg of [old, other]) {
+    expect((await a.t.run(ctx => ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', streamKey(msg, b.townId))).unique()))?.resyncState).toBe('OK');
+    expect((await a.t.run(ctx => ctx.db.query('federationInbox').withIndex('messageId', q => q.eq('messageId', msg.messageId)).unique()))?.status).toBe('BUFFERED');
+  }
+});
+
+test('NACK replay reads only its authenticated epoch range despite large retained Outbox history', async () => {
+  const { a, b } = await setup({ documentsRead: 1200, bytesRead: 256 * 1024 }); await seedVisit(a, b, 'home');
+  const messages = [1, 2].map(sequence => visitMessage(a, b, 'DECISION', sequence, 'home-actions'));
+  await a.t.run(async ctx => {
+    for (let index = 0; index < 1500; index++) await ctx.db.insert('federationOutbox', { messageId: `old-${index}`, toTownId: b.townId, envelope: { visitId: 'visit-1', streamId: 'home-actions', senderDeploymentEpoch: 0, sequence: 1, expiresAt: Date.now() + 300000 }, attempts: 1, nextRetryAt: Date.now(), ackedAt: Date.now() });
+    for (const envelope of messages) await ctx.db.insert('federationOutbox', { messageId: envelope.messageId, toTownId: b.townId, envelope, attempts: 1, nextRetryAt: Date.now() + 60000, ackedAt: Date.now() });
+  });
+  await accept(a, visitMessage(b, a, 'STREAM_NACK', 1, 'home-actions', { sequence: undefined, streamId: undefined, payload: { streamId: 'home-actions', expectedSequence: 1, receivedSequence: 3 } }));
+  for (const envelope of messages) {
+    const row = await a.t.run(ctx => ctx.db.query('federationOutbox').withIndex('messageId', q => q.eq('messageId', envelope.messageId)).unique());
+    expect(row?.ackedAt).toBeUndefined(); expect(row?.nextRetryAt).toBe(Date.now());
+  }
+  expect((await a.t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('ACTIVE');
+  expect((await a.t.run(ctx => ctx.db.query('federationOutbox').withIndex('messageId', q => q.eq('messageId', 'old-1499')).unique()))?.ackedAt).toBeDefined();
+});
+
+test('duplicate NACK sequence rows never substitute for missing durable history', async () => {
+  const { a, b } = await setup(); await seedVisit(a, b, 'home');
+  await a.t.run(async ctx => {
+    for (let index = 0; index < 2; index++) {
+      const envelope = visitMessage(a, b, 'DECISION', 1, 'home-actions');
+      await ctx.db.insert('federationOutbox', { messageId: envelope.messageId, toTownId: b.townId, envelope, attempts: 1, nextRetryAt: Date.now() + 60000, ackedAt: Date.now() });
+    }
+  });
+  await accept(a, visitMessage(b, a, 'STREAM_NACK', 1, 'home-actions', { sequence: undefined, streamId: undefined, payload: { streamId: 'home-actions', expectedSequence: 1, receivedSequence: 3 } }));
+  expect((await a.t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('RETURN_PENDING');
+  expect((await a.t.run(ctx => ctx.db.query('federationOutbox').withIndex('visit', q => q.eq('envelope.visitId', 'visit-1')).collect())).some(row => row.envelope.type === 'SESSION_RESYNC')).toBe(true);
+});
+
+test('timed-out streams recover in separate transactions and full Outbox retains the safe retry fence', async () => {
+  const { a, b } = await setup({ documentsRead: 3000 });
+  for (let index = 0; index < 4; index++) await seedVisit(a, b, 'home', 'ACTIVE', `gap-visit-${index}`);
+  await a.t.run(async ctx => {
+    for (let index = 0; index < 700; index++) await ctx.db.insert('federationOutbox', { messageId: `pending-${index}`, toTownId: b.townId, envelope: { type: 'OBSERVATION' }, attempts: 0, nextRetryAt: Date.now() + 60000 });
+    for (let index = 0; index < 1500; index++) await ctx.db.insert('messageStreamCursors', { streamKey: `past-${index}`, peerTownId: b.townId, visitIdOrPairSessionId: `past-${index}`, streamId: 'host-results', senderTownId: b.townId, senderDeploymentEpoch: 1, direction: 'inbound', nextExpectedSequence: 1, nextOutgoingSequence: 1, lastAckedSequence: 0, resyncState: 'ABORTED' });
+    for (let index = 0; index < 4; index++) {
+      const msg = visitMessage(b, a, 'VISIT_ACTIVE', 2, 'host-results', { messageId: `gap-message-${index}`, visitId: `gap-visit-${index}` });
+      await ctx.db.insert('messageStreamCursors', { streamKey: streamKey(msg, b.townId), peerTownId: b.townId, visitIdOrPairSessionId: msg.visitId!, streamId: msg.streamId!, senderTownId: b.townId, senderDeploymentEpoch: 1, direction: 'inbound', nextExpectedSequence: 1, nextOutgoingSequence: 1, lastAckedSequence: 0, resyncState: 'OK', gapSince: Date.now() - 30001 });
+      await ctx.db.insert('federationInbox', { messageId: msg.messageId, fromTownId: b.townId, payloadDigest: await digest(msg), envelope: msg, status: 'BUFFERED', receivedAt: Date.now() + index });
+    }
+  });
+  await a.t.mutation(mutationRef('transport/maintenance'), {});
+  const recoveryJobs = (await a.t.run(ctx => ctx.db.system.query('_scheduled_functions').collect())).filter(job => job.name.endsWith(':retryStreamGap'));
+  expect(recoveryJobs).toHaveLength(3);
+  for (const job of recoveryJobs) await a.t.mutation(mutationRef('transport/retryStreamGap'), job.args[0]);
+  for (let index = 0; index < 4; index++) {
+    const ledger = await a.t.run(ctx => ctx.db.query('visitLedger').withIndex('visitId', q => q.eq('visitId', `gap-visit-${index}`)).unique());
+    expect(ledger?.state).toBe('RETURN_PENDING'); expect(ledger?.cleanupConfirmed).toBeUndefined();
+    const cursor = await a.t.run(ctx => ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', streamKey(visitMessage(b, a, 'VISIT_ACTIVE', 2, 'host-results', { visitId: `gap-visit-${index}` }), b.townId))).unique());
+    expect(cursor?.resyncState).toBe('RESYNC_REQUIRED'); expect(cursor?.nextExpectedSequence).toBe(1); expect(cursor?.gapSince).toBe(Date.now());
+  }
+  await a.t.run(async ctx => {
+    for (let index = 708; index < 1000; index++) await ctx.db.insert('federationOutbox', { messageId: `full-${index}`, toTownId: b.townId, envelope: { type: 'OBSERVATION' }, attempts: 0, nextRetryAt: Date.now() + 60000 });
+  });
+  jest.setSystemTime(Date.now() + 30001);
+  await a.t.mutation(mutationRef('transport/retryStreamGap'), { messageId: 'gap-message-0' });
+  const key = streamKey(visitMessage(b, a, 'VISIT_ACTIVE', 2, 'host-results', { visitId: 'gap-visit-0' }), b.townId);
+  const cursor = await a.t.run(ctx => ctx.db.query('messageStreamCursors').withIndex('streamKey', q => q.eq('streamKey', key)).unique());
+  expect(cursor?.resyncState).toBe('RESYNC_REQUIRED'); expect(cursor?.nextExpectedSequence).toBe(1);
+  expect((await a.t.run(ctx => ctx.db.query('federationInbox').withIndex('messageId', q => q.eq('messageId', 'gap-message-0')).unique()))?.status).toBe('BUFFERED');
+  await a.t.run(async ctx => {
+    for (const messageId of ['pending-0', 'pending-1']) {
+      const row = (await ctx.db.query('federationOutbox').withIndex('messageId', q => q.eq('messageId', messageId)).unique())!;
+      await ctx.db.patch(row._id, { failedAt: Date.now() });
+    }
+  });
+  jest.setSystemTime(Date.now() + 30001);
+  await a.t.mutation(mutationRef('transport/retryStreamGap'), { messageId: 'gap-message-0' });
+  expect((await a.t.run(ctx => ctx.db.query('federationOutbox').withIndex('visit', q => q.eq('envelope.visitId', 'gap-visit-0')).collect())).filter(row => row.envelope.type === 'SESSION_RESYNC')).toHaveLength(2);
+});
+
+test('priority delivery crosses the ordinary first page and selects the oldest due priority globally', async () => {
+  const { a, b } = await setup({ documentsRead: 1200 });
+  const priorityTypes = ['VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_REJECT', 'VISIT_RENEW', 'CONVERSATION_ENDED', 'SESSION_RESYNC', 'STREAM_NACK'];
+  await a.t.run(async ctx => {
+    for (let index = 0; index < 1500; index++) await ctx.db.insert('federationOutbox', { messageId: `audit-${index}`, toTownId: b.townId, envelope: { type: 'VISIT_CLEANED' }, attempts: 1, nextRetryAt: Date.now() - 100000, ackedAt: Date.now() });
+    for (let index = 0; index < 100; index++) await ctx.db.insert('federationOutbox', { messageId: `ordinary-${index}`, toTownId: b.townId, envelope: { type: 'OBSERVATION' }, attempts: 0, nextRetryAt: Date.now() - 60000 + index });
+    for (const type of priorityTypes) await ctx.db.insert('federationOutbox', { messageId: type, toTownId: b.townId, envelope: { type }, attempts: 0, nextRetryAt: Date.now() - 1 });
+    await ctx.db.insert('federationOutbox', { messageId: 'failed-priority', toTownId: b.townId, envelope: { type: 'VISIT_RETURN' }, attempts: 1, nextRetryAt: Date.now() - 90000, failedAt: Date.now() });
+    await ctx.db.insert('federationOutbox', { messageId: 'future-priority', toTownId: b.townId, envelope: { type: 'VISIT_RETURN' }, attempts: 0, nextRetryAt: Date.now() + 1 });
+  });
+  const selected = await a.t.query(queryRef('transport/pendingDeliveries'), {});
+  expect(selected).toHaveLength(20); expect(new Set(selected).size).toBe(20);
+  expect(new Set(selected.slice(0, 7))).toEqual(new Set(priorityTypes));
+  expect(selected.slice(7)).toEqual(Array.from({ length: 13 }, (_, index) => `ordinary-${index}`));
+  expect(selected).not.toContain('failed-priority'); expect(selected).not.toContain('future-priority');
+  await a.t.run(async ctx => {
+    for (let index = 0; index < 25; index++) await ctx.db.insert('federationOutbox', { messageId: `earliest-renew-${index}`, toTownId: b.townId, envelope: { type: 'VISIT_RENEW' }, attempts: 0, nextRetryAt: Date.now() - 30000 + index });
+  });
+  expect(await a.t.query(queryRef('transport/pendingDeliveries'), {})).toEqual(Array.from({ length: 20 }, (_, index) => `earliest-renew-${index}`));
+});
+
+test('lease renewal and durable history retain capacity headroom while total capacity remains enforced', async () => {
+  const { a, b } = await setup(); await seedVisit(a, b, 'home');
+  await a.t.run(async ctx => {
+    for (let index = 0; index < 900; index++) await ctx.db.insert('federationOutbox', { messageId: `ordinary-${index}`, toTownId: b.townId, envelope: { type: 'OBSERVATION' }, attempts: 0, nextRetryAt: Date.now() + 60000 });
+  });
+  await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'OBSERVATION', visitId: 'visit-1', payload: {} }))).rejects.toThrow('OUTBOX_CAPACITY_EXCEEDED');
+  for (const type of ['VISIT_RENEW', 'CONVERSATION_ENDED']) await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type, visitId: 'visit-1', payload: {} }))).resolves.toEqual(expect.any(String));
+  await a.t.run(async ctx => {
+    for (let index = 902; index < 1000; index++) await ctx.db.insert('federationOutbox', { messageId: `ordinary-${index}`, toTownId: b.townId, envelope: { type: 'OBSERVATION' }, attempts: 0, nextRetryAt: Date.now() + 60000 });
+  });
+  for (const type of ['VISIT_RENEW', 'CONVERSATION_ENDED', 'VISIT_RETURN']) await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type, visitId: 'visit-1', payload: {} }))).rejects.toThrow('OUTBOX_CAPACITY_EXCEEDED');
+});
+
+test('renewal headroom retains clock, authority and inactive deployment gates while cleanup remains available', async () => {
+  const { a, b } = await setup(); await seedVisit(a, b, 'home');
+  await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'VISIT_RENEW', payload: {} }))).rejects.toThrow('VISIT_AUTHORITY_REQUIRED');
+  await a.t.run(async ctx => {
+    const clock = (await ctx.db.query('federationClock').unique())!;
+    await ctx.db.patch(clock._id, { uncertain: true, reason: 'CLOCK_MOVED_BACKWARDS' });
+  });
+  await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'VISIT_RENEW', visitId: 'visit-1', payload: {} }))).rejects.toThrow('CLOCK_UNCERTAIN');
+  await a.t.run(async ctx => {
+    const clock = (await ctx.db.query('federationClock').unique())!, local = (await ctx.db.query('federationIdentity').unique())!;
+    await ctx.db.patch(clock._id, { uncertain: false, reason: undefined }); await ctx.db.patch(local._id, { mode: 'FROZEN' });
+  });
+  await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'VISIT_RENEW', visitId: 'visit-1', payload: {} }))).rejects.toThrow('DEPLOYMENT_NOT_ACTIVE');
+  await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'CONVERSATION_ENDED', visitId: 'visit-1', payload: {} }))).rejects.toThrow('DEPLOYMENT_NOT_ACTIVE');
+  await expect(a.t.run(ctx => enqueueMessage(ctx, { peerTownId: b.townId, type: 'VISIT_RETURN', visitId: 'visit-1', payload: {} }))).resolves.toEqual(expect.any(String));
 });

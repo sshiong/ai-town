@@ -226,3 +226,11 @@ D/E 实际可信 Ollama 证书的最小链均通过：权重 artifact/pipeline/p
 ### 身份轮换维护读量修复
 
 身份公钥轮换维护已将累计 `federationIdentityKeyExchanges` 的全量读取改为 direction/state/expiry 复合索引：每轮分别处理至多 20 份到期 INBOUND PREPARED 和 CHALLENGING 记录，转为 EXPIRED 后退出索引范围，现有 10 秒维护继续处理余下批次。3,000 条终态历史及两类各 45 条到期记录的三轮排空回归通过；未来到期和 OUTBOUND 记录不误改。单个到期轮换的 23 个 peer 中止清理仍完整执行，不截断私有 packet 清除或修改信任关系。身份轮换 9 项、身份恢复轮换与通信凭证轮换 27 项通过，独立冻结版本 Convex 类型检查通过。此修复不等同于传输维护、所有历史查询或整套压力验收完成。
+
+### 传输维护与关键消息背压修复
+
+传输会话改为每页 50 条、同事务调度下一页的持久续作；流快照、NACK 和重同步改用对应 visit/status 或 town/visit/stream/epoch/sequence 索引。只处理通过身份与访问权威校验的当前部署流，旧 epoch 不能终止当前流。间隙维护从有 256 条准入上限的 BUFFERED 消息反查流，额外间隙恢复拆成独立事务；满 Outbox 保留 RETURN_PENDING、RESYNC_REQUIRED 和原 BUFFERED 重试源，未放宽安全恢复条件。
+
+续租和持久 CONVERSATION_ENDED 使用预留队列容量，但不因此绕过时钟、访问权威或非 ACTIVE 部署门禁。投递先按类型索引在全部到期队列选出退出、拒绝、续租、持久历史及恢复控制候选，再合并普通消息选最早 20 条；不再仅排序普通队列首批。总容量 1000 仍拒绝新增。
+
+传输整套 59 项通过，新增回归包括 1,800 会话实际调度尾页完成、1,500 份历史 cursor/Inbox/Outbox 的读限及 256 KiB 字节预算、最新 100 committed IDs、epoch 隔离、连续唯一 NACK 序号、多个间隙独立恢复、满队列安全重试、全局优先和容量/权限门禁。独立冻结版本 Convex 类型检查通过；相邻 visitorQueue、remoteFairness、chatScheduling 三套共 79 项通过。上述是 Convex 测试数据库及真实调度回归，不冒充 3–10 独立部署压力、本地 tick P95 或完整公网故障矩阵。
