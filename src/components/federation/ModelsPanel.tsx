@@ -5,9 +5,13 @@ import type { FunctionReturnType } from 'convex/server';
 import { api } from '../../../convex/_generated/api';
 import type { Id } from '../../../convex/_generated/dataModel';
 import { AdminButton, EmptyState, Field, TaskFeedback, useAdminTask } from './AdminShared';
+import { EmbeddingProviderEvidence } from './EmbeddingPanel';
+import { makeFunctionReference } from 'convex/server';
 
 type Profiles = FunctionReturnType<typeof api.models.profiles.list>;
 const providers = ['openai', 'together', 'ollama', 'custom'] as const;
+const startCompatibleReuse = makeFunctionReference<'action', { adminToken: string; targetProfileId: Id<'embeddingProfiles'> }, Id<'embeddingSpaces'>>(
+  'models/embeddings:startCompatibleReuse');
 
 export default function ModelsPanel({ adminToken }: { adminToken: string }) {
   const { t } = useLocale();
@@ -223,6 +227,7 @@ export default function ModelsPanel({ adminToken }: { adminToken: string }) {
                       ? t("Server credential available")
                       : t("Server credential missing")}
                   </p>
+                  <EmbeddingProviderEvidence adminToken={adminToken} profile={profile} />
                   <div className="admin-toolbar">
                     <AdminButton
                       disabled={!!task.pending || profile.disabled || !profile.credentialAvailable}
@@ -306,6 +311,12 @@ export default function ModelsPanel({ adminToken }: { adminToken: string }) {
                   ? t("Compatibility verified.")
                   : t("Old vectors cannot be reused; rebuild required.")}
               </p>
+              {plan.canReuse && reviewedProfile && <AdminButton disabled={!!task.pending || !plan.planningComplete}
+                onClick={() => void task.run(t("Rechecking provider identity and copying compatible vectors"), async () => {
+                  await convex.action(startCompatibleReuse, { adminToken, targetProfileId: reviewedProfile });
+                  await refresh();
+                }, t("Compatible vectors are copying into a separate space. Validate coverage and live retrieval before activation."))}>
+                {t("Reuse verified compatible vectors")}</AdminButton>}
             </div>
           )}
           <p className="admin-muted">

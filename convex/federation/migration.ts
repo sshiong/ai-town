@@ -801,7 +801,7 @@ export const notifyPeer = action({
       const response = (await requestCandidates(remote, async endpoint => {
         const current = await ctx.runQuery(queryRef('store/context'), { peerTownId: remote.townId });
         if (!sameEndpointContext(local, remote, current)) throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
-        return directRequest(endpoint, '/migration', e.request, configuredTimePolicy(local).requestTimeoutMs);
+        return directRequest(ctx, endpoint, '/migration', e.request, configuredTimePolicy(local).requestTimeoutMs);
       })).value,
         b = response?.body;
       if (

@@ -376,17 +376,26 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
             {t(' · version')} {signed.manifest.version}
           </p>
           <p className="admin-muted">
+            {t('Signing-key fingerprint: ')}
+            <code>{String(signed.manifest.source.fingerprint ?? t('missing'))}</code>
+            {t(' · optional vectors: ')}
+            {signed.manifest.includeVectors ? t('included') : t('omitted')}
+            {t(
+              '. Compare this key with the local identity or trusted peer before import; its archive signature alone cannot grant trust.',
+            )}
+          </p>
+          <p className="admin-muted">
             {t('Signed scope: ')}
             {t(signed.manifest.scope)} · {signed.manifest.selection.owners.length}
             {t(' owners · ')}
             {signed.manifest.selection.categories.map((category) => t(category)).join(', ')} ·{' '}
             {signed.manifest.chunks.length} {t('chunks. Range:')}{' '}
             {signed.manifest.selection.from === null
-              ? t('start')
+              ? 'start'
               : new Date(signed.manifest.selection.from).toISOString()}{' '}
             —{' '}
             {signed.manifest.selection.to === null
-              ? t('end')
+              ? 'end'
               : new Date(signed.manifest.selection.to).toISOString()}{' '}
             {t('(exclusive).')}
           </p>
@@ -798,6 +807,14 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
             {t('. Local index: ')}
             {t(job.report.indexState)} {job.report.indexError ?? ''}
           </p>
+          {job.state === 'COMPLETE' && (
+            <p className="admin-muted">
+              <a href="#embedding-recovery">{t('Recover this imported memory index')}</a>
+              {t(
+                ' from the completed import history below. Optional archived vectors never activate a local index automatically.',
+              )}
+            </p>
+          )}
           {job.state === 'READY' && (
             <>
               <p>

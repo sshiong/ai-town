@@ -1,3 +1,4 @@
+import { validateGenerationEvidence, validateVectorSource, trustedVectorSource } from './vectorEvidence';
 import { trackedMutation as mutation, trackedInternalMutation as internalMutation } from '../maintenanceFunctions';
 import { v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
@@ -60,6 +61,8 @@ import { blockedWithPositions } from '../aiTown/movement';
 import { Point } from '../util/types';
 import { ACTION_TIMEOUT } from '../constants';
 import { MAX_DENIED_RESIDENTS } from './residentPolicySchema';
+import { MAX_DISCLOSURE_POLICIES } from './disclosurePolicySchema';
+import { isMemoryBackupTable, memoryBackupTables, repairMemoryBackupPage, skipMemoryBackupRow, validateMemoryBackupRelations } from './memoryBackup';
 
 type Job = Doc<'backupLargeJobs'>;
 type Row = Doc<'backupLargeRows'>;
@@ -85,6 +88,8 @@ type Metadata = {
   destructive: boolean;
   indexState: string;
   indexError?: string;
+  vectorSourceTrusted?: boolean;
+  includeVectors?: boolean;
 };
 const metadata = (j: Job) => j.metadata as Metadata;
 const table = (s: string) => s as TableNames;
@@ -105,6 +110,8 @@ const archivalTables = new Set([
 ]);
 const captureTables = [...oldTables, 'federationIdentity'] as const;
 const canonicalTables = new Set([
+  ...memoryBackupTables,
+  'federationDisclosurePolicy',
   'playerDescriptions',
   'agentDescriptions',
   'archivedPlayers',
@@ -442,6 +449,8 @@ export const createImportJob = internalMutation({
       signature: a.signature,
       metadata: {
         options,
+        vectorSourceTrusted: await trustedVectorSource(ctx.db, manifest.source as { townId: string; publicKey: string; fingerprint: string }),
+        includeVectors: manifest.includeVectors,
         selection: manifest.selection,
         uploaded: 0,
         exportedAt: manifest.exportedAt,
@@ -534,6 +543,7 @@ export const saveChunk = internalMutation({
       const id = e.kind === 'record' ? (decodeRow(e.record)._id as string) : e.sourceId;
       if (await source(ctx, j, id)) throw new Error('DUPLICATE_BACKUP_DOCUMENT_ID');
       const row = e.kind === 'record' ? decodeRow(e.record) : null;
+      if (row && chunk.table === 'modelMemoryVectors') await validateGenerationEvidence(row);
       if (
         row &&
         chunk.table === 'federationIdentity' &&
@@ -647,9 +657,20 @@ async function checkRecord(ctx: { db: DatabaseReader }, j: Job, r: Row) {
     e = record(r),
     scope = m.selection.scope;
   const owners = await ownersFor(ctx, j, r);
+  await validateMemoryBackupRelations(r.table, row, async id => {
+    const target = await source(ctx, j, id);
+    return target && target.state !== 'EXTERNAL' ? { table: target.table, row: data(target) } : null;
+  });
+  if (r.table === 'modelMemoryVectors') {
+    const memory = await source(ctx, j, row.memoryId);
+    await validateVectorSource(row, memory?.table === 'memories' && memory.state !== 'EXTERNAL' ? data(memory) : null);
+    if (e.role !== 'primary' || !memory || record(memory).role !== 'primary')
+      throw new Error('SELECTIVE_IMPORT_PRIMARY_SCOPE_MISMATCH');
+  }
   const privateRow =
     r.table === 'coldHistoryFiles' ||
-    r.table === 'memories' ||
+    r.table === 'modelMemoryVectors' ||
+    r.table === 'memories' || isMemoryBackupTable(r.table) ||
     archivalTables.has(r.table) ||
     [
       'residentModelBindings',
@@ -724,11 +745,13 @@ async function checkRecord(ctx: { db: DatabaseReader }, j: Job, r: Row) {
     if (scope === 'config-only') {
       if (!(configTables as readonly string[]).includes(r.table))
         throw new Error('SELECTIVE_IMPORT_PRIMARY_SCOPE_MISMATCH');
-    } else if (r.table === 'memories') {
+    } else if (r.table === 'memories' || r.table === 'modelMemoryVectors' || isMemoryBackupTable(r.table)) {
+      if (r.table === 'memoryCompressionJobs') throw new Error('SELECTIVE_IMPORT_PRIMARY_SCOPE_MISMATCH');
+      const primaryMemory = r.table === 'memories' ? row : data((await source(ctx, j, row.memoryId ?? row.sourceMemoryId ?? row.summaryMemoryId))!);
       if (
         scope === 'history' ||
-        !m.selection.categories.includes(row.data.type) ||
-        !inBounds(r.table, row, m.selection)
+        !m.selection.categories.includes(primaryMemory.data.type) ||
+        !inBounds('memories', primaryMemory, m.selection)
       )
         throw new Error('SELECTIVE_IMPORT_PRIMARY_SCOPE_MISMATCH');
     } else if ((historyTables as readonly string[]).includes(r.table)) {
@@ -1510,6 +1533,26 @@ async function fieldsFor(ctx: MutationCtx, j: Job, r: Row, remapping: boolean) {
     if (!policy) throw new Error('SELECTIVE_IMPORT_EXTERNAL_MAPPING_REQUIRED');
     return policy.operation === 'map' ? policy.targetId : undefined;
   };
+  if (isMemoryBackupTable(r.table)) {
+    const required = async (id: string, expectedTable: string) => {
+      const staged = await source(ctx, j, id);
+      if (!staged || staged.table !== expectedTable || staged.state === 'EXTERNAL')
+        throw new Error('BACKUP_MEMORY_REFERENCE_MISSING');
+      if (remapping && !staged.newId) throw new Error('BACKUP_REFERENCE_NOT_ALLOCATED');
+      return staged.newId ?? id;
+    };
+    for (const [field, table] of [['sourceMemoryId', 'memories'], ['memoryId', 'memories'],
+      ['summaryMemoryId', 'memories'], ['jobId', 'memoryCompressionJobs'],
+      ['previousCorrectionId', 'memorySourceCorrections']] as const)
+      if (row[field]) fields[field] = await required(row[field], table);
+    if (r.table === 'memorySourceClaims' && row.generation !== 'ORIGINAL')
+      fields.generation = await required(row.generation, 'memorySourceCorrections');
+    if (row.evidenceMemoryIds) fields.evidenceMemoryIds = await Promise.all(row.evidenceMemoryIds.map((id: string) => required(id, 'memories')));
+    if (row.sources) fields.sources = await Promise.all(row.sources.map(async (source: BackupRow) => ({
+      ...source, memoryId: await required(source.memoryId, 'memories'),
+      correctionId: source.correctionId ? await required(source.correctionId, 'memorySourceCorrections') : undefined,
+    })));
+  }
   if (r.table === 'memories') {
     const dataFields = { ...fields.data } as BackupRow;
     if (dataFields.conversationId)
@@ -1575,6 +1618,8 @@ async function fieldsFor(ctx: MutationCtx, j: Job, r: Row, remapping: boolean) {
   return remapping ? fields : allocationFields(r.table, fields);
 }
 async function existingPersona(ctx: MutationCtx, r: Row, fields: BackupRow) {
+  if (r.table === 'federationDisclosurePolicy') return ctx.db.query('federationDisclosurePolicy')
+    .withIndex('agentGlobalId', q => q.eq('agentGlobalId', fields.agentGlobalId)).unique();
   if (r.table === 'playerDescriptions')
     return ctx.db
       .query('playerDescriptions')
@@ -1631,6 +1676,11 @@ export const applyPage = internalMutation({
       const owners = await ownersFor(ctx, j, r);
       const targets = m.targetOwners.filter((t) => owners.includes(t.sourceAgentGlobalId));
       const row = data(r);
+      if (skipMemoryBackupRow(r.table, row)) {
+        if (!remapping) skipped++;
+        await ctx.db.patch(r._id, { state: 'APPLIED' });
+        continue;
+      }
       if (archivalTables.has(r.table)) {
         if (!remapping && targets.length) {
           await insert(ctx, j, 'backupSelectiveHistory', {
@@ -1654,14 +1704,14 @@ export const applyPage = internalMutation({
         continue;
       }
       if (
-        ['playerDescriptions', 'agentDescriptions'].includes(r.table) &&
+        ['playerDescriptions', 'agentDescriptions', 'federationDisclosurePolicy'].includes(r.table) &&
         targets.every((t) => t.operation === 'merge')
       ) {
         if (!remapping) skipped++;
         continue;
       }
       const fields = await fieldsFor(ctx, j, r, remapping);
-      if (!fields.worldId && r.table !== 'homeTravelTranscriptPages')
+      if (!fields.worldId && !['homeTravelTranscriptPages', 'federationDisclosurePolicy'].includes(r.table))
         throw new Error('SELECTIVE_IMPORT_WORLD_MAPPING_MISSING');
       await ensureLiveConversationArchive(ctx, j, r);
       if (remapping) {
@@ -1690,6 +1740,9 @@ export const applyPage = internalMutation({
             throw new Error('SELECTIVE_IMPORT_RESTORE_MEMORY_ID_CONFLICT');
           existing = memory || null;
         }
+        if (!existing && r.table === 'federationDisclosurePolicy' &&
+          (await ctx.db.query('federationDisclosurePolicy').take(MAX_DISCLOSURE_POLICIES)).length >= MAX_DISCLOSURE_POLICIES)
+          throw new Error('DISCLOSURE_POLICY_CAPACITY_EXCEEDED');
         const id = existing ? existing._id : await insert(ctx, j, r.table, fields);
         if (existing) {
           await ctx.db.replace(existing._id, fields as never);
@@ -1700,11 +1753,21 @@ export const applyPage = internalMutation({
       }
     }
     await ctx.db.patch(j._id, {
-      phase: page.isDone ? (remapping ? 'APPLY_COLD' : 'REMAP') : j.phase,
+      phase: page.isDone ? (remapping ? 'MEMORY_PROVENANCE' : 'REMAP') : j.phase,
+      ...(page.isDone ? { tableIndex: 0 } : {}),
       cursor: page.isDone ? null : page.continueCursor,
       metadata: { ...m, created, replaced, skipped, rebuildCount, externalEdgesSkipped },
       updatedAt: Date.now(),
     });
+  },
+});
+
+export const repairMemoryProvenance = internalMutation({
+  args: { jobId: v.id('backupLargeJobs') },
+  handler: async (ctx, a) => {
+    const j = await owned(ctx, a.jobId);
+    if (j.phase !== 'MEMORY_PROVENANCE') throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    await repairMemoryBackupPage(ctx, j, 'APPLY_COLD', 'SOURCE', decodeRow);
   },
 });
 
@@ -2049,6 +2112,8 @@ export const advanceImport = action({
       else if (j.phase === 'PREPARE') await ctx.runMutation(mref('prepare'), { jobId: j._id });
       else if (['ALLOCATE', 'REMAP'].includes(j.phase))
         await ctx.runMutation(mref('applyPage'), { jobId: j._id });
+      else if (j.phase === 'MEMORY_PROVENANCE')
+        await ctx.runMutation(mref('repairMemoryProvenance'), { jobId: j._id });
       else if (j.phase === 'VECTOR_RESET')
         await ctx.runMutation(mref('clearVectors'), { jobId: j._id });
       else if (j.phase === 'FINALIZE') await ctx.runMutation(mref('finalize'), { jobId: j._id });

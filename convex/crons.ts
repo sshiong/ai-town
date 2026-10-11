@@ -8,6 +8,7 @@ import { v } from 'convex/values';
 
 const crons = cronJobs();
 crons.interval('recover message translation jobs', { seconds: 60 }, makeFunctionReference<'mutation'>('messageTranslations:recover'));
+crons.interval('recover memory compression jobs', { seconds: 60 }, makeFunctionReference<'mutation'>('agent/memoryCompression:recover'));
 
 crons.interval(
   'stop inactive worlds',

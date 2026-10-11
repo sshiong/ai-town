@@ -6,6 +6,8 @@ import { validateResourceLimits } from './resources';
 import { validateHostResourceThresholds } from './resourceValidators';
 import { validateModelPolicyPortable } from '../models/usageSchema';
 import { validateResidentPolicyPortable } from './residentPolicySchema';
+import { validateDisclosurePolicyPortable } from './disclosurePolicySchema';
+import { memoryBackupTables } from './memoryBackup';
 
 export const dataTables = [
   'engines',
@@ -40,10 +42,13 @@ export const dataTables = [
   'homeTravelTranscriptPages',
   'federationResidentPolicy',
   'federationResidentPolicyAudit',
+  'federationDisclosurePolicy',
+  'federationDisclosureAudit',
   'autonomousTravelPolicies',
   'autonomousTravelDecisions',
   'federationResourcePolicy',
   'federationResourceAudit',
+  ...memoryBackupTables,
 ] as const;
 export const snapshotTables = [
   'visitLedger',
@@ -77,6 +82,7 @@ export type BackupBundle = {
     scope: 'town' | 'resident';
     sourceTownId: string;
     exportedAt: number;
+    includeVectors?: boolean;
     sections: Record<string, { digest: string; count: number; bytes: number }>;
     coldHistoryFiles?: { digest: string; count: number; bytes: number };
   };
@@ -201,6 +207,8 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
     throw new Error('UNSUPPORTED_BACKUP_MANIFEST');
   if (new TextEncoder().encode(JSON.stringify(bundle)).length > 5_000_000)
     throw new Error('BACKUP_SIZE_LIMIT');
+  if (bundle.manifest.includeVectors !== undefined && typeof bundle.manifest.includeVectors !== 'boolean')
+    throw new Error('INVALID_VECTOR_BACKUP_POLICY');
   if (
     Object.keys(bundle.sections).sort().join() !==
     Object.keys(bundle.manifest.sections).sort().join()
@@ -226,6 +234,7 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
       if (name === 'federationResourcePolicy') validateResourcePolicy(doc);
       validateModelPolicyPortable(name, doc);
       validateResidentPolicyPortable(name, doc);
+      validateDisclosurePolicyPortable(name, doc);
       if (typeof doc._id !== 'string' || ids.has(doc._id))
         throw new Error('INVALID_BACKUP_DOCUMENT_ID');
       ids.add(doc._id);
@@ -233,7 +242,7 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
   }
   count += bundle.coldHistoryFiles?.length ?? 0;
   if (count > 500) throw new Error('BACKUP_ATOMIC_RECORD_LIMIT');
-  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['modelProviderQuotas', 'federationIdentityKeyHistory', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit', 'federationTravelAudit', 'federationResidentPolicy', 'federationResidentPolicyAudit'].includes(t) && !bundle.sections[t]))
+  if (bundle.manifest.scope === 'town' && dataTables.some((t) => !['modelProviderQuotas', 'federationIdentityKeyHistory', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'homeTravelTranscripts', 'homeTravelTranscriptPages', 'migrationHandoffRecords', 'autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit', 'federationTravelAudit', 'federationResidentPolicy', 'federationResidentPolicyAudit', 'federationDisclosurePolicy', 'federationDisclosureAudit', ...memoryBackupTables].includes(t) && !bundle.sections[t]))
     throw new Error('INCOMPLETE_TOWN_BACKUP');
   if ((bundle.sections.federationResourcePolicy?.length ?? 0) > 1)
     throw new Error('BACKUP_SINGLETON_MISMATCH');
@@ -243,6 +252,9 @@ export async function validateBundle(value: unknown): Promise<BackupBundle> {
   const residentPolicies = bundle.sections.federationResidentPolicy?.map(decodeRow) ?? [];
   if (new Set(residentPolicies.map(row => row.agentGlobalId)).size !== residentPolicies.length)
     throw new Error('BACKUP_DUPLICATE_RESIDENT_POLICY');
+  const disclosurePolicies = bundle.sections.federationDisclosurePolicy?.map(decodeRow) ?? [];
+  if (new Set(disclosurePolicies.map(row => row.agentGlobalId)).size !== disclosurePolicies.length)
+    throw new Error('BACKUP_DUPLICATE_DISCLOSURE_POLICY');
   const providerQuotas = bundle.sections.modelProviderQuotas?.map(decodeRow) ?? [];
   if (new Set(providerQuotas.map(row => JSON.stringify([row.kind, row.providerKey]))).size !== providerQuotas.length)
     throw new Error('DUPLICATE_MODEL_PROVIDER_QUOTA');

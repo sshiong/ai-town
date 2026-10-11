@@ -12,6 +12,7 @@ import type {
 import { AdminButton, Field, TaskFeedback, downloadJsonText, useAdminTask } from './AdminShared';
 import { selectArchiveDirectory, supportsArchiveDirectory, writeArchiveText } from './archiveFiles';
 import { encryptBackupText, validBackupPassphrase } from './backupEncryption';
+import { VectorExportOption } from './EmbeddingPanel';
 
 type JobArgs = { adminToken: string; jobId: Id<'backupLargeJobs'> };
 type Job = {
@@ -67,6 +68,7 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [publicPeers, setPublicPeers] = useState(false);
+  const [includeVectors, setIncludeVectors] = useState(false);
   const [operator, setOperator] = useState('');
   const [reason, setReason] = useState('');
   const [jobId, setJobId] = useState<Id<'backupLargeJobs'>>();
@@ -89,6 +91,7 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
   function changeScope(value: SelectiveScope) {
     setScope(value);
     setCategories([...allowedCategories(value)]);
+    if (value === 'config-only' || value === 'history') setIncludeVectors(false);
     if (value === 'agent-one') setSelected(selected.slice(0, 1));
   }
   async function create() {
@@ -104,6 +107,7 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
       from: scope === 'config-only' ? undefined : fromMs,
       to: scope === 'config-only' ? undefined : toMs,
       includePublicPeers: scope === 'config-only' && publicPeers,
+      includeVectors: scope !== 'config-only' && scope !== 'history' && includeVectors,
       operator: operator.trim(),
       reason: reason.trim(),
     });
@@ -170,6 +174,13 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
         )}
       </p>
       <TaskFeedback task={task} />
+      {scope !== 'config-only' && scope !== 'history' && (
+        <VectorExportOption
+          checked={includeVectors}
+          onChange={setIncludeVectors}
+          disabled={!!task.pending}
+        />
+      )}
       <Field label={t('Export scope')}>
         <select value={scope} onChange={(e) => changeScope(e.target.value as SelectiveScope)}>
           {scopes.map((s) => (
@@ -300,8 +311,8 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
             {t('Saved scope: ')}
             {t(job.selection.scope)} · {job.selection.owners.length}
             {t(' owners ·')} {job.selection.categories.map((category) => t(category)).join(', ')} ·{' '}
-            {job.selection.from === null ? t('start') : new Date(job.selection.from).toISOString()}{' '}
-            — {job.selection.to === null ? t('end') : new Date(job.selection.to).toISOString()}
+            {job.selection.from === null ? 'start' : new Date(job.selection.from).toISOString()} —{' '}
+            {job.selection.to === null ? 'end' : new Date(job.selection.to).toISOString()}
           </p>
           {job.coldHistoryFiles && (
             <div className="admin-hint" role="status">

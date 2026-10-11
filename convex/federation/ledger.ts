@@ -9,6 +9,7 @@ import { mutationRef } from './refs';
 import { FederationMessage } from './protocol';
 import { syncResidentRuntimes } from './runtime';
 import { residentAdmissionReason } from './residentPolicy';
+import { residentVisitorProfile } from './disclosurePolicy';
 import { assertClock, canResume, configuredTimePolicy, observeClock, readClock, effectiveReturnMargin } from './timePolicy';
 import {
   configuredVisitorQueue, drainVisitorQueue, queuedHostVisits, reserveHostVisit,
@@ -69,7 +70,7 @@ export async function startResidentVisit(ctx: MutationCtx, args: {
     const now = Date.now(), visitId = crypto.randomUUID(), fencingToken = crypto.randomUUID();
     const agentAuthorityEpoch = resident.agentAuthorityEpoch + 1;
     const leaseExpiry = now + timing.leaseMs;
-    const profile = { name: description.name, character: description.character, description: description.description, homeTownName: local.townName };
+    const profile = await residentVisitorProfile(ctx.db, resident.agentGlobalId, description, local.townName, remote);
     await ctx.db.insert('visitLedger', { visitId, agentGlobalId: resident.agentGlobalId, homeTownId: local.townId, hostTownId: remote.townId,
       homeDeploymentEpoch: local.deploymentEpoch, hostDeploymentEpoch: remote.deploymentEpoch, agentAuthorityEpoch, visitLeaseVersion: 1,
       leaseExpiry, leaseSafetyMs: effectiveReturnMargin(timing), tripDeadline: now + local.maxVisitDurationMs,

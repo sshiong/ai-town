@@ -6,10 +6,6 @@ import { validateSourceRow } from './backupLargeHelpers';
 const primary = 'https://primary.example/federation/v1';
 const backup = 'https://backup.example/federation/v1';
 const candidates = { endpoint: primary, endpointCandidates: [{ url: primary, priority: 10 }, { url: backup, priority: 20 }] };
-let originalFetch: typeof fetch;
-beforeEach(() => { originalFetch = globalThis.fetch; });
-afterEach(() => { globalThis.fetch = originalFetch; jest.useRealTimers(); });
-
 test('candidate bounds, normalized uniqueness, explicit priority and HTTPS policy are enforced', () => {
   expect(normalizeEndpointCandidates(primary)).toEqual([{ url: primary, priority: 10 }]);
   expect(normalizeEndpointCandidates(primary, [...candidates.endpointCandidates].reverse())).toEqual(candidates.endpointCandidates);
@@ -35,20 +31,17 @@ test('DNS, TLS, timeouts, HTTP status and opaque network errors retain distinct 
   expect(connectionError(new TypeError('fetch failed', { cause: { code: 'ERR_TLS_CERT_ALTNAME_INVALID' } }))).toBe('TLS_VERIFY_FAILED');
   expect(connectionError(new TypeError('fetch failed', { cause: { code: 'ETIMEDOUT' } }))).toBe('CONNECTION_TIMEOUT');
   expect(connectionError(new TypeError('fetch failed'))).toBe('NETWORK_UNREACHABLE');
-  globalThis.fetch = jest.fn<typeof fetch>().mockResolvedValue(new Response('upstream down', { status: 503 }));
-  await expect(directRequest(primary, '/health')).rejects.toThrow('FEDERATION_HTTP_503');
-  globalThis.fetch = jest.fn<typeof fetch>().mockResolvedValue(new Response('not JSON', { status: 200 }));
-  await expect(directRequest(primary, '/health')).rejects.toThrow('INVALID_REMOTE_RESPONSE');
+  const ctx = { runAction: jest.fn<any>().mockResolvedValue({ ok: true, status: 503, text: '' }) };
+  await expect(directRequest(ctx as any, primary, '/health')).rejects.toThrow('FEDERATION_HTTP_503');
+  ctx.runAction.mockResolvedValue({ ok: true, status: 200, text: 'not JSON' });
+  await expect(directRequest(ctx as any, primary, '/health')).rejects.toThrow('INVALID_REMOTE_RESPONSE');
 });
 
-test('configured timeout aborts a pending request', async () => {
-  jest.useFakeTimers();
-  globalThis.fetch = jest.fn<typeof fetch>().mockImplementation((_url, init) => new Promise((_resolve, reject) => {
-    init!.signal!.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
-  }));
-  const pending = expect(directRequest(primary, '/health', undefined, 1000)).rejects.toThrow('CONNECTION_TIMEOUT');
-  await jest.advanceTimersByTimeAsync(1000);
-  await pending;
+test('all requests cross the Node boundary with a bounded timeout and structured failures', async () => {
+  const ctx = { runAction: jest.fn<any>().mockResolvedValue({ ok: false, error: 'CONNECTION_TIMEOUT' }) };
+  await expect(directRequest(ctx as any, primary, '/health', undefined, 1000)).rejects.toThrow('CONNECTION_TIMEOUT');
+  expect(ctx.runAction.mock.calls[0][1]).toEqual({ endpoint: primary, path: '/health', timeoutMs: 1000 });
+  await expect(directRequest(ctx as any, primary, '/health', undefined, 999)).rejects.toThrow('INVALID_REQUEST_TIMEOUT');
 });
 
 test('only transport failures retry candidates; identity, fencing and protocol failures stop', async () => {

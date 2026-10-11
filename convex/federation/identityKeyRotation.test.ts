@@ -18,6 +18,22 @@ import { verifiedIdentityKeySuccessor } from './identityKeyRotationProof';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 const modules = {
+  // Protocol integration tests replace the Node socket boundary with the existing
+  // in-memory HTTP router. Production uses DNS-pinned HTTPS, tested separately.
+  '../federation/nodeNetworkRequest.ts': async () => {
+    const { internalAction } = await import('../_generated/server');
+    const { connectionError } = await import('./direct');
+    return { send: internalAction(async (_ctx, args: any) => {
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), args.timeoutMs);
+      try {
+        const response = await fetch(`${args.endpoint}${args.path}`, { method: args.data === undefined ? 'GET' : 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: args.data, redirect: 'error', signal: controller.signal });
+        return { ok: true, status: response.status, text: await response.text() };
+      } catch (error) { return { ok: false, error: connectionError(error, controller.signal.aborted) }; }
+      finally { clearTimeout(timer); }
+    }) };
+  },
+  '../federation/publicRateLimit.ts': () => import('./publicRateLimit'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/store.ts': () => import('./store'),
   '../federation/transport.ts': () => import('./transport'),

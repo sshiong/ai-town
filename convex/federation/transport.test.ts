@@ -11,6 +11,22 @@ import { resourceMeasurements } from './resourceMonitoring';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 const modules = {
+  // Protocol integration tests replace the Node socket boundary with the existing
+  // in-memory HTTP router. Production uses DNS-pinned HTTPS, tested separately.
+  '../federation/nodeNetworkRequest.ts': async () => {
+    const { internalAction } = await import('../_generated/server');
+    const { connectionError } = await import('./direct');
+    return { send: internalAction(async (_ctx, args: any) => {
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), args.timeoutMs);
+      try {
+        const response = await fetch(`${args.endpoint}${args.path}`, { method: args.data === undefined ? 'GET' : 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: args.data, redirect: 'error', signal: controller.signal });
+        return { ok: true, status: response.status, text: await response.text() };
+      } catch (error) { return { ok: false, error: connectionError(error, controller.signal.aborted) }; }
+      finally { clearTimeout(timer); }
+    }) };
+  },
+  '../federation/publicRateLimit.ts': () => import('./publicRateLimit'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/store.ts': () => import('./store'),
   '../federation/transport.ts': () => import('./transport'),
@@ -298,8 +314,8 @@ test('real TLS sockets carry signed independent probes and reject an untrusted c
   childProcess.execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=town-a.example', '-addext', 'subjectAltName=DNS:town-a.example,DNS:town-b.example'], { stdio: 'ignore' });
   const key = readFileSync(keyPath), cert = readFileSync(certPath);
   const { a, b } = await setup();
-  // This test-only fetch adapter uses real TLS and trusts only the generated CA.
-  // Production directRequest continues using the platform's verified fetch.
+  // This protocol test's Node-action substitute uses real TLS and its test CA.
+  // Production uses DNS-pinned Node HTTPS; networkPolicy.test covers that boundary.
   const tlsFetch = (trustedCA?: Buffer) => (async (url: any, init: any) => new Promise<Response>((resolve, reject) => {
     const req = request(String(url), { method: init?.method, headers: init?.headers, ca: trustedCA, signal: init?.signal, lookup: (_hostname: string, options: any, callback: any) => options.all ? callback(null, [{ address: '127.0.0.1', family: 4 }]) : callback(null, '127.0.0.1', 4) }, response => {
       const chunks: Buffer[] = [];
@@ -336,8 +352,9 @@ test('real TLS sockets carry signed independent probes and reject an untrusted c
     expect(await b.t.action(actionRef('transport/probeInternal'), { peerTownId: a.townId })).toEqual({ channelState: 'TRANSPORT_READY' });
     expect((await a.t.run(ctx => ctx.db.query('transportSessions').unique()))?.channelState).toBe('TRANSPORT_READY');
     globalThis.fetch = tlsFetch();
-    await expect(directRequest(endpoints[0], '/probe', {})).rejects.toThrow();
-    await expect(directRequest(endpoints[0].replace('https:', 'http:'), '/probe', {})).rejects.toThrow('HTTPS required');
+    const networkCtx = { runAction: (reference: any, args: any) => a.t.action(reference, args) };
+    await expect(directRequest(networkCtx as any, endpoints[0], '/probe', {})).rejects.toThrow('TLS_VERIFY_FAILED');
+    await expect(directRequest(networkCtx as any, endpoints[0].replace('https:', 'http:'), '/probe', {})).rejects.toThrow('HTTPS required');
   } finally {
     await Promise.all([serverA, serverB].map(server => new Promise<void>(resolve => server.close(() => resolve()))));
     rmSync(dir, { recursive: true, force: true });

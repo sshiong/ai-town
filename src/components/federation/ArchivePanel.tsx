@@ -20,6 +20,8 @@ import {
   formatTime,
 } from './AdminShared';
 import { selectArchiveDirectory, supportsArchiveDirectory, writeArchiveText } from './archiveFiles';
+import { VectorExportOption } from './EmbeddingPanel';
+import ColdArchivePanel from './ColdArchivePanel';
 
 type ArchiveManifest = FunctionReturnType<typeof api.federation.backupLarge.getManifest>;
 export default function ArchivePanel({ adminToken }: { adminToken: string }) {
@@ -43,6 +45,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
   const pauseRequested = useRef(false);
   const [advancing, setAdvancing] = useState(false);
   const [encryptDownloads, setEncryptDownloads] = useState(false);
+  const [includeVectors, setIncludeVectors] = useState(false);
   const [exportPassphrase, setExportPassphrase] = useState('');
   const [exportConfirmation, setExportConfirmation] = useState('');
   const [importPassphrase, setImportPassphrase] = useState('');
@@ -124,6 +127,11 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
         )}
       </p>
       <TaskFeedback task={task} />
+      <VectorExportOption
+        checked={includeVectors}
+        onChange={setIncludeVectors}
+        disabled={!!task.pending || advancing}
+      />
       <div className="admin-form">
         <Field
           label={t('Export operator')}
@@ -219,6 +227,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
               async () => {
                 const created = await convex.mutation(api.federation.backupLarge.startExport, {
                   adminToken,
+                  includeVectors,
                   operator: operator.trim(),
                   reason: exportReason.trim(),
                 });
@@ -401,6 +410,15 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
                 {t('Apply validated archive')}
               </AdminButton>
             </>
+          )}
+          {job.kind === 'import' && job.state === 'COMPLETE' && (
+            <p className="admin-muted">
+              {t('Import complete. ')}
+              <a href="#embedding-recovery">{t('Recover the imported memory index')}</a>
+              {t(
+                " from this town's recorded import. Optional vectors still require source trust, independent target verification and complete retrieval validation.",
+              )}
+            </p>
           )}
           {job.kind === 'export' && job.state === 'COMPLETE' && (
             <>
@@ -642,6 +660,17 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
             {t(' declared chunks · source declarations remain unverified until server validation.')}
           </p>
         )}
+        {manifest && (
+          <p className="admin-muted">
+            {t('Declared source: ')}
+            {String(manifest.manifest.source?.townId ?? t('missing'))}
+            {t(' · signing-key fingerprint:')}
+            <code>{String(manifest.manifest.source?.fingerprint ?? t('missing'))}</code>
+            {t(' · optional vectors: ')}
+            {manifest.manifest.includeVectors ? t('included') : t('omitted')}
+            {t('. A valid signature does not grant trust in an unfamiliar key.')}
+          </p>
+        )}
         <div className="admin-toolbar">
           <AdminButton
             disabled={
@@ -735,6 +764,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
           </AdminButton>
         </div>
       </details>
+      <ColdArchivePanel adminToken={adminToken} />
     </section>
   );
 }

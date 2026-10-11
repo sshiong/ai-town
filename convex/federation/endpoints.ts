@@ -514,7 +514,7 @@ export const stageUpdate = internalMutation({
 });
 
 async function challengeEndpoint(
-  ctx: Pick<ActionCtx, 'runMutation'>,
+  ctx: Pick<ActionCtx, 'runMutation' | 'runAction'>,
   local: Local,
   remote: Peer,
   endpoint: string,
@@ -540,7 +540,7 @@ async function challengeEndpoint(
     local.privateKeyEncrypted,
     remote.credentialEncrypted,
   );
-  const ack = (await directRequest(endpoint, '/probe', probePacket, configuredTimePolicy(local).requestTimeoutMs)) as SignedPacket<ProbeAck>;
+  const ack = (await directRequest(ctx, endpoint, '/probe', probePacket, configuredTimePolicy(local).requestTimeoutMs)) as SignedPacket<ProbeAck>;
   await observeSignedIdentity(ctx, ack, 'ACK');
   await validateProbeProof(local, remote, probePacket, ack);
   return { probe: probePacket, ack };

@@ -1,4 +1,5 @@
 import { v } from 'convex/values';
+import { makeFunctionReference } from 'convex/server';
 import {
   action,
   internalAction,
@@ -15,7 +16,9 @@ import { internal } from '../_generated/api';
 import { assertFederationAdmin } from '../federation/auth';
 import { EmbeddingConfig, fetchEmbedding, getEmbeddingConfig } from '../util/llm';
 import { connectionFields } from './schema';
-import { embeddingFingerprint, cosineSimilarity, validateVector } from './compatibility';
+import { embeddingFingerprint, cosineSimilarity, validateVector, verifiedCompatible } from './compatibility';
+import { assertSpaceCertificate, assertVectorCertificate, guardEmbeddingRoute, latestCertificate } from './embeddingProvenance';
+import { CERTIFICATE_FRESHNESS_MS, trustedOllamaProvider, fetchCertifiedOllamaEmbedding } from './ollamaEvidence';
 import { audit, settings, validateConnection } from './profiles';
 import * as cache from '../agent/embeddingsCache';
 import { trackedModelCall } from './usage';
@@ -160,10 +163,16 @@ export const planSwitch = query({
       ? await ctx.db.get(config.activeEmbeddingSpaceId)
       : null;
     const current = space ? await ctx.db.get(space.profileId) : null;
+    const sourceCertificate = space?.embeddingCertificateId ? await ctx.db.get(space.embeddingCertificateId) : null;
+    const targetCertificate = await latestCertificate(ctx.db, target._id);
+    const canReuse = !!current && !!space?.embeddingCertificateId && !!targetCertificate &&
+      trustedOllamaProvider(target)?.providerId === targetCertificate.providerId && targetCertificate.providerUrl === target.url &&
+      verifiedCompatible(current, target, { source: sourceCertificate, target: targetCertificate });
     return {
-      // Administrator supplied digests and revisions are claims, not verified provenance.
-      compatibility: 'REBUILD_REQUIRED',
-      canReuse: false,
+      compatibility: canReuse ? 'VERIFIED_COMPATIBLE' : 'REBUILD_REQUIRED',
+      canReuse,
+      evidenceStatus: canReuse ? 'VERIFIED_COMPATIBLE' : 'UNKNOWN',
+      reason: canReuse ? 'SYSTEM_VERIFIED_WEIGHTS_AND_PIPELINE' : 'TRUSTED_GENERATION_EVIDENCE_REQUIRED',
       sourceFingerprint: current?.fingerprint ?? null,
       targetFingerprint: target.fingerprint,
       affectedMemories: (await ctx.db.query('embeddingScanJobs').withIndex('profile', q => q.eq('profileId', target._id)).order('desc').first())?.memoryCount ?? 0,
@@ -197,7 +206,13 @@ export const beginRebuild = internalMutation({
     const profile = await ctx.db.get(args.targetProfileId);
     if (!profile) throw new Error('EMBEDDING_PROFILE_NOT_FOUND');
     if (profile.disabled) throw new Error('EMBEDDING_PROFILE_DISABLED');
+    const certificate = await latestCertificate(ctx.db, profile._id);
+    const embeddingCertificateId = certificate?.state === 'ACTIVE' && trustedOllamaProvider(profile)?.providerId === certificate.providerId &&
+      certificate.providerUrl === profile.url && certificate.profileFingerprint === embeddingFingerprint(profile) &&
+      certificate.checkedAt <= Date.now() && Date.now() - certificate.checkedAt <= CERTIFICATE_FRESHNESS_MS
+      ? certificate._id : undefined;
     const spaceId = await ctx.db.insert('embeddingSpaces', {
+      embeddingCertificateId,
       profileId: profile._id,
       fingerprint: profile.fingerprint,
       status: 'BUILDING',
@@ -219,6 +234,64 @@ export const startRebuild = action({
       cursor: null,
     });
     return spaceId;
+  },
+});
+export const startCompatibleReuse = action({
+  args: { adminToken: v.string(), targetProfileId: v.id('embeddingProfiles') },
+  handler: async (ctx, args): Promise<Id<'embeddingSpaces'>> => {
+    assertFederationAdmin(args.adminToken);
+    const plan = await ctx.runQuery(makeFunctionReference<'query'>('models/embeddings:planSwitch'), args);
+    if (!plan.canReuse) throw new Error('EMBEDDING_REBUILD_REQUIRED');
+    const source = await ctx.runQuery(internal.models.embeddings.getRoute, {});
+    const spaceId = await ctx.runMutation(internal.models.embeddings.beginRebuild, { targetProfileId: args.targetProfileId });
+    try {
+      const target = await ctx.runQuery(internal.models.embeddings.getRoute, { spaceId });
+      await guardEmbeddingRoute(ctx, target);
+      await ctx.scheduler.runAfter(0, makeFunctionReference<'action'>('models/embeddings:reusePage'), {
+        sourceSpaceId: source.space._id, spaceId, cursor: null,
+      });
+      return spaceId;
+    } catch (error) {
+      await ctx.runMutation(internal.models.embeddings.failBuild, { spaceId, failure: 'COMPATIBILITY_RECHECK_FAILED' });
+      throw error;
+    }
+  },
+});
+export const copyReusePage = internalMutation({
+  args: { sourceSpaceId: v.id('embeddingSpaces'), spaceId: v.id('embeddingSpaces'), cursor: v.union(v.string(), v.null()) },
+  handler: async (ctx, args) => {
+    const source = await ctx.db.get(args.sourceSpaceId), target = await ctx.db.get(args.spaceId);
+    if (!source?.embeddingCertificateId || !target?.embeddingCertificateId || target.status !== 'BUILDING')
+      throw new Error('EMBEDDING_REBUILD_REQUIRED');
+    await assertSpaceCertificate(ctx.db, target._id);
+    const page = await ctx.db.query('modelMemoryVectors').withIndex('space', q => q.eq('spaceId', source._id))
+      .paginate({ cursor: args.cursor, numItems: 20, maximumBytesRead: 512 * 1024 });
+    for (const vector of page.page) {
+      await assertVectorCertificate(ctx.db, target._id, vector.embeddingCertificateId);
+      const memory = await ctx.db.get(vector.memoryId);
+      if (!memory || memory.worldId !== vector.worldId || memory.playerId !== vector.playerId || memory.agentGlobalId !== vector.agentGlobalId ||
+        await memorySourceDigest(memory) !== vector.sourceDigest) throw new Error('EMBEDDING_SOURCE_VECTOR_STALE');
+      const prior = await ctx.db.query('modelMemoryVectors').withIndex('memory_space', q => q.eq('memoryId', vector.memoryId).eq('spaceId', target._id)).unique();
+      if (!prior) {
+        const { _id, _creationTime, ...fields } = vector;
+        await ctx.db.insert('modelMemoryVectors', { ...fields, spaceId: target._id });
+      }
+    }
+    return { isDone: page.isDone, continueCursor: page.continueCursor };
+  },
+});
+export const reusePage = internalAction({
+  args: { sourceSpaceId: v.id('embeddingSpaces'), spaceId: v.id('embeddingSpaces'), cursor: v.union(v.string(), v.null()) },
+  handler: async (ctx, args): Promise<void> => {
+    try {
+      const route = await ctx.runQuery(internal.models.embeddings.getRoute, { spaceId: args.spaceId });
+      await guardEmbeddingRoute(ctx, route);
+      const page = await ctx.runMutation(makeFunctionReference<'mutation'>('models/embeddings:copyReusePage'), args);
+      if (!page.isDone) await ctx.scheduler.runAfter(0, makeFunctionReference<'action'>('models/embeddings:reusePage'), { ...args, cursor: page.continueCursor });
+      else await ctx.runMutation(internal.models.embeddings.finishBuild, { spaceId: args.spaceId });
+    } catch (error) {
+      await ctx.runMutation(internal.models.embeddings.failBuild, { spaceId: args.spaceId, failure: String(error).slice(0, 500) });
+    }
   },
 });
 export const resumeRebuild = mutation({
@@ -266,12 +339,14 @@ export const putVector = internalMutation({
     worldId: v.id('worlds'),
     agentGlobalId: v.optional(v.string()),
     expectedSourceDigest: v.optional(v.string()),
+    embeddingCertificateId: v.optional(v.id('embeddingCertificates')),
   },
   handler: async (ctx, args) => {
     let memory = await ctx.db.get(args.memoryId);
     const space = await ctx.db.get(args.spaceId);
     const profile = space && (await ctx.db.get(space.profileId));
     if (!memory || !profile) throw new Error('EMBEDDING_SOURCE_MISSING');
+    await assertVectorCertificate(ctx.db, args.spaceId, args.embeddingCertificateId);
     validateVector(args.embedding, profile.dimensions);
     if (memory.worldId && memory.worldId !== args.worldId) throw new Error('MEMORY_OWNER_MISMATCH');
     const prior = await ctx.db
@@ -336,11 +411,12 @@ export const existingVector = internalQuery({
       .unique(),
 });
 async function indexOne(ctx: ActionCtx, memoryId: Id<'memories'>, route: EmbeddingRoute) {
+  await guardEmbeddingRoute(ctx, route);
   const owner = await ctx.runQuery(internal.models.embeddings.vectorOwner, { memoryId });
   if (!owner) return;
   const sourceDigest = await memorySourceDigest(owner.memory);
   const existing = await ctx.runQuery(internal.models.embeddings.existingVector, { memoryId, spaceId: route.space._id });
-  if (existing?.sourceDigest === sourceDigest) return;
+  if (existing?.sourceDigest === sourceDigest && existing.embeddingCertificateId === route.space.embeddingCertificateId) return;
   const result = await cache.fetchBatch(ctx, [owner.memory.description], {
     route,
     inputMode: 'document',
@@ -353,6 +429,7 @@ async function indexOne(ctx: ActionCtx, memoryId: Id<'memories'>, route: Embeddi
     worldId: owner.worldId,
     agentGlobalId: owner.agentGlobalId,
     expectedSourceDigest: sourceDigest,
+    embeddingCertificateId: result.embeddingCertificateId,
   });
 }
 export const allWritableSpaces = internalQuery({
@@ -413,6 +490,7 @@ async function verifyMemoryVector(ctx: MutationCtx, memory: Doc<'memories'>, spa
     .withIndex('memory_space', q => q.eq('memoryId', memory._id).eq('spaceId', spaceId)).unique();
   if (!vector) throw new Error('EMBEDDING_COVERAGE_INCOMPLETE');
   validateVector(vector.embedding, dimensions);
+  await assertVectorCertificate(ctx.db, spaceId, vector.embeddingCertificateId);
   if (!memory.worldId || vector.playerId !== memory.playerId || vector.worldId !== memory.worldId ||
       vector.agentGlobalId !== memory.agentGlobalId) throw new Error('MEMORY_OWNER_MISMATCH');
   if (vector.sourceDigest !== await memorySourceDigest(memory)) throw new Error('EMBEDDING_SOURCE_VECTOR_STALE');
@@ -449,6 +527,7 @@ async function advanceScan(ctx: MutationCtx, jobId: Id<'embeddingScanJobs'>) {
         // The preceding source pass already proved uniqueness for every memory.
         // Check every stored row as well so dangling/extra owner rows cannot hide outside it.
         validateVector(vector.embedding, profile!.dimensions);
+        await assertVectorCertificate(ctx.db, job.spaceId!, vector.embeddingCertificateId);
         if (vector.worldId !== memory.worldId || vector.playerId !== memory.playerId ||
             vector.agentGlobalId !== memory.agentGlobalId) throw new Error('MEMORY_OWNER_MISMATCH');
       }
@@ -517,11 +596,13 @@ export const scanJob = internalQuery({
   args: { jobId: v.id('embeddingScanJobs') }, handler: (ctx, args) => ctx.db.get(args.jobId),
 });
 export const saveQuerySample = internalMutation({
-  args: { jobId: v.id('embeddingScanJobs'), sampleIndex: v.number(), embedding: v.array(v.float64()) },
+  args: { jobId: v.id('embeddingScanJobs'), sampleIndex: v.number(), embedding: v.array(v.float64()), embeddingCertificateId: v.optional(v.id('embeddingCertificates')) },
   handler: async (ctx, args) => {
     const job = await ctx.db.get(args.jobId);
     if (!job || job.phase !== 'SAMPLES' || job.sampleIndex !== args.sampleIndex || job.queryVector) return false;
     await assertScanCurrent(ctx, job);
+    const certificate = await assertSpaceCertificate(ctx.db, job.spaceId!, args.embeddingCertificateId);
+    if (certificate && certificate._id !== args.embeddingCertificateId) throw new Error('EMBEDDING_GENERATION_EVIDENCE_MISSING');
     await ctx.db.patch(job._id, { queryVector: args.embedding, updatedAt: Date.now() });
     return true;
   },
@@ -532,19 +613,27 @@ export const scanWork = internalAction({
     const job = await ctx.runQuery(internal.models.embeddings.scanJob, args);
     if (!job || ['DONE', 'FAILED'].includes(job.phase)) return;
     try {
+      // Coverage may take longer than a serving certificate's freshness window.
+      // Refresh authority on every bounded page, including pages without samples.
+      const route = job.spaceId ? await ctx.runQuery(internal.models.embeddings.getRoute, { spaceId: job.spaceId }) : null;
+      const embeddingCertificateId = route ? await guardEmbeddingRoute(ctx, route) : undefined;
       if (job.phase === 'SAMPLES' && !job.queryVector) {
         const samples = await ctx.runQuery(internal.models.embeddings.validationSamples, { spaceId: job.spaceId!, memoryIds: [job.sampleMemoryIds[job.sampleIndex]] });
         const sample = samples[0];
         if (!sample?.memory || !sample.vector) throw new Error('DANGLING_MEMORY_VECTOR');
-        const route = await ctx.runQuery(internal.models.embeddings.getRoute, { spaceId: job.spaceId! });
+        // Validation always probes the live query pipeline, never a cached sample.
         const result = await trackedModelCall(ctx, 'EMBEDDING', {
-          profileId: route.profile._id, worldId: sample.vector.worldId, playerId: sample.vector.playerId,
+          profileId: route!.profile._id, worldId: sample.vector.worldId, playerId: sample.vector.playerId,
         }, async () => {
-          const response = await fetchEmbedding(sample.memory!.description, profileEmbeddingConfig(route.profile), 'query');
-          validateVector(response.embedding, route.profile.dimensions);
+          const response = embeddingCertificateId
+            ? { embedding: await fetchCertifiedOllamaEmbedding(route!.profile, sample.memory!.description, 'query'), usage: undefined, retries: 0 }
+            : await fetchEmbedding(sample.memory!.description, profileEmbeddingConfig(route!.profile), 'query');
+          validateVector(response.embedding, route!.profile.dimensions);
           return response;
         }, response => response.usage);
-        const accepted = await ctx.runMutation(internal.models.embeddings.saveQuerySample, { jobId: job._id, sampleIndex: job.sampleIndex, embedding: result.embedding });
+        await guardEmbeddingRoute(ctx, route!);
+        const accepted = await ctx.runMutation(internal.models.embeddings.saveQuerySample, { jobId: job._id, sampleIndex: job.sampleIndex,
+          embedding: result.embedding, embeddingCertificateId });
         if (!accepted) {
           await ctx.scheduler.runAfter(0, internal.models.embeddings.scanWork, args);
           return;
@@ -635,6 +724,7 @@ async function switchSpace(ctx: MutationCtx, spaceId: Id<'embeddingSpaces'>, ope
   if (!target || !['READY', 'RETIRED', 'ACTIVE'].includes(target.status) || !target.validatedAt)
     throw new Error('EMBEDDING_SPACE_NOT_VALIDATED');
   if ((await ctx.db.get(target.profileId))?.disabled) throw new Error('EMBEDDING_PROFILE_DISABLED');
+  await assertSpaceCertificate(ctx.db, spaceId);
   const certificate = target.validationJobId && await ctx.db.get(target.validationJobId);
   if (!certificate || certificate.phase !== 'DONE' || certificate.kind !== 'VALIDATION')
     throw new Error('EMBEDDING_SPACE_NOT_VALIDATED');

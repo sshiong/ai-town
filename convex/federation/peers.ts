@@ -8,16 +8,20 @@ import { identity, peer, session } from './store';
 import { assertNoIdentityConflict, observeSignedIdentity } from './identityConflict';
 import { beginReturn } from './ledger';
 import { retireCredentialRotations } from './peerCredentialRotation';
+import { rateLimitedResponse } from './publicRateLimit';
 
 const pairById = async (ctx: any, requestId: string) => ctx.db.query('pairRequests').withIndex('requestId', (q: any) => q.eq('pairRequestId', requestId)).unique();
 const terminalPairStates = ['TRUSTED', 'REJECTED', 'AUTH_FAILED', 'CANCELLED', 'EXPIRED'];
 const clearedPairSecrets = { secretEncrypted: undefined, credentialEncrypted: undefined, ephemeralPrivateEncrypted: undefined };
 export const requestPair = action({ args: { adminToken: v.string(), endpoint: v.string(), pairingSecret: v.string() }, handler: async (ctx, args) => {
   requireAdmin(args.adminToken); validatePairingSecret(args.pairingSecret);
+  const account = await ctx.auth.getUserIdentity();
+  const budget = await ctx.runMutation(mutationRef('publicRateLimit/consume'), { scope: 'PAIR_ACCOUNT', claim: account?.tokenIdentifier ?? 'LOCAL_ADMIN_TOKEN' });
+  if (!budget.allowed) throw new Error('PAIR_RATE_LIMITED');
   const endpoint = normalizeEndpoint(args.endpoint); const data = await ctx.runQuery(queryRef('store/context'), {});
   if (!data.identity?.enabled || data.identity.mode !== 'ACTIVE') throw new Error('FEDERATION_DISABLED');
   const local = data.identity;
-  const discovery = await directRequest(endpoint, '/health');
+  const discovery = await directRequest(ctx, endpoint, '/health');
   if (!await verifySignature(discovery.body, discovery.signature, discovery.body.publicKey) || discovery.body.protocol !== PROTOCOL || discovery.body.expiresAt < Date.now()) throw new Error('INVALID_DISCOVERY');
   await observeSignedIdentity(ctx, discovery, 'HEALTH');
   if (discovery.body.townId === local.townId) throw new Error('TOWN_ID_CONFLICT');
@@ -26,7 +30,7 @@ export const requestPair = action({ args: { adminToken: v.string(), endpoint: v.
   const packet = { body: request, signature: await sign(request, local.privateKeyEncrypted), proof: await mac({ direction: 'offer', request }, args.pairingSecret) };
   const targetIdentity = { townId: discovery.body.townId, townName: discovery.body.townName, publicKey: discovery.body.publicKey, fingerprint: discovery.body.fingerprint, protocol: discovery.body.protocol };
   await ctx.runMutation(mutationRef('peers/storeOutbound'), { request, endpoint, targetIdentity, secretEncrypted: await sealSecret(args.pairingSecret), ephemeralPrivateEncrypted: keys.privateKeyEncrypted });
-  const response = await directRequest(endpoint, '/pair', { operation: 'request', packet });
+  const response = await directRequest(ctx, endpoint, '/pair', { operation: 'request', packet });
   if (!await verifySignature(response.body, response.signature, discovery.body.publicKey) || response.body.pairRequestId !== pairRequestId || response.body.townId !== discovery.body.townId) throw new Error('INVALID_PAIR_RESPONSE');
   return { pairRequestId, state: response.body.state as string };
 } });
@@ -114,7 +118,7 @@ export const cancelPair = action({ args: { adminToken: v.string(), pairRequestId
   }
   if (!local?.enabled || local.mode !== 'ACTIVE') throw new Error('DEPLOYMENT_NOT_ACTIVE');
   const body = { pairRequestId: pair.pairRequestId, townId: local.townId, nonce: crypto.randomUUID(), expiresAt: Date.now() + 30_000 };
-  const result = await directRequest(pair.endpoint, '/pair', { operation: 'cancel', body, signature: await sign(body, local.privateKeyEncrypted) });
+  const result = await directRequest(ctx, pair.endpoint, '/pair', { operation: 'cancel', body, signature: await sign(body, local.privateKeyEncrypted) });
   if (!result.body || !await verifySignature(result.body, result.signature, pair.targetIdentity?.publicKey ?? result.body.publicKey) || result.body.pairRequestId !== pair.pairRequestId || result.body.townId !== pair.request.targetTownId || result.body.nonce !== body.nonce || result.body.expiresAt <= Date.now() || !['CANCELLED', 'REJECTED', 'AUTH_FAILED', 'EXPIRED'].includes(result.body.state)) throw new Error('INVALID_PAIR_CANCEL_RESPONSE');
   await ctx.runMutation(mutationRef('peers/finishCancellation'), { pairRequestId: pair.pairRequestId, state: result.body.state });
   return { state: result.body.state as string };
@@ -144,7 +148,7 @@ export const continuePair = action({ args: { adminToken: v.string(), pairRequest
   const pair = data.pair; const local = data.identity;
   if (!pair || pair.direction !== 'OUTBOUND' || !['PENDING_APPROVAL', 'PENDING_BOTH_CONFIRM'].includes(pair.state) || !local?.enabled || local.mode !== 'ACTIVE' || pair.expiresAt <= Date.now() || !pair.secretEncrypted || !pair.ephemeralPrivateEncrypted) throw new Error('PAIR_NOT_PENDING');
   const query = { pairRequestId: pair.pairRequestId, townId: local.townId, nonce: crypto.randomUUID(), expiresAt: Date.now() + 30_000 };
-  const status = await directRequest(pair.endpoint, '/pair', { operation: 'status', body: query, signature: await sign(query, local.privateKeyEncrypted) });
+  const status = await directRequest(ctx, pair.endpoint, '/pair', { operation: 'status', body: query, signature: await sign(query, local.privateKeyEncrypted) });
   if (!status.body || !await verifySignature(status.body, status.signature, pair.targetIdentity?.publicKey ?? status.body.publicKey) || status.body.pairRequestId !== pair.pairRequestId || status.body.townId !== pair.request.targetTownId || status.body.nonce !== query.nonce || status.body.expiresAt <= Date.now()) throw new Error('INVALID_PAIR_STATUS');
   if (status.body.state !== 'PENDING_BOTH_CONFIRM' && status.body.state !== 'TRUSTED') {
     await ctx.runMutation(mutationRef('peers/updatePairState'), { pairRequestId: pair.pairRequestId, state: status.body.state });
@@ -161,7 +165,7 @@ export const continuePair = action({ args: { adminToken: v.string(), pairRequest
   const credential = await deriveCredential(pair.ephemeralPrivateEncrypted, response.body.ephemeralPublicKey, secret, transcript);
   await ctx.runMutation(mutationRef('peers/beginConfirmation'), { pairRequestId: pair.pairRequestId });
   const confirmation = { pairRequestId: pair.pairRequestId, townId: local.townId, transcriptDigest: await digest(transcript), direction: 'initiator-confirm', expiresAt: pair.expiresAt };
-  const result = await directRequest(pair.endpoint, '/pair', { operation: 'confirm', body: confirmation, signature: await sign(confirmation, local.privateKeyEncrypted), proof: await mac(confirmation, credential) });
+  const result = await directRequest(ctx, pair.endpoint, '/pair', { operation: 'confirm', body: confirmation, signature: await sign(confirmation, local.privateKeyEncrypted), proof: await mac(confirmation, credential) });
   if (!await verifySignature(result.body, result.signature, response.body.publicKey) || !await verifyMac(result.body, result.proof, credential) || result.body.pairRequestId !== pair.pairRequestId || result.body.townId !== pair.request.targetTownId || result.body.expiresAt <= Date.now() || result.body.direction !== 'responder-confirm' || result.body.transcriptDigest !== confirmation.transcriptDigest) throw new Error('AUTH_FAILED');
   await ctx.runMutation(mutationRef('peers/finalizePair'), { pairRequestId: pair.pairRequestId, remote: response.body, credentialEncrypted: await sealSecret(credential) });
   return { pairRequestId: pair.pairRequestId, state: 'TRUSTED' };
@@ -224,18 +228,24 @@ export const consumePairNonce = internalMutation({ args: { pairRequestId: v.stri
 
 export function registerPairingRoutes(http: import('convex/server').HttpRouter) {
   http.route({ path: '/federation/v1/health', method: 'GET', handler: httpAction(async ctx => {
+    const budget = await ctx.runMutation(mutationRef('publicRateLimit/consume'), { scope: 'HEALTH' });
+    if (!budget.allowed) return rateLimitedResponse(budget.retryAfter);
     const data = await ctx.runQuery(queryRef('store/context'), {}), local = data.identity;
     if (!local || local.mode !== 'ACTIVE') return new Response(JSON.stringify({ error: 'FEDERATION_UNAVAILABLE' }), { status: 503 });
     const body = { protocol: PROTOCOL, townId: local.townId, townName: local.townName, publicKey: local.publicKey, fingerprint: local.fingerprint, identityVersion: local.identityVersion ?? 1,
-      deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, endpoint: local.endpoint, endpointCandidates: normalizeEndpointCandidates(local.endpoint, local.endpointCandidates), endpointSequence: local.endpointSequence ?? 0, sentAt: Date.now(), expiresAt: Date.now() + 30_000 };
+      deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch, sentAt: Date.now(), expiresAt: Date.now() + 30_000 };
     return jsonResponse({ body, signature: await sign(body, local.privateKeyEncrypted) });
   }) });
   http.route({ path: '/federation/v1/pair', method: 'POST', handler: httpAction(async (ctx, request) => {
     try {
+      const budget = await ctx.runMutation(mutationRef('publicRateLimit/consume'), { scope: 'PAIR_SOURCE' });
+      if (!budget.allowed) return rateLimitedResponse(budget.retryAfter);
       const input = await readRequest(request);
       if (input.operation === 'request') {
         const packet = input.packet, body = packet?.body;
         if (!body || typeof body.publicKey !== 'string' || body.fingerprint !== `sha256:${await digest(body.publicKey)}` || !await verifySignature(body, packet.signature, body.publicKey) || typeof packet.proof !== 'string') throw new Error('INVALID_PAIR_SIGNATURE');
+        const townBudget = await ctx.runMutation(mutationRef('publicRateLimit/consume'), { scope: 'PAIR_TOWN', claim: body.townId });
+        if (!townBudget.allowed) return rateLimitedResponse(townBudget.retryAfter);
         await observeSignedIdentity(ctx, packet, 'PAIR');
         const result = await ctx.runMutation(mutationRef('peers/receiveRequest'), { request: body, proof: packet.proof });
         const { identity: local } = await ctx.runQuery(queryRef('store/context'), {});
@@ -266,6 +276,7 @@ export function registerPairingRoutes(http: import('convex/server').HttpRouter) 
       return jsonResponse({ body: response, signature: await sign(response, local.privateKeyEncrypted), proof: await mac(response, await openSecret(encrypted)) });
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'FEDERATION_REJECTED';
+      if (reason === 'PAIR_RATE_LIMITED') return rateLimitedResponse(60);
       return jsonResponse({ error: /^[A-Z][A-Z0-9_]+$/.test(reason) ? reason : 'FEDERATION_REJECTED' }, 400);
     }
   }) });

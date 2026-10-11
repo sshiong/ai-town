@@ -1,3 +1,6 @@
+import { portableVector } from './vectorEvidence';
+import { isMemoryBackupTable } from './memoryBackup';
+import { correctionHead, sourceKey } from '../agent/memorySources';
 import { v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
 import {
@@ -114,6 +117,7 @@ export const startExport = mutation({
     from: v.optional(v.number()),
     to: v.optional(v.number()),
     includePublicPeers: v.optional(v.boolean()),
+    includeVectors: v.optional(v.boolean()),
     operator: v.string(),
     reason: v.string(),
   },
@@ -187,7 +191,7 @@ export const startExport = mutation({
       createdAt: now,
       updatedAt: now,
       source: sanitizeLargeValue(local),
-      metadata: { selection, operator: a.operator.trim(), reason: a.reason.trim() },
+      metadata: { selection, includeVectors: a.includeVectors ?? false, operator: a.operator.trim(), reason: a.reason.trim() },
     });
     await ctx.db.insert('backupMaintenanceLocks', { key: 'town', jobId, createdAt: now });
     return { jobId };
@@ -263,7 +267,7 @@ function includesResident(table: string, row: BackupRow, s: Selection) {
     return s.owners.some((o) => o.worldId === row.worldId && o.agentId === (row.agentId ?? row.id));
   return !!rowOwner(row, s);
 }
-async function primary(db: DatabaseReader, table: string, row: BackupRow, s: Selection) {
+async function primary(db: DatabaseReader, table: string, row: BackupRow, s: Selection): Promise<boolean> {
   if (s.scope === 'config-only')
     return (
       (configTables as readonly string[]).includes(table) &&
@@ -282,6 +286,12 @@ async function primary(db: DatabaseReader, table: string, row: BackupRow, s: Sel
       s.categories.includes(row.data?.type) &&
       inBounds(table, row, s)
     );
+  if (isMemoryBackupTable(table)) {
+    if (!rowOwner(row, s) || table === 'memoryCompressionJobs') return false;
+    const memoryId = row.sourceMemoryId ?? row.memoryId ?? row.summaryMemoryId;
+    const memory = memoryId && await db.get(memoryId as Id<'memories'>);
+    return !!memory && !!rowOwner(memory, s) && await primary(db, 'memories', memory, s);
+  }
   if (
     s.scope === 'memories-only' ||
     !(historyTables as readonly string[]).includes(table) ||
@@ -341,6 +351,21 @@ async function envelope(
     row = ownership;
   }
   const references = validateSourceRow(table, row);
+  if (table === 'memories') {
+    const provenance = await db.query('memorySummaryProvenance').withIndex('summary', q =>
+      q.eq('summaryMemoryId', row._id as Id<'memories'>)).unique();
+    if (provenance) references.push({ id: provenance._id, table: 'memorySummaryProvenance' });
+    const key = sourceKey(row as Doc<'memories'>);
+    if (key && row.worldId) {
+      const owner = { worldId: row.worldId as Id<'worlds'>, playerId: row.playerId as string };
+      const correction = await correctionHead(db, owner, key);
+      if (correction) references.push({ id: correction._id, table: 'memorySourceCorrections' });
+      const claim = await db.query('memorySourceClaims').withIndex('source_generation', q =>
+        q.eq('worldId', owner.worldId).eq('playerId', owner.playerId).eq('sourceKey', key)
+          .eq('generation', correction?._id ?? 'ORIGINAL')).unique();
+      if (claim) references.push({ id: claim._id, table: 'memorySourceClaims' });
+    }
+  }
   if (
     table === 'homeTravelTranscriptPages' ||
     (table === 'memories' && row.data.type === 'travel' && row.data.transcriptId)
@@ -492,13 +517,22 @@ export const page = internalQuery({
     if (job.phase === 'SCANNING') {
       const table = selectiveTables[job.tableIndex];
       if (!table) throw new Error('BACKUP_CHECKPOINT_CHANGED');
+      if (table === 'modelMemoryVectors' && !job.metadata.includeVectors)
+        return { table, rows: [], cursor: '', done: true, queued: [] };
       const page = await ctx.db
         .query(name(table))
         .paginate({ cursor: job.cursor, numItems: 20, maximumBytesRead: TARGET_CHUNK_BYTES });
       const rows: ArchiveEnvelope[] = [];
       for (let row of page.page as BackupRow[]) {
         if (table === 'memories') row = await normalizeMemory(ctx.db, row, selection);
-        if (await primary(ctx.db, table, row, selection))
+        if (table === 'modelMemoryVectors') {
+          const memory = await ctx.db.get(row.memoryId as Id<'memories'>);
+          if (!memory || !await primary(ctx.db, 'memories', memory, selection)) continue;
+          const portable = await portableVector(ctx.db, row as Doc<'modelMemoryVectors'>, true);
+          if (!portable) continue;
+          row = portable;
+        }
+        if (table === 'modelMemoryVectors' || await primary(ctx.db, table, row, selection))
           rows.push(await envelope(ctx.db, table, row, selection, 'primary'));
       }
       return {
@@ -555,6 +589,8 @@ export const page = internalQuery({
         (!(residentTables as readonly string[]).includes(p.table) ||
           includesResident(p.table, row, selection)) &&
         (p.table !== 'memories' ||
+          (!!memoryOwner && p.metadata.requestingOwners?.includes(memoryOwner.agentGlobalId))) &&
+        (!isMemoryBackupTable(p.table) ||
           (!!memoryOwner && p.metadata.requestingOwners?.includes(memoryOwner.agentGlobalId))) &&
         (p.table !== 'archivedConversations' ||
           selection.owners.some(
@@ -843,7 +879,7 @@ export const advanceExport = action({
           exportedAt: job.createdAt,
           scope: job.metadata.selection.scope,
           selection: job.metadata.selection,
-          includeVectors: false,
+          includeVectors: job.metadata.includeVectors ?? false,
           usage: 'selective-transfer',
           operator: job.metadata.operator,
           reason: job.metadata.reason,

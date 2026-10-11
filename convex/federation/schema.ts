@@ -6,8 +6,15 @@ import { credentialRotationTables } from './credentialRotationSchema';
 import { identityKeyRotationTables } from './identityKeyRotationSchema';
 import { timePolicy } from './timePolicy';
 import { endpointCandidates } from './endpointsSchema';
+import { disclosureLevel } from './disclosurePolicySchema';
 
 export const federationTables = {
+  federationPublicRateLimits: defineTable({ key: v.string(), windowStart: v.number(), count: v.number(), expiresAt: v.number() })
+    .index('key', ['key']).index('expiry', ['expiresAt']),
+  federationDisclosurePolicy: defineTable({ agentGlobalId: v.string(), level: disclosureLevel, allowedTownIds: v.array(v.string()), updatedAt: v.number() })
+    .index('agentGlobalId', ['agentGlobalId']),
+  federationDisclosureAudit: defineTable({ agentGlobalId: v.string(), previous: v.any(), next: v.any(), operator: v.string(), reason: v.string(), createdAt: v.number() })
+    .index('resident_time', ['agentGlobalId', 'createdAt']),
   federationTravelAudit: defineTable({ visitId: v.string(), source: v.string(), at: v.number(),
     operation: v.string(), previous: v.optional(v.any()), next: v.optional(v.any())
   }).index('time', ['at']).index('visit_time', ['visitId', 'at']),

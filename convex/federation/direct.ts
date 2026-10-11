@@ -1,7 +1,7 @@
 import { MESSAGE_MAX_BYTES, normalizeEndpoint, normalizeEndpointCandidates, EndpointCandidate, endpointGeneration, PROTOCOL, FederationMessage } from './protocol';
 import type { Doc } from '../_generated/dataModel';
 import type { ActionCtx } from '../maintenanceFunctions';
-import { queryRef } from './refs';
+import { actionRef, queryRef } from './refs';
 import { signPacket, verifyPacket } from './security';
 import { observeSignedIdentity } from './identityConflict';
 import { configuredTimePolicy } from './timePolicy';
@@ -47,16 +47,16 @@ export function endpointContextKey(local: Doc<'federationIdentity'>, remote: Doc
 }
 // Rotation/migration control protocols perform their own signed successor-key
 // challenges. An old-key transport probe cannot replace those proofs.
-export async function directControlRequest(ctx: Pick<ActionCtx, 'runQuery'>, local: Doc<'federationIdentity'>, remote: Doc<'federationPeers'>, path: string, body: unknown) {
+export async function directControlRequest(ctx: Pick<ActionCtx, 'runQuery' | 'runAction'>, local: Doc<'federationIdentity'>, remote: Doc<'federationPeers'>, path: string, body: unknown) {
   return requestCandidates(remote, async endpoint => {
     const current = await ctx.runQuery(queryRef('store/context'), { peerTownId: remote.townId });
     if (!sameEndpointContext(local, remote, current)) throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
-    return directRequest(endpoint, path, body, configuredTimePolicy(local).requestTimeoutMs);
+    return directRequest(ctx, endpoint, path, body, configuredTimePolicy(local).requestTimeoutMs);
   });
 }
 // An alternate route is challenged before delivering business/control packets.
 // These outbound checks never substitute for the independent inbound probe.
-export async function directPeerRequest(ctx: Pick<ActionCtx, 'runQuery' | 'runMutation'>, local: Doc<'federationIdentity'>, remote: Doc<'federationPeers'>, path: string, body: unknown) {
+export async function directPeerRequest(ctx: Pick<ActionCtx, 'runQuery' | 'runMutation' | 'runAction'>, local: Doc<'federationIdentity'>, remote: Doc<'federationPeers'>, path: string, body: unknown) {
   const assertCurrent = async () => {
     const current = await ctx.runQuery(queryRef('store/context'), { peerTownId: remote.townId });
     if (!sameEndpointContext(local, remote, current)) throw new Error('ENDPOINT_UPDATE_CONTEXT_CHANGED');
@@ -70,7 +70,7 @@ export async function directPeerRequest(ctx: Pick<ActionCtx, 'runQuery' | 'runMu
         senderDeploymentEpoch: local.deploymentEpoch, expectedRecipientDeploymentEpoch: remote.deploymentEpoch,
         credentialId: remote.credentialId, sentAt: Date.now(), expiresAt: Date.now() + 30_000, nonce,
         payload: { probeId: crypto.randomUUID(), nonce } };
-      const ack = await directRequest(endpoint, '/probe', await signPacket(probe, local.privateKeyEncrypted, remote.credentialEncrypted), configuredTimePolicy(local).requestTimeoutMs);
+      const ack = await directRequest(ctx, endpoint, '/probe', await signPacket(probe, local.privateKeyEncrypted, remote.credentialEncrypted), configuredTimePolicy(local).requestTimeoutMs);
       await observeSignedIdentity(ctx, ack, 'ACK');
       const b = ack?.body;
       if (!b || !await verifyPacket(ack, remote.publicKey, remote.credentialEncrypted) || b.protocol !== PROTOCOL || b.type !== 'TRANSPORT_PROBE_ACK' ||
@@ -81,7 +81,7 @@ export async function directPeerRequest(ctx: Pick<ActionCtx, 'runQuery' | 'runMu
         throw new Error('ENDPOINT_IDENTITY_UNVERIFIED');
       await assertCurrent();
     }
-    const value = await directRequest(endpoint, path, body, configuredTimePolicy(local).requestTimeoutMs);
+    const value = await directRequest(ctx, endpoint, path, body, configuredTimePolicy(local).requestTimeoutMs);
     await assertCurrent();
     return value;
   });
@@ -104,19 +104,18 @@ async function boundedJson(body: ReadableStream<Uint8Array> | null, contentLengt
   try { return JSON.parse(new TextDecoder().decode(bytes)); }
   catch { throw new Error('INVALID_REMOTE_RESPONSE'); }
 }
-export async function directRequest(endpoint: string, path: string, body?: unknown, timeoutMs = 8000): Promise<any> {
+export async function directRequest(ctx: Pick<ActionCtx, 'runAction'>, endpoint: string, path: string, body?: unknown, timeoutMs = 8000): Promise<any> {
   const base = normalizeEndpoint(endpoint);
   if (!['/health', '/pair', '/probe', '/messages', '/migration', '/peers/endpoints', '/peers/rotate-auth', '/peers/identity-key'].includes(path)) throw new Error('INVALID_FEDERATION_PATH');
   const data = body === undefined ? undefined : JSON.stringify(body);
   if (data && new TextEncoder().encode(data).byteLength > MESSAGE_MAX_BYTES) throw new Error('MESSAGE_TOO_LARGE');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 30000) throw new Error('INVALID_REQUEST_TIMEOUT');
-  const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${base}${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json' }, body: data, redirect: 'error', signal: controller.signal });
-    if (!response.ok) { await response.body?.cancel(); throw new Error(`FEDERATION_HTTP_${response.status}`); }
-    return await boundedJson(response.body, response.headers.get('content-length'));
-  } catch (error) { throw new Error(connectionError(error, controller.signal.aborted)); }
-  finally { clearTimeout(timeout); }
+  const response = await ctx.runAction(actionRef('nodeNetworkRequest/send'), { endpoint: base, path, ...(data === undefined ? {} : { data }), timeoutMs });
+  if (!response.ok) throw new Error(response.error);
+  if (response.status < 200 || response.status >= 300) throw new Error(`FEDERATION_HTTP_${response.status}`);
+  if (new TextEncoder().encode(response.text).byteLength > MESSAGE_MAX_BYTES) throw new Error('MESSAGE_TOO_LARGE');
+  try { return JSON.parse(response.text); }
+  catch { throw new Error('INVALID_REMOTE_RESPONSE'); }
 }
 export async function readRequest(request: Request): Promise<any> {
   return boundedJson(request.body, request.headers.get('content-length'));

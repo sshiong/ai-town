@@ -10,6 +10,7 @@ import { createIdentityKeys, digest, sign } from './security';
 import { BackupBundle, decodeRow, encodeRow, validateBundle } from './backupHelpers';
 import { embeddingFingerprint } from '../models/compatibility';
 import { applyBackupData, importBackup } from './backup';
+import { seedMemoryBackupEvidence, assertMemoryBackupEvidence, useLegacyMemoryBackupDigests } from './memoryBackupTestHelpers';
 
 test('atomic cold packing rejects a large v2 root before fetching or combining its parts', async () => {
   let partReads = 0;
@@ -279,6 +280,39 @@ async function residentRestoreArgs(t: Awaited<ReturnType<typeof town>>['t'], bun
   return { ...args, residentRestore: { expectedTargetDigest: preflight.residentRestorePlan!.targetDigest,
     confirmOverwrite: true, operator: 'Home administrator', reason: 'Restore the resident archive' } };
 }
+
+test.each(['current', 'changed source', 'legacy digest'])('memory provenance small-town clone retains %s evidence and fences interrupted compression', async variant => {
+  const source = await town();
+  await source.t.run(ctx => seedMemoryBackupEvidence(ctx, source.memoryId));
+  if (variant === 'changed source') await source.t.run(ctx => ctx.db.patch(source.memoryId, { description: 'Corrected retained original' }));
+  if (variant === 'legacy digest') await source.t.run(ctx => useLegacyMemoryBackupDigests(ctx));
+  const bundle = await source.t.action(action('federation/backup:exportTown'), { adminToken });
+  const target = convexTest(schema, modules);
+  await target.run(async ctx => {
+    const padding = await ctx.db.insert('worlds', { nextId: 1, players: [], agents: [], conversations: [] });
+    await ctx.db.delete(padding);
+  });
+  await target.action(action('federation/backup:importBackup'), { adminToken, bundle, mode: 'clone', targetEndpoint: 'https://memory-copy.example' });
+  const copied = await target.run(ctx => assertMemoryBackupEvidence(ctx, true, variant !== 'changed source'));
+  const sourceReflection = bundle.sections.memories.map(decodeRow).find((row: Record<string, unknown>) => row.description === 'Ava is a friend.')!;
+  // Convex-test assigns the target observation the ID of this different source
+  // reflection: this collision catches accidental second remapping.
+  expect(copied.memory._id).toBe(sourceReflection._id);
+  expect(copied.memory._id).not.toBe(source.memoryId);
+  expect(copied.memory.agentGlobalId).not.toBe(source.agentGlobalId);
+  expect(copied.memory.description).toBe(variant === 'changed source' ? 'Corrected retained original' : 'I met Ava abroad.');
+});
+
+test('memory provenance resident restore is repeatable and releases target in-flight claims', async () => {
+  const f = await town();
+  await f.t.run(ctx => seedMemoryBackupEvidence(ctx, f.memoryId));
+  const bundle = await f.t.action(action('federation/backup:exportResident'), { adminToken, worldId: f.worldId, playerId: 'p:0' });
+  await f.t.action(action('federation/backup:importBackup'), await residentRestoreArgs(f.t, bundle, f.worldId));
+  const first = await f.t.run(ctx => assertMemoryBackupEvidence(ctx));
+  await f.t.action(action('federation/backup:importBackup'), await residentRestoreArgs(f.t, bundle, f.worldId));
+  const second = await f.t.run(ctx => assertMemoryBackupEvidence(ctx));
+  expect(second).toEqual(first);
+});
 
 test('original Home resident restore retains identity and fixed Chat ownership without changing main or other residents', async () => {
   const { t, worldId, agentGlobalId, memoryId } = await town();
@@ -1434,6 +1468,45 @@ test('older small archives may omit resident policy sections and duplicate ident
   bad.manifest.sections.federationResidentPolicy = { digest: await digest(rows), count: rows.length,
     bytes: new TextEncoder().encode(JSON.stringify(rows)).length };
   await expect(validateBundle(bad)).rejects.toThrow('BACKUP_DUPLICATE_RESIDENT_POLICY');
+});
+
+test.each(['restore', 'clone'] as const)('small %s preserves Home resident disclosure restrictions and audit', async mode => {
+  const { t, worldId, agentGlobalId } = await town();
+  const restricted = { level: 'WHITELIST' as const, allowedTownIds: ['town:approved'] };
+  await t.run(async ctx => {
+    await ctx.db.insert('federationDisclosurePolicy', { agentGlobalId, ...restricted, updatedAt: 2 });
+    await ctx.db.insert('federationDisclosureAudit', { agentGlobalId, previous: { level: 'PUBLIC', allowedTownIds: [] },
+      next: restricted, operator: 'Home reviewer', reason: 'Resident public persona restriction', createdAt: 2 });
+  });
+  const full = await t.action(action('federation/backup:exportTown'), { adminToken });
+  const resident = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  expect(full.sections.federationDisclosurePolicy).toHaveLength(1);
+  expect(resident.sections.federationDisclosurePolicy.map(decodeRow)).toEqual(full.sections.federationDisclosurePolicy.map(decodeRow));
+  expect(resident.sections.federationDisclosureAudit).toHaveLength(1);
+  const target = mode === 'clone' ? convexTest(schema, modules) : t;
+  const result = await target.action(action('federation/backup:importBackup'), { adminToken, bundle: full, mode,
+    sourceStopped: true, ...(mode === 'clone' ? { targetEndpoint: 'https://copy.example/federation/v1' } : {}) });
+  const expectedGlobalId = mode === 'clone' ? result.mapping[agentGlobalId] : agentGlobalId;
+  expect(await target.run(ctx => ctx.db.query('federationDisclosurePolicy').unique())).toMatchObject({ agentGlobalId: expectedGlobalId, ...restricted });
+  expect(await target.run(ctx => ctx.db.query('federationDisclosureAudit').unique())).toMatchObject({ agentGlobalId: expectedGlobalId, next: restricted });
+});
+
+test('resident restore reinstates its disclosure restriction without replaying duplicate audits', async () => {
+  const { t, worldId, agentGlobalId } = await town();
+  await t.run(async ctx => {
+    await ctx.db.insert('federationDisclosurePolicy', { agentGlobalId, level: 'WHITELIST', allowedTownIds: ['town:approved'], updatedAt: 2 });
+    await ctx.db.insert('federationDisclosureAudit', { agentGlobalId, previous: { level: 'PUBLIC', allowedTownIds: [] },
+      next: { level: 'WHITELIST', allowedTownIds: ['town:approved'] }, operator: 'Home reviewer', reason: 'Preserve privacy', createdAt: 2 });
+  });
+  const bundle: BackupBundle = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  await t.run(async ctx => {
+    const policy = (await ctx.db.query('federationDisclosurePolicy').unique())!;
+    await ctx.db.patch(policy._id, { level: 'PUBLIC', allowedTownIds: [], updatedAt: 3 });
+  });
+  for (let attempt = 0; attempt < 2; attempt++)
+    await t.action(action('federation/backup:importBackup'), await residentRestoreArgs(t, bundle, worldId));
+  expect(await t.run(ctx => ctx.db.query('federationDisclosurePolicy').unique())).toMatchObject({ agentGlobalId, level: 'WHITELIST', allowedTownIds: ['town:approved'] });
+  expect(await t.run(ctx => ctx.db.query('federationDisclosureAudit').collect())).toHaveLength(1);
 });
 
 

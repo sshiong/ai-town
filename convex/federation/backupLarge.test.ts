@@ -1,4 +1,5 @@
 import * as largeFunctions from './backupLarge';
+import { seedMemoryBackupEvidence, assertMemoryBackupEvidence, useLegacyMemoryBackupDigests } from './memoryBackupTestHelpers';
 import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
@@ -336,6 +337,40 @@ async function staged(
   return jobId as Id<'backupLargeJobs'>;
 }
 
+test.each(['current', 'changed source', 'legacy without complete evidence'])('memory provenance large-town clone retains %s evidence and drops executable claims', async variant => {
+  const source = await town(1);
+  await source.t.run(async ctx => {
+    await ctx.db.patch(source.memoryIds[0], { data: { type: 'travel', eventId: 'memory-evidence', visitId: 'fixture-visit', hostTownId: 'fixture-host', participants: [], occurredAt: 1 } });
+    await seedMemoryBackupEvidence(ctx, source.memoryIds[0]);
+  });
+  if (variant === 'changed source') await source.t.run(ctx => ctx.db.patch(source.memoryIds[0], { data: { type: 'travel', eventId: 'memory-evidence', visitId: 'fixture-visit', hostTownId: 'fixture-host', participants: [], occurredAt: 2 } }));
+  if (variant === 'legacy without complete evidence') await source.t.run(ctx => useLegacyMemoryBackupDigests(ctx));
+  const archive = await exported(source.t);
+  const target = convexTest(schema, modules), jobId = await staged(target, archive, 'clone');
+  await drive(target, jobId, 'import', 'READY');
+  await target.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(target, jobId, 'import', 'COMPLETE');
+  const copied = await target.run(ctx => assertMemoryBackupEvidence(ctx, true, variant === 'current'));
+  expect(copied.memory._id).not.toBe(source.memoryIds[0]);
+  expect(copied.memory.description).toBe('Canonical memory 0');
+});
+
+test('memory provenance destructive cancellation restores readable original correction evidence', async () => {
+  const source = await town(1);
+  await source.t.run(async ctx => {
+    await ctx.db.patch(source.memoryIds[0], { data: { type: 'travel', eventId: 'memory-evidence', visitId: 'fixture-visit', hostTownId: 'fixture-host', participants: [], occurredAt: 1 } });
+    await seedMemoryBackupEvidence(ctx, source.memoryIds[0]);
+  });
+  const archive = await exported(source.t), jobId = await staged(source.t, archive);
+  await drive(source.t, jobId, 'import', 'READY');
+  await source.t.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(source.t, jobId, 'import', 'MEMORY_PROVENANCE');
+  await source.t.mutation(mutation('cancel'), { adminToken, jobId });
+  await drive(source.t, jobId, 'import', 'CANCELLED');
+  const restored = await source.t.run(ctx => assertMemoryBackupEvidence(ctx));
+  expect(restored.memory.description).toBe('Canonical memory 0');
+});
+
 test('chunked restore retains provider/profile/resident policy without exporting request telemetry', async () => {
   const { t } = await town();
   await t.run(async ctx => {
@@ -577,7 +612,7 @@ test.each(['restore', 'clone', 'rollback'] as const)('large %s preserves capacit
     await ctx.db.insert('federationResourceAudit', { operation: 'SOURCE_QUOTA_CHANGED', previous: null, next: 3, createdAt: 1 });
     await ctx.db.insert('federationResourceMetrics', { kind: 'INBOUND_EVENT', bucketStart: Date.now(), count: 1, durationCount: 0, durationSumMs: 0, samples: [] });
   });
-  expect(largeTables.filter(t => t !== 'coldHistoryFiles').slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
+  expect(largeTables.filter(t => !['coldHistoryFiles', 'modelMemoryVectors'].includes(t)).slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
   expect(oldTables.slice(-4)).toEqual(['autonomousTravelPolicies', 'autonomousTravelDecisions', 'federationResourcePolicy', 'federationResourceAudit']);
   const archive = await exported(t);
   expect(archive.manifest.chunks.some(c => c.table === 'federationResourceMetrics')).toBe(false);
@@ -935,9 +970,13 @@ test.each(['same conversation owner', 'different conversation memory', 'differen
     duplicate.file.manifest.bytes = size(duplicate.file.payload);
     duplicate.file.manifest.digest = await digest(duplicate.file.payload);
     duplicate.file.signature = await sign(duplicate.file.manifest, source.keys.privateKeyEncrypted);
-    const extra: LargeChunk = { index: archive.chunks.length, table: 'coldHistoryFiles', rows: [encodeRow(duplicate)] };
-    archive.chunks.push(extra);
-    archive.manifest.chunks.push(await descriptor(extra));
+    // Opt-in vector chunks now follow cold files. Keep this independently signed
+    // duplicate in its declared table range so cold preflight is actually reached.
+    const insertionIndex = archive.chunks.findLastIndex(chunk => chunk.table === 'coldHistoryFiles') + 1;
+    const extra: LargeChunk = { index: insertionIndex, table: 'coldHistoryFiles', rows: [encodeRow(duplicate)] };
+    archive.chunks.splice(insertionIndex, 0, extra);
+    archive.chunks.forEach((chunk, index) => { chunk.index = index; });
+    archive.manifest.chunks = await Promise.all(archive.chunks.map(descriptor));
     archive.signature = await sign(archive.manifest, source.keys.privateKeyEncrypted);
     const jobId = await staged(source.t, archive);
     await drive(source.t, jobId, 'import', 'VALIDATE_COLD');

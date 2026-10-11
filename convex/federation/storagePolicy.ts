@@ -7,7 +7,7 @@ import {
   QueryCtx,
   MutationCtx,
 } from '../maintenanceFunctions';
-import { Doc, TableNames } from '../_generated/dataModel';
+import { Doc, Id, TableNames } from '../_generated/dataModel';
 import { storagePolicyFields } from './storageSchema';
 import { requireAdmin } from './security';
 import { mutationRef } from './refs';
@@ -34,7 +34,88 @@ type Policy = typeof defaultStoragePolicy & {
   lastVerifiedBackupAt?: number;
 };
 type Category = 'canonicalMemory' | 'history' | 'vectors' | 'cache' | 'operational';
-type Group = { category: Category; records: number; bytes: number };
+type Group = {
+  category: Category;
+  records: number;
+  bytes: number;
+  metadataBytes?: number;
+  payloadBytes?: number;
+};
+const MEASUREMENT_VERSION = 2;
+const emptyObjects = () => ({
+  objects: 0,
+  bytes: 0,
+  publishedColdObjects: 0,
+  publishedColdBytes: 0,
+  otherOrUnpublishedObjects: 0,
+  otherOrUnpublishedBytes: 0,
+  classificationLimitedObjects: 0,
+});
+
+type ClassificationBudget = { remainingReads: number };
+async function classifyStorageObject(
+  ctx: MutationCtx,
+  storageId: Id<'_storage'>,
+  budget: ClassificationBudget,
+) {
+  // A transaction shares eight classification reads, not eight per object.
+  // Each indexed lookup/get reads at most one document (max 1 MiB). Alongside
+  // the metadata page this stays below Convex's transaction read budget even
+  // for unusually large archive metadata. The main scan owns the sole paginate.
+  if (!budget.remainingReads) return { publishedCold: false, limited: true };
+  budget.remainingReads--;
+  const archives = await ctx.db
+    .query('coldHistoryArchives')
+    .withIndex('storage', (q) => q.eq('storageId', storageId))
+    .take(1);
+  if (archives[0]?.state === 'VERIFIED') return { publishedCold: true, limited: false };
+  if (!budget.remainingReads) return { publishedCold: false, limited: true };
+  budget.remainingReads--;
+  const chunks = await ctx.db
+    .query('coldHistoryChunks')
+    .withIndex('storage', (q) => q.eq('storageId', storageId))
+    .take(1);
+  const chunk = chunks[0];
+  if (chunk) {
+    if (!budget.remainingReads) return { publishedCold: false, limited: true };
+    budget.remainingReads--;
+    const archive = await ctx.db.get(chunk.archiveId);
+    const manifest = archive?.manifest as { version?: unknown; chunkCount?: unknown } | undefined;
+    if (
+      archive?.state === 'VERIFIED' &&
+      manifest?.version === 2 &&
+      typeof manifest.chunkCount === 'number' &&
+      chunk.index >= 0 &&
+      chunk.index < manifest.chunkCount
+    )
+      return { publishedCold: true, limited: false };
+  }
+  // Nonpublished prefixes can hide another shared published reference. Count
+  // every physical byte while making incomplete classification explicit.
+  return { publishedCold: false, limited: !!archives.length || !!chunks.length };
+}
+
+export async function summarizeStoredObjects(
+  ctx: MutationCtx,
+  page: { _id: Id<'_storage'>; size: number }[],
+) {
+  const objects = emptyObjects(),
+    budget = { remainingReads: 8 };
+  for (const object of page) {
+    const classification = await classifyStorageObject(ctx, object._id, budget);
+    objects.objects++;
+    objects.bytes += object.size;
+    if (classification.publishedCold) {
+      objects.publishedColdObjects++;
+      objects.publishedColdBytes += object.size;
+    } else {
+      objects.otherOrUnpublishedObjects++;
+      objects.otherOrUnpublishedBytes += object.size;
+    }
+    if (classification.limited) objects.classificationLimitedObjects++;
+  }
+  return objects;
+}
 const measuredTables: Array<[TableNames, Category]> = [
   ['memories', 'canonicalMemory'],
   ['messages', 'history'],
@@ -51,6 +132,14 @@ const measuredTables: Array<[TableNames, Category]> = [
   ['backupImports', 'history'],
   ['memoryEmbeddings', 'vectors'],
   ['modelMemoryVectors', 'vectors'],
+  ['embeddingCertificates', 'vectors'],
+  ['embeddingRestoreJobs', 'operational'],
+  ['embeddingScanJobs', 'operational'],
+  ['modelUsageBuckets', 'operational'],
+  ['modelCallReceipts', 'operational'],
+  ['federationPublicRateLimits', 'operational'],
+  ['federationDisclosurePolicy', 'operational'],
+  ['federationDisclosureAudit', 'history'],
   ['embeddingsCache', 'cache'],
   ['messageTranslations', 'cache'],
   ['messageTranslationPreferences', 'operational'],
@@ -75,6 +164,19 @@ const measuredTables: Array<[TableNames, Category]> = [
   ['backupLargeRows', 'operational'],
   ['backupLargeVisitEvidence', 'operational'],
   ['backupLargeGlobalMappings', 'operational'],
+  ['coldHistoryChunks', 'history'],
+  ['coldHistoryJobs', 'operational'],
+  ['coldHistoryMessageIds', 'operational'],
+  ['coldHistoryLocks', 'operational'],
+  ['coldBackupChecks', 'operational'],
+  ['coldBackupMessageIds', 'operational'],
+  ['coldArchiveDestinations', 'operational'],
+  ['coldArchiveMirrorJobs', 'operational'],
+  ['coldArchiveMirrorObjects', 'operational'],
+  ['memoryCompressionJobs', 'operational'],
+  ['memorySourceClaims', 'history'],
+  ['memorySummaryProvenance', 'history'],
+  ['memorySourceCorrections', 'history'],
 ];
 const cleanupTables: TableNames[] = [
   'embeddingsCache',
@@ -91,7 +193,7 @@ const cleanupTables: TableNames[] = [
 ];
 const groups = (): Group[] =>
   (['canonicalMemory', 'history', 'vectors', 'cache', 'operational'] as Category[]).map(
-    (category) => ({ category, records: 0, bytes: 0 }),
+    (category) => ({ category, records: 0, bytes: 0, metadataBytes: 0, payloadBytes: 0 }),
   );
 const budget = (policy: Policy, category: Category) =>
   ({
@@ -144,13 +246,16 @@ function evaluate(policy: Policy, usage: Group[]) {
     },
   };
 }
-export async function cacheWritesAllowed(ctx: MutationCtx) {
+export async function nonessentialWritesAllowed(ctx: MutationCtx) {
   const policy = await policyFor(ctx),
     snapshot = await ctx.db
       .query('storageUsageSnapshots')
       .withIndex('key', (q) => q.eq('key', 'local'))
       .unique();
   return !evaluate(policy, snapshot?.groups ?? groups()).nonessential.cacheWritesPaused;
+}
+export async function cacheWritesAllowed(ctx: MutationCtx) {
+  return nonessentialWritesAllowed(ctx);
 }
 export const rebuildBudget = internalQuery({
   args: { requestedBatchSize: v.number() },
@@ -220,7 +325,7 @@ async function startScan(ctx: MutationCtx) {
     .query('storageUsageScans')
     .withIndex('key', (q) => q.eq('key', 'local'))
     .unique();
-  if (previous?.state === 'RUNNING') {
+  if (previous?.state === 'RUNNING' && previous.measurementVersion === MEASUREMENT_VERSION) {
     if (previous.updatedAt <= Date.now() - 300000)
       await ctx.scheduler.runAfter(0, mutationRef('storagePolicy/scanPage'), {
         scanId: previous._id,
@@ -229,6 +334,7 @@ async function startScan(ctx: MutationCtx) {
     return previous._id;
   }
   const revision = (previous?.revision ?? 0) + 1;
+  const latestObject = await ctx.db.system.query('_storage').order('desc').first();
   const data = {
     key: 'local',
     state: 'RUNNING',
@@ -236,6 +342,9 @@ async function startScan(ctx: MutationCtx) {
     tableIndex: 0,
     cursor: null,
     groups: groups(),
+    objects: emptyObjects(),
+    measurementVersion: MEASUREMENT_VERSION,
+    storageCreationCutoff: latestObject?._creationTime ?? 0,
     startedAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -256,25 +365,53 @@ export const scanPage = internalMutation({
   handler: async (ctx, { scanId, revision }) => {
     const task = await ctx.db.get(scanId);
     if (!task || task.state !== 'RUNNING' || (task.revision ?? 0) !== revision) return;
-    const [table, category] = measuredTables[task.tableIndex];
-    const page = await ctx.db
-      .query(table)
-      .paginate({ cursor: task.cursor, numItems: PAGE, maximumBytesRead: 512000 });
-    const usage = task.groups as Group[],
-      group = usage.find((group) => group.category === category)!;
-    for (const record of page.page) {
-      group.records++;
-      group.bytes += estimateRecordBytes(record);
-      // Stored archive payloads are represented by their verified chunk descriptors.
-      if (table === 'backupLargeChunks') group.bytes += (record as Doc<'backupLargeChunks'>).bytes;
+    if (task.measurementVersion !== MEASUREMENT_VERSION) {
+      await startScan(ctx);
+      return;
     }
-    const tableIndex = task.tableIndex + (page.isDone ? 1 : 0),
-      done = tableIndex >= measuredTables.length;
+    const usage = task.groups as Group[];
+    const objects = task.objects ?? emptyObjects();
+    const objectPhase = task.tableIndex === measuredTables.length;
+    const pageOptions = { cursor: task.cursor, numItems: PAGE, maximumBytesRead: 512000 };
+    let isDone: boolean, continueCursor: string;
+    if (objectPhase) {
+      // System metadata is authoritative for physical bytes and enumerates each
+      // storageId once, including unpublished files and unreferenced uploads.
+      // Capture a creation cutoff; concurrent deletes may still change this
+      // paged estimate. No Blob, URL, private payload or signed body is read.
+      const page = await ctx.db.system
+        .query('_storage')
+        .withIndex('by_creation_time', (q) =>
+          q.lte('_creationTime', task.storageCreationCutoff ?? 0),
+        )
+        .paginate(pageOptions);
+      const group = usage.find((group) => group.category === 'history')!;
+      const summary = await summarizeStoredObjects(ctx, page.page);
+      for (const key of Object.keys(summary) as (keyof typeof summary)[])
+        objects[key] += summary[key];
+      group.bytes += summary.bytes;
+      group.payloadBytes = (group.payloadBytes ?? 0) + summary.bytes;
+      ({ isDone, continueCursor } = page);
+    } else {
+      const [table, category] = measuredTables[task.tableIndex];
+      const page = await ctx.db.query(table).paginate(pageOptions);
+      const group = usage.find((group) => group.category === category)!;
+      for (const record of page.page) {
+        const bytes = estimateRecordBytes(record);
+        group.records++;
+        group.bytes += bytes;
+        group.metadataBytes = (group.metadataBytes ?? 0) + bytes;
+      }
+      ({ isDone, continueCursor } = page);
+    }
+    const tableIndex = task.tableIndex + (isDone ? 1 : 0),
+      done = tableIndex > measuredTables.length;
     await ctx.db.patch(task._id, {
       groups: usage,
+      objects,
       tableIndex,
       revision: revision + 1,
-      cursor: page.isDone ? null : page.continueCursor,
+      cursor: isDone ? null : continueCursor,
       state: done ? 'COMPLETE' : 'RUNNING',
       updatedAt: Date.now(),
     });
@@ -286,6 +423,9 @@ export const scanPage = internalMutation({
       const data = {
         key: 'local',
         groups: usage,
+        objects,
+        measurementVersion: MEASUREMENT_VERSION,
+        storageCreationCutoff: task.storageCreationCutoff ?? 0,
         measuredAt: Date.now(),
         scanStartedAt: task.startedAt,
       };
@@ -321,7 +461,13 @@ export const status = query({
         groups: snapshot?.groups ?? groups(),
         measuredAt: snapshot?.measuredAt ?? null,
         scanStartedAt: snapshot?.scanStartedAt ?? null,
-        measurement: 'serialized-record-bytes',
+        measurement:
+          snapshot?.measurementVersion === MEASUREMENT_VERSION
+            ? 'serialized-record-estimate-plus-storage-object-size'
+            : 'serialized-record-bytes',
+        objects: snapshot?.objects ?? null,
+        consistency: 'paged-estimate-with-storage-creation-cutoff',
+        storageCreationCutoff: snapshot?.storageCreationCutoff ?? null,
         scanState: scan?.state ?? 'NOT_MEASURED',
       },
       ...evaluate(policy, snapshot?.groups ?? groups()),

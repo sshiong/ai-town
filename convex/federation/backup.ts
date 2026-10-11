@@ -46,6 +46,8 @@ import { validateConnection } from '../models/profiles';
 import { embeddingFingerprint } from '../models/compatibility';
 import { assertNoIdentityConflict } from './identityConflict';
 import { applyResidentRestore, residentRestoreConfirmation, residentRestorePlan } from './backupResident';
+import { memoryBackupTables, memoryBackupFields, repairMemoryBackupRow, skipMemoryBackupRow, validateMemoryBackupRelations } from './memoryBackup';
+import { portableVector, vectorFields, validateGenerationEvidence, validateVectorSource, trustedVectorSource } from './vectorEvidence';
 
 const mode = v.union(
   v.literal('restore'),
@@ -89,12 +91,20 @@ function sanitize(value: any): any {
       .map(([key, item]) => [key, sanitize(item)]),
   );
 }
-async function collect(db: DatabaseReader): Promise<Record<string, BackupRow[]>> {
+async function collect(db: DatabaseReader, includeVectors = false): Promise<Record<string, BackupRow[]>> {
   const rows: Record<string, BackupRow[]> = {};
   for (const name of [...dataTables, ...snapshotTables, 'federationIdentity', 'federationPeers']) {
     // Default archives preserve canonical memories; vectors require separately
     // verified compatibility before an explicit optional snapshot can be reused.
-    if (name === 'modelMemoryVectors') { rows[name] = []; continue; }
+    if (name === 'modelMemoryVectors') {
+      rows[name] = [];
+      const activeSpaceId = includeVectors ? (await db.query('modelSettings').withIndex('key', q => q.eq('key', 'town')).unique())?.activeEmbeddingSpaceId : undefined;
+      if (activeSpaceId) for (const vector of await db.query('modelMemoryVectors').withIndex('space', q => q.eq('spaceId', activeSpaceId)).take(501)) {
+        const portable = await portableVector(db, vector, true);
+        if (portable) rows[name].push(portable);
+      }
+      continue;
+    }
     rows[name] = (await db.query(table(name)).take(501)).map(sanitize);
   }
   for (const memory of rows.memories)
@@ -107,19 +117,20 @@ async function collect(db: DatabaseReader): Promise<Record<string, BackupRow[]>>
   return rows;
 }
 export const getTown = internalQuery({
-  args: { adminToken: v.string() },
+  args: { adminToken: v.string(), includeVectors: v.optional(v.boolean()) },
   handler: async (ctx, args): Promise<BackupBundle> => {
     requireAdmin(args.adminToken);
     const local = await identity(ctx);
     if (!local) throw new Error('INITIALIZE_IDENTITY_FIRST');
-    const bundle = await createBundle(local.townId, 'town', await collect(ctx.db));
+    const bundle = await createBundle(local.townId, 'town', await collect(ctx.db, args.includeVectors));
+    bundle.manifest.includeVectors = args.includeVectors ?? false;
     bundle.signature = await sign(bundle.manifest, local.privateKeyEncrypted);
     await validateBundle(bundle);
     return bundle;
   },
 });
 export const getResident = internalQuery({
-  args: { adminToken: v.string(), worldId: v.id('worlds'), playerId },
+  args: { adminToken: v.string(), worldId: v.id('worlds'), playerId, includeVectors: v.optional(v.boolean()) },
   handler: async (ctx, args): Promise<BackupBundle> => {
     requireAdmin(args.adminToken);
     const local = await identity(ctx);
@@ -200,8 +211,15 @@ export const getResident = internalQuery({
       (d) => d.worldId === args.worldId && d.agentId === agent.id,
     );
     rows.residentModelBindings = binding ? [binding] : [];
+    rows.federationDisclosurePolicy = await ctx.db.query('federationDisclosurePolicy')
+      .withIndex('agentGlobalId', q => q.eq('agentGlobalId', binding.agentGlobalId!)).take(2);
+    rows.federationDisclosureAudit = await ctx.db.query('federationDisclosureAudit')
+      .withIndex('resident_time', q => q.eq('agentGlobalId', binding.agentGlobalId!)).take(501);
     rows.chatProfiles = all.chatProfiles.filter((p) => p._id === binding?.chatProfileId);
     rows.memories = memories;
+    for (const table of memoryBackupTables) rows[table] = table === 'memorySourceClaims'
+      ? await ctx.db.query(table).withIndex('source_generation', q => q.eq('worldId', args.worldId).eq('playerId', args.playerId)).take(501)
+      : await ctx.db.query(table).withIndex('owner', q => q.eq('worldId', args.worldId).eq('playerId', args.playerId)).take(501);
     rows.federationAgentRuntimes = all.federationAgentRuntimes.filter(
       (r) => r.worldId === args.worldId && r.playerId === args.playerId,
     );
@@ -240,7 +258,13 @@ export const getResident = internalQuery({
       .withIndex('owner_transcript_page', q => q.eq('agentGlobalId', binding.agentGlobalId!)).take(501);
     rows.federationIdentity = all.federationIdentity;
     rows.federationPeers = [];
+    const activeSpaceId = args.includeVectors ? (await ctx.db.query('modelSettings').withIndex('key', q => q.eq('key', 'town')).unique())?.activeEmbeddingSpaceId : undefined;
+    if (activeSpaceId) for (const memory of memories) {
+      const vector = await ctx.db.query('modelMemoryVectors').withIndex('memory_space', q => q.eq('memoryId', memory._id).eq('spaceId', activeSpaceId)).unique();
+      if (vector) { const portable = await portableVector(ctx.db, vector, true); if (portable) rows.modelMemoryVectors.push(portable); }
+    }
     const bundle = await createBundle(local.townId, 'resident', rows);
+    bundle.manifest.includeVectors = args.includeVectors ?? false;
     bundle.signature = await sign(bundle.manifest, local.privateKeyEncrypted);
     await validateBundle(bundle);
     return bundle;
@@ -300,10 +324,19 @@ async function checkImport(
   const rows = Object.fromEntries(
     Object.entries(bundle.sections).map(([key, values]) => [key, values.map(decodeRow)]),
   );
+  const memoryRows = new Map(Object.entries(rows).flatMap(([table, values]) =>
+    values.map(row => [row._id as string, { table, row }] as const)));
+  for (const table of memoryBackupTables) for (const row of rows[table] ?? [])
+    await validateMemoryBackupRelations(table, row, async id => memoryRows.get(id) ?? null);
   for (const name of dataTables) {
     const definition = schema.tables[table(name)];
     for (const row of rows[name] ?? [])
-      validateFields(stripSystem(row), (definition.validator as unknown as { json: unknown }).json);
+      validateFields(stripSystem(name === 'modelMemoryVectors' ? vectorFields(row) : row), (definition.validator as unknown as { json: unknown }).json);
+  }
+  for (const vector of rows.modelMemoryVectors ?? []) {
+    if (!bundle.manifest.includeVectors) throw new Error('VECTOR_BACKUP_OPTION_REQUIRED');
+    await validateGenerationEvidence(vector);
+    await validateVectorSource(vector, rows.memories?.find(memory => memory._id === vector.memoryId) ?? null);
   }
   for (const profile of [...(rows.chatProfiles ?? []), ...(rows.embeddingProfiles ?? [])])
     validateConnection(profile as never);
@@ -474,6 +507,8 @@ export const importBackup = action({
     const bundle = await validateBundle(importBundle(args));
     // Review all canonical ownership and target constraints before creating storage objects.
     await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:checkPreflight'), args);
+    const vectorArchiveStorageId = bundle.manifest.includeVectors && (bundle.sections.modelMemoryVectors?.length ?? 0)
+      ? await ctx.storage.store(new Blob([JSON.stringify(bundle)], { type: 'application/json' })) : undefined;
     const preparedColdFiles: PreparedColdFile[] = [];
     let publicationStarted = false, acknowledged = false;
     try {
@@ -487,7 +522,7 @@ export const importBackup = action({
       }
       publicationStarted = true;
       const result = await ctx.runMutation(makeFunctionReference<'mutation'>('federation/backup:applyImport'), {
-        ...args, keys, preparedColdFiles,
+        ...args, keys, preparedColdFiles, vectorArchiveStorageId,
       });
       acknowledged = true;
       return result;
@@ -518,6 +553,7 @@ function mergePosition(map: WorldMap, occupied: Point[], desired: Point): Point 
 }
 const applyImportFields = {
   ...importArgs,
+  vectorArchiveStorageId: v.optional(v.id('_storage')),
   preparedColdFiles: v.optional(v.array(v.object({index:v.number(),storageId:v.id('_storage')}))),
   keys: v.optional(
     v.object({ publicKey: v.string(), privateKeyEncrypted: v.string(), fingerprint: v.string() }),
@@ -530,12 +566,17 @@ export async function applyBackupData(
   requireAdmin(args.adminToken);
   args = { ...args, bundle: importBundle(args) };
   if (args.mode === 'restore' && args.bundle?.manifest?.scope === 'resident') {
+    const source = decodeRow(args.bundle.sections.federationIdentity[0]);
+    const vectorSourceTrusted = !!args.bundle.signature && await trustedVectorSource(ctx.db, source as { townId: string; publicKey: string; fingerprint: string });
     const result = await applyResidentRestore(ctx, args);
     const bundle = await validateBundle(args.bundle);
     const coldFilesRestored = await restoreColdFiles(ctx,args.adminToken,bundle,result.mapping,args.preparedColdFiles);
+    const imported = await ctx.db.get(result.importId);
+    if (imported) await ctx.db.patch(imported._id, { manifest: { ...imported.manifest, vectorSourceTrusted, vectorArchiveStorageId: args.vectorArchiveStorageId } });
     return {...result,coldFilesRestored};
   }
   const { bundle, local, rows } = await checkImport(ctx, args);
+  const vectorSourceTrusted = !!bundle.signature && await trustedVectorSource(ctx.db, rows.federationIdentity[0] as { townId: string; publicKey: string; fingerprint: string });
   const mapping: Record<string, string> = {};
   const snapshots = Object.fromEntries(
     [...snapshotTables, 'federationIdentity', 'engines', 'worlds', 'federationAgentRuntimes'].map(
@@ -679,9 +720,13 @@ export async function applyBackupData(
       ? ['engines', 'worlds', 'worldStatus', 'maps', 'deploymentRecords', 'modelAudits', 'modelProviderQuotas', 'storagePolicies', 'federationActionFacts', 'federationEventFacts', 'federationResourcePolicy', 'federationResourceAudit', 'federationResidentPolicy', 'federationResidentPolicyAudit']
       : []),
   ]);
+  // Remap from sanitized source fields exactly once. A newly allocated target
+  // ID may equal another source ID, so remapping an already remapped row is unsafe.
+  const allocatedSourceFields = new Map<string, BackupRow>();
   for (const name of dataTables) {
     if (skip.has(name)) continue;
     for (const row of rows[name] ?? []) {
+      if (skipMemoryBackupRow(name, row)) continue;
       let fields = stripSystem(row);
       if (name === 'engines')
         // Runtime inputs are audit snapshots, not the new active input queue.
@@ -712,6 +757,8 @@ export async function applyBackupData(
         });
       }
       fields = restoredAutonomyFields(name, fields);
+      fields = memoryBackupFields(name, { ...fields, _creationTime: row._creationTime });
+      allocatedSourceFields.set(row._id, fields);
       const id = await ctx.db.insert(table(name), (name === 'federationIdentityKeyHistory' ? fields : remapValue(fields, mapping)) as never);
       mapping[row._id] = id;
     }
@@ -731,9 +778,10 @@ export async function applyBackupData(
     if (skip.has(name)) continue;
     for (const row of rows[name] ?? []) {
       if (!mapping[row._id]) continue;
-      const current = await ctx.db.get(mapping[row._id] as Id<typeof name>);
-      if (current)
-        await ctx.db.replace(current._id, (name === 'federationIdentityKeyHistory' ? stripSystem(current) : remapValue(stripSystem(current), mapping)) as never);
+      const fields = allocatedSourceFields.get(row._id);
+      if (fields)
+        await ctx.db.replace(mapping[row._id] as Id<typeof name>,
+          (name === 'federationIdentityKeyHistory' ? fields : remapValue(fields, mapping)) as never);
     }
   }
   // Repair original document-ID references (which were unresolved during allocation).
@@ -747,6 +795,10 @@ export async function applyBackupData(
           ),
         },
       });
+  const originalMemoryRows = new Map(Object.entries(rows).flatMap(([table, values]) =>
+    values.map(row => [row._id as string, { table, row }] as const)));
+  for (const table of memoryBackupTables) for (const row of rows[table] ?? [])
+    if (mapping[row._id]) await repairMemoryBackupRow(ctx, table, mapping[row._id], row, async id => originalMemoryRows.get(id) ?? null);
   for (const row of rows.federationAgentRuntimes ?? []) {
     const fields = remapValue(stripSystem(row), mapping);
     await ctx.db.insert('federationAgentRuntimes', {
@@ -811,7 +863,7 @@ export async function applyBackupData(
       createdAt: Date.now(),
     });
   }
-  await ctx.db.insert('backupImports', {
+  const importId = await ctx.db.insert('backupImports', {
     sourceTownId: bundle.manifest.sourceTownId,
     mode: args.mode,
     exportedAt: bundle.manifest.exportedAt,
@@ -819,7 +871,7 @@ export async function applyBackupData(
     sourceStoppedAt: args.mode === 'restore' || args.mode === 'migrate' ? Date.now() : undefined,
     mapping,
     runtimeSnapshot: snapshots,
-    manifest: bundle.manifest,
+    manifest: { ...bundle.manifest, vectorSourceTrusted, vectorArchiveStorageId: args.vectorArchiveStorageId },
   });
   await ensureEmbeddingSpace(ctx);
   // Same active space may already exist during a resident merge; explicitly reindex imported canonical text.
@@ -832,6 +884,7 @@ export async function applyBackupData(
   const coldFilesRestored = await restoreColdFiles(ctx,args.adminToken,bundle,mapping,args.preparedColdFiles);
   return {
     coldFilesRestored,
+    importId,
     mode: args.mode,
     worldIds: [...new Set((rows.worlds ?? []).map((w) => mapping[w._id]))],
     mapping,
@@ -875,22 +928,22 @@ async function recordExport(
 }
 
 export const exportTown = action({
-  args: { adminToken: v.string(), ...exportAttribution },
+  args: { adminToken: v.string(), includeVectors: v.optional(v.boolean()), ...exportAttribution },
   handler: async (ctx, args): Promise<BackupBundle> => {
     requireAdmin(args.adminToken);
     attribution(args);
-    const base: BackupBundle = await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getTown'), { adminToken: args.adminToken });
+    const base: BackupBundle = await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getTown'), { adminToken: args.adminToken, includeVectors: args.includeVectors });
     const bundle = await packColdFiles(ctx,args.adminToken,base);
     await recordExport(ctx, args, bundle);
     return bundle;
   },
 });
 export const exportResident = action({
-  args: { adminToken: v.string(), worldId: v.id('worlds'), playerId, ...exportAttribution },
+  args: { adminToken: v.string(), worldId: v.id('worlds'), playerId, includeVectors: v.optional(v.boolean()), ...exportAttribution },
   handler: async (ctx, args): Promise<BackupBundle> => {
     requireAdmin(args.adminToken);
     attribution(args);
-    const base: BackupBundle = await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getResident'), { adminToken: args.adminToken, worldId: args.worldId, playerId: args.playerId });
+    const base: BackupBundle = await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:getResident'), { adminToken: args.adminToken, worldId: args.worldId, playerId: args.playerId, includeVectors: args.includeVectors });
     const bundle = await packColdFiles(ctx,args.adminToken,base);
     await recordExport(ctx, args, bundle, { worldId: args.worldId, playerId: args.playerId });
     return bundle;

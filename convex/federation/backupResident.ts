@@ -11,6 +11,7 @@ import {
   validateBundle,
 } from './backupHelpers';
 import { validateSourceRow } from './backupLargeHelpers';
+import { validateGenerationEvidence, validateVectorSource } from './vectorEvidence';
 import { assertTownUnlocked } from './maintenanceLock';
 import { assertNoIdentityConflict } from './identityConflict';
 import { digest } from './security';
@@ -19,6 +20,8 @@ import { validateConnection } from '../models/profiles';
 import { blockedWithPositions } from '../aiTown/movement';
 import { WorldMap } from '../aiTown/worldMap';
 import { ACTION_TIMEOUT } from '../constants';
+import { MAX_DISCLOSURE_POLICIES } from './disclosurePolicySchema';
+import { memoryBackupTables, memoryBackupFields, repairMemoryBackupRow, skipMemoryBackupRow, validateMemoryBackupRelations } from './memoryBackup';
 
 export const residentRestoreConfirmation = v.object({
   expectedTargetDigest: v.string(),
@@ -33,6 +36,7 @@ type Args = {
   residentRestore?: Infer<typeof residentRestoreConfirmation>;
 };
 const supported = new Set([
+  ...memoryBackupTables,
   'worlds',
   'maps',
   'playerDescriptions',
@@ -44,6 +48,9 @@ const supported = new Set([
   'chatProfiles',
   'residentModelBindings',
   'memories',
+  'modelMemoryVectors',
+  'federationDisclosurePolicy',
+  'federationDisclosureAudit',
   'federationAgentRuntimes',
   'federationIdentity',
   'homeTravelTranscripts',
@@ -56,6 +63,8 @@ const sharedHistory = new Set([
   'messages',
 ]);
 const restoreTables = [
+  'federationDisclosurePolicy',
+  'federationDisclosureAudit',
   'playerDescriptions',
   'agentDescriptions',
   'archivedPlayers',
@@ -77,6 +86,12 @@ const profileFields = (row: BackupRow) => {
 
 /** Match logical history keys after a whole-town restore has remapped database IDs. */
 async function existingRow(ctx: QueryCtx | MutationCtx, name: string, row: BackupRow) {
+  if (name === 'federationDisclosurePolicy') return ctx.db.query('federationDisclosurePolicy')
+    .withIndex('agentGlobalId', q => q.eq('agentGlobalId', row.agentGlobalId)).unique();
+  if (name === 'federationDisclosureAudit') return ctx.db.query('federationDisclosureAudit')
+    .withIndex('resident_time', q => q.eq('agentGlobalId', row.agentGlobalId).eq('createdAt', row.createdAt))
+    .filter(q => q.and(q.eq(q.field('operator'), row.operator), q.eq(q.field('reason'), row.reason),
+      q.eq(q.field('previous'), row.previous), q.eq(q.field('next'), row.next))).unique();
   if (name === 'playerDescriptions')
     return ctx.db
       .query('playerDescriptions')
@@ -149,6 +164,11 @@ export async function residentRestorePlan(ctx: QueryCtx | MutationCtx, args: Arg
     if (values.length && !supported.has(name)) throw new Error('RESIDENT_BACKUP_SCOPE_MISMATCH');
     for (const row of values) validateSourceRow(name, row);
   }
+  for (const vector of rows.modelMemoryVectors ?? []) {
+    if (!bundle.manifest.includeVectors) throw new Error('VECTOR_BACKUP_OPTION_REQUIRED');
+    await validateGenerationEvidence(vector);
+    await validateVectorSource(vector, rows.memories?.find(memory => memory._id === vector.memoryId) ?? null);
+  }
   const source = rows.federationIdentity[0],
     local = await identity(ctx);
   if (
@@ -191,6 +211,13 @@ export async function residentRestorePlan(ctx: QueryCtx | MutationCtx, args: Arg
   )
     throw new Error('RESIDENT_BACKUP_OWNER_MISMATCH');
   validateConnection(profile as never);
+  if ((rows.federationDisclosurePolicy?.length ?? 0) > 1 ||
+    [...(rows.federationDisclosurePolicy ?? []), ...(rows.federationDisclosureAudit ?? [])].some(row => row.agentGlobalId !== binding.agentGlobalId))
+    throw new Error('RESIDENT_BACKUP_OWNER_MISMATCH');
+  if (rows.federationDisclosurePolicy?.length &&
+    !await ctx.db.query('federationDisclosurePolicy').withIndex('agentGlobalId', q => q.eq('agentGlobalId', binding.agentGlobalId)).unique() &&
+    (await ctx.db.query('federationDisclosurePolicy').take(MAX_DISCLOSURE_POLICIES)).length >= MAX_DISCLOSURE_POLICIES)
+    throw new Error('DISCLOSURE_POLICY_CAPACITY_EXCEEDED');
   if (
     agent.travelVisitId ||
     agent.suspendedPlayer ||
@@ -228,6 +255,14 @@ export async function residentRestorePlan(ctx: QueryCtx | MutationCtx, args: Arg
       values.map((row) => [row._id, { name, row }] as const),
     ),
   );
+  for (const name of memoryBackupTables) for (const row of rows[name] ?? []) {
+    if (row.worldId !== sourceWorld._id || row.playerId !== binding.playerId ||
+      (row.agentGlobalId && row.agentGlobalId !== binding.agentGlobalId)) throw new Error('RESIDENT_BACKUP_OWNER_MISMATCH');
+    await validateMemoryBackupRelations(name, row, async id => {
+      const target = byId.get(id);
+      return target ? { table: target.name, row: target.row } : null;
+    });
+  }
   for (const [name, values] of Object.entries(rows))
     for (const row of values) {
       if (row.worldId && row.worldId !== sourceWorld._id)
@@ -431,6 +466,22 @@ export async function residentRestorePlan(ctx: QueryCtx | MutationCtx, args: Arg
     memoryTargets.set(memory._id, existing);
     if (existing) mapping[memory._id] = existing._id;
   }
+  const memoryState: Record<string, BackupRow[]> = {};
+  for (const name of memoryBackupTables) {
+    memoryState[name] = bounded<BackupRow>(name === 'memorySourceClaims'
+      ? await ctx.db.query(name).withIndex('source_generation', q => q.eq('worldId', targetWorldId).eq('playerId', binding.playerId)).take(501)
+      : await ctx.db.query(name).withIndex('owner', q => q.eq('worldId', targetWorldId).eq('playerId', binding.playerId)).take(501));
+    for (const row of rows[name] ?? []) {
+      if (skipMemoryBackupRow(name, row)) continue;
+      let existing = memoryState[name].find(target => target._id === row._id);
+      if (!existing) for (const record of priorImports) {
+        if (record.mapping?.[sourceWorld._id] !== targetWorldId) continue;
+        existing = memoryState[name].find(target => target._id === record.mapping?.[row._id]);
+        if (existing) break;
+      }
+      if (existing) mapping[row._id] = existing._id;
+    }
+  }
   const profiles = bounded(await ctx.db.query('chatProfiles').take(501));
   const profileDigest = await digest(profileFields(profile));
   let targetProfile: BackupRow | undefined;
@@ -472,6 +523,7 @@ export async function residentRestorePlan(ctx: QueryCtx | MutationCtx, args: Arg
     binding: homeBinding,
     runtime,
     memories: targetMemories,
+    memoryState,
     history: targets,
     profiles,
   };
@@ -496,6 +548,7 @@ export async function residentRestorePlan(ctx: QueryCtx | MutationCtx, args: Arg
     homeBinding,
     runtime,
     memoryTargets,
+    memoryState,
     mapping,
     targets,
     snapshot,
@@ -672,6 +725,32 @@ export async function applyResidentRestore(ctx: MutationCtx, args: Args) {
         mapping[row._id] = existing._id;
       } else mapping[row._id] = await ctx.db.insert(tableName(name), fields as never);
     }
+  // Fence target work before replacing its observations; expired action results
+  // cannot revive a restored claim or append a summary to this new snapshot.
+  for (const job of plan.memoryState.memoryCompressionJobs ?? [])
+    if (['CAPTURING', 'READY', 'RUNNING'].includes(job.state)) await ctx.db.replace(job._id, memoryBackupFields('memoryCompressionJobs', job) as never);
+  for (const claim of plan.memoryState.memorySourceClaims ?? [])
+    if (claim.state === 'CLAIMED') await ctx.db.delete(claim._id);
+  for (const name of memoryBackupTables) for (const row of rows[name] ?? []) {
+    if (skipMemoryBackupRow(name, row)) continue;
+    const fields = remapValue(memoryBackupFields(name, row), mapping);
+    let existing = mapping[row._id] ? await ctx.db.get(mapping[row._id] as Id<typeof name>) : null;
+    if (!existing && name === 'memorySummaryProvenance') existing = await ctx.db.query(name)
+      .withIndex('summary', q => q.eq('summaryMemoryId', fields.summaryMemoryId)).unique();
+    if (!existing && name === 'memorySourceCorrections') existing = await ctx.db.query(name)
+      .withIndex('source_order', q => q.eq('worldId', fields.worldId).eq('playerId', fields.playerId)
+        .eq('sourceKey', fields.sourceKey).eq('correctionOrder', fields.correctionOrder)).first();
+    if (!existing && name === 'memorySourceClaims') existing = await ctx.db.query(name)
+      .withIndex('source_generation', q => q.eq('worldId', fields.worldId).eq('playerId', fields.playerId)
+        .eq('sourceKey', fields.sourceKey).eq('generation', fields.generation)).unique();
+    mapping[row._id] = existing?._id ?? await ctx.db.insert(name, fields as never);
+  }
+  for (const name of memoryBackupTables) for (const row of rows[name] ?? [])
+    if (mapping[row._id]) await ctx.db.replace(mapping[row._id] as Id<typeof name>, remapValue(memoryBackupFields(name, row), mapping) as never);
+  const originalMemoryRows = new Map(Object.entries(rows).flatMap(([table, values]) =>
+    values.map(row => [row._id as string, { table, row }] as const)));
+  for (const name of memoryBackupTables) for (const row of rows[name] ?? [])
+    if (mapping[row._id]) await repairMemoryBackupRow(ctx, name, mapping[row._id], row, async id => originalMemoryRows.get(id) ?? null);
   await ctx.db.patch(importId, { mapping });
   for (const row of rows.memories ?? [])
     await ctx.scheduler.runAfter(

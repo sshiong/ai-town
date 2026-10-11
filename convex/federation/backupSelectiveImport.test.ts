@@ -1,4 +1,6 @@
 import * as selectiveImportFunctions from './backupSelectiveImport';
+import { seedMemoryBackupEvidence, assertMemoryBackupEvidence, useLegacyMemoryBackupDigests } from './memoryBackupTestHelpers';
+import { captureSource } from '../agent/memorySources';
 import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
@@ -290,6 +292,46 @@ async function apply(f: Fixture, jobId: Id<'backupLargeJobs'>) {
   });
   return drive(f, jobId);
 }
+
+test.each(['current', 'changed source', 'legacy digest'])('memory provenance selected reflection imports %s complete source evidence repeatably', async variant => {
+  const source = await fixture('memory-source', 1);
+  await source.t.run(async ctx => {
+    await ctx.db.patch(source.memories[0], { data: { type: 'travel', eventId: 'memory-evidence', visitId: 'fixture-visit', hostTownId: 'fixture-host', participants: [], occurredAt: 1 } });
+    await seedMemoryBackupEvidence(ctx, source.memories[0]);
+  });
+  if (variant === 'changed source') await source.t.run(ctx => ctx.db.patch(source.memories[0], { description: 'Corrected retained original' }));
+  if (variant === 'legacy digest') await source.t.run(ctx => useLegacyMemoryBackupDigests(ctx));
+  const exported = await archive(source, { scope: 'memories-only', categories: ['reflection'] });
+  const target = await fixture('memory-target', 0);
+  const configured = options(target, exported, 'merge');
+  const firstId = await start(target, exported, configured);
+  await apply(target, firstId);
+  const first = await target.t.run(ctx => assertMemoryBackupEvidence(ctx, false, variant !== 'changed source'));
+  expect(first.memory._id).not.toBe(source.memories[0]);
+  expect(first.memory.agentGlobalId).toBe(target.globals[0]);
+  await target.t.action(aa('advanceImport'), { adminToken, jobId: firstId });
+  expect(await target.t.run(ctx => assertMemoryBackupEvidence(ctx, false, variant !== 'changed source'))).toEqual(first);
+});
+
+test('memory provenance cannot skip an external evidence edge to legitimize an owned summary', async () => {
+  const f = await fixture('memory-source', 1);
+  await f.t.run(async ctx => {
+    const travel = { type: 'travel' as const, eventId: 'memory-evidence', visitId: 'fixture-visit', hostTownId: 'fixture-host', participants: [], occurredAt: 1 };
+    await ctx.db.patch(f.memories[0], { data: travel });
+    const seeded = await seedMemoryBackupEvidence(ctx, f.memories[0]);
+    await ctx.db.patch(f.privateMemory, { data: { ...travel, eventId: 'foreign-evidence' } });
+    const foreign = (await ctx.db.get(f.privateMemory))!;
+    const source = await captureSource(ctx.db, foreign, { worldId: f.worldId, playerId: 'p:1', agentGlobalId: f.globals[1] });
+    const provenance = (await ctx.db.query('memorySummaryProvenance').first())!;
+    await ctx.db.patch(provenance._id, { sources: [source] });
+    await ctx.db.patch(provenance.jobId, { sources: [source] });
+    await ctx.db.patch(seeded.summaryMemoryId, { data: { type: 'reflection', relatedMemoryIds: [foreign._id] } });
+  });
+  const exported = await archive(f, { scope: 'memories-only', categories: ['reflection'] });
+  const target = await fixture('memory-target', 0), configured = options(target, exported, 'merge');
+  configured.externalReferences = [{ sourceId: f.privateMemory, sourceAgentGlobalId: f.globals[0], operation: 'skip-edge' }];
+  await expectPreflightFailure(target, exported, configured, 'BACKUP_MEMORY_REFERENCE_MISSING');
+});
 async function signedConversation(f: Fixture, index = 0, firstText?: string, count = 3, chunked = false, disjointAuthors = false) {
   const conversationId: `c:${number}` = `c:${40 + index}`;
   const memoryId = await f.t.run(async ctx => {

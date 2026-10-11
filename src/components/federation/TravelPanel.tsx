@@ -4,6 +4,7 @@ import AutonomyPanel from './AutonomyPanel';
 import SocialHistoryPanel from './SocialHistoryPanel';
 import TravelAuditPanel from './TravelAuditPanel';
 import VisitorQueuePanel from './VisitorQueuePanel';
+import DisclosurePolicyPanel from './DisclosurePolicyPanel';
 import { useConvex, useQuery } from 'convex/react';
 import { makeFunctionReference, type FunctionArgs, type FunctionReturnType } from 'convex/server';
 import { adminErrorSummary, deadlineRemaining, isOpenVisit, isReadyDestination, safeReturnSummary, eventProgressSummary } from './uiPolicy';
@@ -361,6 +362,7 @@ export default function TravelPanel({ adminToken }: { adminToken: string }) {
           </ul>
         </>
       )}
+      <DisclosurePolicyPanel adminToken={adminToken} />
       <AutonomyPanel adminToken={adminToken} />
       <SocialHistoryPanel adminToken={adminToken} />
       <TravelAuditPanel adminToken={adminToken} />

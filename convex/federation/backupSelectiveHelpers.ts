@@ -12,6 +12,7 @@ import {
 } from './backupLargeHelpers';
 import { digest, verifySignature } from './security';
 import { validateColdLargeRow } from './coldLarge';
+import { memoryBackupTables } from './memoryBackup';
 
 export const selectiveScope = v.union(
   v.literal('agent-one'),
@@ -73,6 +74,7 @@ export const residentTables = [
   'archivedAgents',
   'federationAgentRuntimes',
   'autonomousTravelPolicies',
+  'federationDisclosurePolicy',
 ] as const;
 export const historyTables = [
   'archivedConversations',
@@ -85,12 +87,15 @@ export const historyTables = [
   'federationActionFacts',
   'federationEventFacts',
   'federationTravelAudit',
+  'federationDisclosureAudit',
 ] as const;
 export const selectiveTables = [
   ...configTables,
   ...residentTables,
   'memories',
+  ...memoryBackupTables,
   ...historyTables,
+  'modelMemoryVectors',
 ] as const;
 export type PublicParticipant = {
   worldId: string;
@@ -169,7 +174,7 @@ export type SelectiveManifest = {
   exportedAt: number;
   scope: SelectiveScope;
   selection: Selection;
-  includeVectors: false;
+  includeVectors?: boolean;
   usage: 'read-only-archive' | 'selective-transfer';
   operator: string;
   reason: string;
@@ -275,7 +280,7 @@ export async function validateSelectiveManifest(m: SelectiveManifest, signature:
     ![1, 2].includes(m.version) ||
     m.schemaVersion !== 1 ||
     (m.version === 1 ? m.usage !== 'read-only-archive' : m.usage !== 'selective-transfer') ||
-    m.includeVectors !== false ||
+    (m.includeVectors !== undefined && typeof m.includeVectors !== 'boolean') ||
     m.scope !== m.selection?.scope ||
     typeof m.exportId !== 'string' ||
     !m.exportId ||
@@ -310,6 +315,7 @@ export async function validateSelectiveManifest(m: SelectiveManifest, signature:
       typeof c.digest !== 'string'
     )
       throw new Error('INVALID_SELECTIVE_DESCRIPTOR');
+    if (c.table === 'modelMemoryVectors' && c.count && !m.includeVectors) throw new Error('VECTOR_BACKUP_OPTION_REQUIRED');
     bytes += c.bytes;
     if (c.table === 'coldHistoryFiles' && c.count !== 1) throw new Error('BACKUP_COLD_FILES_SINGLE_FILE_CHUNK_REQUIRED');
   }

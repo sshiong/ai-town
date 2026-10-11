@@ -1,4 +1,5 @@
 import { configuredTimePolicy, type TimePolicy } from './timePolicy';
+import { addressPolicy, parseAddress } from './networkPolicy';
 export const PROTOCOL = 'ai-town-federation/1';
 export const MESSAGE_MAX_BYTES = 64 * 1024;
 export const CLOCK_SKEW_MS = 30_000;
@@ -68,6 +69,7 @@ export function normalizeEndpoint(input: string): string {
   if (url.username || url.password || url.search || url.hash) throw new Error('INVALID_ENDPOINT');
   const host = url.hostname.toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost') || /^127\./.test(host) || host === '[::1]' || /^169\.254\./.test(host) || host.startsWith('[::ffff:7f') || host.startsWith('[::ffff:127.') || host === '0.0.0.0') throw new Error('ENDPOINT_NOT_ALLOWED');
+  if (parseAddress(host) && addressPolicy(host) === 'forbidden') throw new Error('ENDPOINT_NOT_ALLOWED');
   if (!['', '/', '/federation/v1', '/federation/v1/'].includes(url.pathname)) throw new Error('INVALID_ENDPOINT_PATH');
   return `${url.origin}/federation/v1`;
 }

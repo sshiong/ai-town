@@ -8,10 +8,13 @@ import { api } from '../../../convex/_generated/api';
 import RecoveryPanel from './RecoveryPanel';
 import ArchivePanel from './ArchivePanel';
 import IdentityRecoveryPanel from './IdentityRecoveryPanel';
+import MemoryCompressionPanel from './MemoryCompressionPanel';
 import StoragePolicyPanel from './StoragePolicyPanel';
 import MigrationPanel from './MigrationPanel';
 import SelectiveExportPanel from './SelectiveExportPanel';
 import SelectiveImportPanel from './SelectiveImportPanel';
+import EmbeddingPanel, { VectorExportOption } from './EmbeddingPanel';
+import { declaredBackupSource } from './embeddingUiPolicy';
 import {
   AdminButton,
   downloadBundle,
@@ -75,6 +78,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
   const [result, setResult] =
     useState<FunctionReturnType<typeof api.federation.backup.importBackup>>();
   const [encryptDownloads, setEncryptDownloads] = useState(false);
+  const [includeVectors, setIncludeVectors] = useState(false);
   const [exportOperator, setExportOperator] = useState('');
   const [exportReason, setExportReason] = useState('');
   const [exportPassphrase, setExportPassphrase] = useState('');
@@ -140,6 +144,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
     setResult(undefined);
     setAcknowledged(false);
   }
+  const declaredSource = declaredBackupSource(bundle);
   return (
     <section className="admin-panel">
       <h2>{t('Data & backups')}</h2>
@@ -150,6 +155,11 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
       </p>
       <TaskFeedback task={task} />
       <h3>{t('Export')}</h3>
+      <VectorExportOption
+        checked={includeVectors}
+        onChange={setIncludeVectors}
+        disabled={!!task.pending}
+      />
       <div className="admin-form">
         <Field label={t('Export operator')}>
           <input
@@ -229,6 +239,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                 await saveSnapshot(
                   await convex.action(api.federation.backup.exportTown, {
                     adminToken,
+                    includeVectors,
                     operator: exportOperator.trim(),
                     reason: exportReason.trim(),
                   }),
@@ -264,6 +275,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                 await saveSnapshot(
                   await convex.action(api.federation.backup.exportResident, {
                     adminToken,
+                    includeVectors,
                     operator: exportOperator.trim(),
                     reason: exportReason.trim(),
                     worldId: resident.worldId,
@@ -496,6 +508,19 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
           {filename}
         </p>
       )}
+      {declaredSource && (
+        <p className="admin-muted">
+          {t('Declared source: ')}
+          {declaredSource.townId}
+          {t(' · signing-key fingerprint:')}
+          <code>{declaredSource.fingerprint}</code>
+          {t(' · optional vectors: ')}
+          {declaredSource.includeVectors ? t('included') : t('omitted')}
+          {t(
+            '. The server verifies the signature; local trust and vector compatibility are checked separately after import.',
+          )}
+        </p>
+      )}
       <div className="admin-toolbar">
         <AdminButton
           disabled={
@@ -692,9 +717,11 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
         )}
       </details>
       <ArchivePanel adminToken={adminToken} />
+      <EmbeddingPanel adminToken={adminToken} initialImportId={result?.importId} />
       <IdentityRecoveryPanel adminToken={adminToken} />
       <MigrationPanel adminToken={adminToken} />
       <StoragePolicyPanel adminToken={adminToken} />
+      <MemoryCompressionPanel adminToken={adminToken} />
     </section>
   );
 }

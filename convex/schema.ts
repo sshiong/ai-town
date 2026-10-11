@@ -1,6 +1,7 @@
 import { messageTranslationTables } from './messageTranslationSchema';
 import { defineSchema, defineTable } from 'convex/server';
 import { v } from 'convex/values';
+import { memoryCompressionTables } from './agent/memoryCompressionSchema';
 import { agentTables } from './agent/schema';
 import { aiTownTables } from './aiTown/schema';
 import { conversationId, playerId } from './aiTown/ids';
@@ -15,6 +16,7 @@ import { identityRecoveryTables } from './federation/identityRecoverySchema';
 import { storagePolicyTables } from './federation/storageSchema';
 import { endpointTables } from './federation/endpointsSchema';
 import { coldHistoryTables } from './federation/coldHistorySchema';
+import { coldArchiveTables } from './federation/coldArchiveSchema';
 import { residentPolicyTables } from './federation/residentPolicySchema';
 
 export default defineSchema({
@@ -35,6 +37,7 @@ export default defineSchema({
     .index('messageUuid', ['conversationId', 'messageUuid']),
 
   ...agentTables,
+  ...memoryCompressionTables,
   ...aiTownTables,
   ...engineTables,
   ...federationTables,
@@ -47,5 +50,6 @@ export default defineSchema({
   ...storagePolicyTables,
   ...endpointTables,
   ...coldHistoryTables,
+  ...coldArchiveTables,
   ...residentPolicyTables,
 });

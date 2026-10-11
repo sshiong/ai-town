@@ -171,3 +171,37 @@ P02 的 v2 冷档独立恢复和浏览器完整链路实际通过：隔离 D/E �
 管理员恢复分两步：显式确认服务器已重新同步 UTC 后，只允许已保存 lease+margin 的期限返乡（returnClockConfirmedAt），新准入/续租/Host 动作仍锁定；等所有访问结束后才允许完整解锁。后续回拨或 observation gap 会撤销 return-only 证明。这避免 Home 时钟锁定且 Host 永久离线时，必须先结束访问才能证明安全期限的互等。确认 UTC 不是 Host 清理证明，不能把 checkbox 写成签名 cleanup。缺本地 clock 观察的旧旅行灾备恢复要求先明确 UTC 确认；resident 选择性同镇恢复既有 source/target HOME_ACTIVE、无 visit 门禁继续保留。
 
 首轮核心检查最终 5 套件、159 项通过，Convex TypeScript 检查通过。之后补入保守 margin 的新访问/改配置/续租、普通/大型备份 saved margin 与缺 clock 证明、以及两阶段恢复组合测试；这些新增检查的最终结果待追加。没有部署或真实校时/进程故障演练。本策略仍依赖可信节点正确同步 UTC（误差上限 30s）；墙钟自观察和保守单次跳变 margin 不能证明持续漂移或任意错误时钟的上限。V03/V04 的真实时钟/分区/宕机组合与长期运行仍未据此关闭。
+
+## C08 网络边界与访客披露实现检查点（2026-10-11）
+
+联邦出站改由 `nodeNetworkRequest/send` 的 Node internalAction 执行：每次请求重新解析域名，检查全部地址，随后用自定义 socket lookup 将本次连接固定到一个已经检查的地址。TLS 的 Host、SNI 和证书域名校验保留原始域名，IP 字面量仍要求有效的 IP SAN 证书；禁用连接池复用，不跟随重定向，不自动降级 HTTP。解析/连接/响应读取共享超时，响应上限继续为 64 KiB。默认 Convex runtime 的 fetch 没有 DNS 固定接口，因此没有以“先查 DNS 再 fetch”冒充防重绑定。已信任 Town 的签名/MAC、部署代数及 ACK 核验继续独立生效，DNS 地址变化不能改变信任身份或覆盖 peer 公钥。
+
+LAN/VPN 地址需要部署管理员通过 `FEDERATION_PRIVATE_NETWORK_ALLOWLIST` 明确填写逗号分隔 CIDR，例如批准自己的 LAN 子网、CGNAT VPN 子网或 IPv6 ULA 子网；清单只能落在 RFC1918、100.64.0.0/10 或 fc00::/7 内，不接受公网或跨出私网父网段的广泛授权。回环、链路本地、组播、未指定/保留地址、IPv6 转换/隧道目标及已知云元数据地址始终拒绝，清单不能解除这些禁止。检查全部 DNS 结果，所以混合“公网+禁止地址”的域名也会拒绝。没有配置清单时私网地址返回 PRIVATE_ENDPOINT_NOT_AUTHORIZED；配置清单不会创建 VPN/路由，Convex 云环境是否实际能到达私网仍取决于部署条件。
+
+公开 pairing 在解析/验签之前持久消耗来源预算，来源仅取 Convex `ctx.meta.getRequestMetadata().ip`，不信任请求者提交的转发 Header。按来源 IP、IPv4 /24 或 IPv6 /64 前缀以及全局预算限制，申请 Town 声明和本地发起账户另有预算；账户未登录时使用共享本地管理员预算。health 使用独立计数器及来源/前缀/全局预算，429 返回 Retry-After。计数器按分钟窗口有界保存和清理；health 保留配对身份所需的签名协议/身份/部署信息，不再披露候选地址或内网入口。
+
+Home 为每位居民保存 PUBLIC / FRIEND_TOWNS / WHITELIST 披露策略。出发时只构造姓名、外观、公开简介和 Home 镇名；未获简介披露权限的目的地收到空简介。FRIEND_TOWNS 仅向 TRUSTED 节点披露（当前互访本身也要求 TRUSTED），WHITELIST 使用精确 Town ID 清单。默认 PUBLIC 保留既有公开简介行为；策略不会复制记忆、模型设置/密钥或管理员审计原因，也不会撤销已有租约。Travel 管理页提供设置入口；新策略只影响之后的出发，已发送的简介不会自动从远端删除。备份恢复必须随居民身份映射保存披露策略，避免隐私选择因恢复丢失而退回 PUBLIC。
+
+本检查点列明代码实现，未把定向测试或真实部署当作已通过。新增测试覆盖全部 DNS 结果检查、固定 TLS lookup、解析超时后禁止迟到连接、IPv6 VPN、重定向/响应大小、来源/前缀/账户/town 限流及披露过滤。既有协议集成测试只在测试模块内模拟 Node 网络边界，不是实际 DNS/TLS/VPN 证明。Node action 部署、真实证书/域名切换、真实 IPv4/IPv6/VPN 可达性及自托管 Convex 请求来源元数据仍需独立部署验收；运行环境若不支持 Node DNS/socket 能力必须保持失败，不得退回未固定 DNS 的 fetch。
+
+
+## 当前整合检查（2026-10-11）
+
+继对话翻译检查点 `e376d4b` 后，正在整合 C07/C08/C09/C10，而非将已有专项测试视为全方案完成。
+
+- Root 补入新模型用量、证书/重建任务、公开限流和披露策略/审计的存储分类。当前存储专项 11 项通过，包括实际对象字节、共享引用去重和新记录计量；现有 lint 警告仍存在。
+- 外部冷存储新增 Node 请求层与服务器环境绑定，使用 HTTPS、每次 DNS 全结果核验与固定 socket、AWS SigV4 签名、2 MB 有界对象、上传后逐字节读回。5 项测试使用注入 socket 验证策略与读回，不是真实 S3/MinIO 验收。签名格式依据 [AWS S3 单请求认证说明](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sig-v4-header-based-auth.html)。
+- 外部请求层已接通管理员归档任务、逐片持久断点、失败重试、取消及中英管理界面；签名根对象最后上传，原本地归档保留。Node 层 5 项、实际签名归档任务 5 项与存储策略 11 项合计通过。前两套使用注入网络结果，不能作为真实 S3 证明。已建立独立 MinIO 实验环境，其官方客户端 8 项真实操作通过；应用端真实上传正在验收，没有配置用户云存储。
+- C09 证书选择与恢复绑定、C10 摘要来源证据和备份映射修复已经进入本轮冻结。官方 codegen、前后端类型检查及前端构建通过。全量 Jest 首次为 66 套通过、一套大备份的 6 项失败；修正旧测试数据假设后，大备份整套 45 项复测通过，生产表顺序校验没有放宽。组合证据覆盖全部 67 套、817 项；前端 7 套、55 项另行复测通过，已经包含在上述总数内。
+- 隔离 D 已部署集成代码。实际 registered Node action、默认拒绝 loopback/metadata/未授权私网均有运行证据。裸自托管后端会将客户端 X-Forwarded-For 纳入平台来源元数据，来源不可伪造这一项当前不通过；需要受控入口覆盖转发头，并阻止外部绕过入口直达后端。全局预算保留，不能用此前模块测试代替实际入口保障。
+- 当前批次尚未提交；真实冷归档、记忆压缩和向量证书联调，以及原 V01–V11 验证矩阵仍需完成。上述专项结果不关闭全方案目标。
+
+### 后续实际证据
+
+隔离 D/E 的真实记忆来源链已通过：现有 Ollama qwen3.5:4b 经正式异步压缩处理 4 份原文，生成 2 份带主观来源证明的摘要；追加 1 份纠正后，关联摘要不再 current。签名居民导出、正式同居民恢复及跨镇 merge 保留原文、纠正和失效状态，原全局设置及原居民绑定摘要相同。模型桥接恢复后由正式任务自然重试，没有清除 claim/permit。详见 `FEDERATION-MEMORY-PROVENANCE-VALIDATION.zh-CN.md`。这不证明完整向量兼容认证、复用或重建已通过。
+
+冷归档实际 Node 请求在隔离 E 遇到 UNABLE_TO_VERIFY_LEAF_SIGNATURE；私有诊断证明 action 没有继承外部 NODE_EXTRA_CA_CERTS。官方 mc 的成功仍不能替代应用端 TLS/签名上传。正在补入服务器配置的附加 CA 信任，并保持默认根、证书身份核验与 rejectUnauthorized；错误证书不得借此绕过验证，应用端验收仍未通过。
+
+上述 CA 问题随后已由正式 `serverTlsTrust` 共用配置修复，5 套相关回归 70 项通过。E 实际 S3 全链 9 项通过，包含停机/恢复重试、根文件最后、取消终态和官方 mc 独立读回，原件及身份/世界/main 指纹不变。详见 `FEDERATION-COLD-MIRROR-VALIDATION.zh-CN.md`。这不覆盖公网、服务器重启续作或所有浏览器操作。
+
+D/E 实际可信 Ollama 证书的最小链均通过：权重 artifact/pipeline/provider 证据、1024 维查询/文档样例一致、正式正向兼容和单个合成向量复制保留生成证书。仅自报权重仍 UNKNOWN，原未证书化活动空间仍要求重建；没有激活新空间或改全局配置。详见 `FEDERATION-EMBEDDING-CERTIFICATE-VALIDATION.zh-CN.md`。完整备份向量导入、全局切换及重建验收仍需独立证据。

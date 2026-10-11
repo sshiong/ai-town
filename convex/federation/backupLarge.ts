@@ -53,6 +53,10 @@ import { rowMetadata, relationKey, leaseEvidence } from './backupLargeHelpers';
 import { validateConnection } from '../models/profiles';
 import { defaultStoragePolicy } from './storagePolicy';
 import { embeddingFingerprint } from '../models/compatibility';
+import { portableVector, validateGenerationEvidence, validateVectorSource, trustedVectorSource } from './vectorEvidence';
+import { isMemoryBackupTable, memoryBackupFields, repairMemoryBackupPage, skipMemoryBackupRow, validateMemoryBackupRelations } from './memoryBackup';
+import { memorySourceDigest } from '../models/embeddingDataRevision';
+import { sourceContentDigest } from '../agent/memorySources';
 import { assertNoIdentityConflict } from './identityConflict';
 import { attribution, exportAttribution } from './backupExportAudit';
 
@@ -138,7 +142,7 @@ export const listJobs = query({
   },
 });
 export const startExport = mutation({
-  args: { adminToken: v.string(), ...exportAttribution },
+  args: { adminToken: v.string(), includeVectors: v.optional(v.boolean()), ...exportAttribution },
   handler: async (ctx, a) => {
     requireAdmin(a.adminToken);
     const declared = attribution(a);
@@ -158,7 +162,7 @@ export const startExport = mutation({
       createdAt: now,
       updatedAt: now,
       source: sanitizeLargeValue(local),
-      metadata: { exportAttribution: declared },
+      metadata: { exportAttribution: declared, includeVectors: a.includeVectors ?? false },
     });
     await ctx.db.insert('backupMaintenanceLocks', { key: 'town', jobId, createdAt: now });
     return { jobId };
@@ -182,10 +186,14 @@ export const page = internalQuery({
       for (const archive of result.page) archives.push({archive,owner:await coldLargeOwner(ctx,archive,process.env.FEDERATION_ADMIN_TOKEN ?? '')});
       return {table:name,...result,rows:[],archives};
     }
+    if (name === 'modelMemoryVectors' && !a.capture && !job.metadata.includeVectors)
+      return { table: name, rows: [], page: [], isDone: true, continueCursor: '' };
     const result = await ctx.db
       .query(table(name))
       .paginate({ cursor: job.cursor, numItems: 20, maximumBytesRead: TARGET_CHUNK_BYTES });
-    const rows: BackupRow[] = result.page.map((row) => sanitizeLargeValue(row));
+    const rows: BackupRow[] = name === 'modelMemoryVectors' && !a.capture
+      ? (await Promise.all(result.page.map(row => portableVector(ctx.db, row as Doc<'modelMemoryVectors'>, true)))).filter((row): row is NonNullable<typeof row> => !!row)
+      : result.page.map(row => sanitizeLargeValue(row));
     if (name === 'memories') {
       const owners = new Map<string, Doc<'residentModelBindings'>[]>();
       for (const memory of rows) {
@@ -470,7 +478,7 @@ export const advanceExport = action({
           exportId: job._id,
           source: job.source,
           exportedAt: job.createdAt,
-          includeVectors: false,
+          includeVectors: job.metadata.includeVectors ?? false,
           chunks: await exportDescriptors(ctx, job._id),
         };
         const signature = await sign(manifest, source.privateKeyEncrypted);
@@ -642,6 +650,8 @@ export const createImportJob = internalMutation({
       newTownId: a.mode === 'clone' ? `town:${crypto.randomUUID()}` : local!.townId,
       keys: a.keys,
       metadata: {
+        vectorSourceTrusted: await trustedVectorSource(ctx.db, source),
+        includeVectors: a.manifest.includeVectors,
         uploadedChunks: 0,
         oldChunkCount: 0,
         oldBytes: 0,
@@ -687,6 +697,7 @@ export const saveImportChunk = internalMutation({
     const rows = await validateChunk(chunk, a.expected);
     for (const [rowIndex, row] of rows.entries()) {
       if (chunk.table === 'coldHistoryFiles') await validateColdLargeRow(row);
+      if (chunk.table === 'modelMemoryVectors') await validateGenerationEvidence(row);
       const references = validateSourceRow(chunk.table, row);
       if (await sourceRow(ctx, job._id, row._id)) throw new Error('DUPLICATE_BACKUP_DOCUMENT_ID');
       if (
@@ -758,7 +769,9 @@ export const saveImportChunk = internalMutation({
         rowIndex,
         state: 'STAGED',
         references,
-        metadata: rowMetadata(chunk.table, row),
+        metadata: { ...rowMetadata(chunk.table, row),
+          ...(chunk.table === 'memories' ? { sourceDigest: await memorySourceDigest(row as never), contentDigest: await sourceContentDigest(row as never) } : {}),
+          ...(chunk.table === 'modelMemoryVectors' ? { memoryId: row.memoryId, sourceDigest: row.sourceDigest } : {}) },
         worldId:row.worldId,sourceScope:coldScope(chunk.table,row),
         ownerGlobalId,
         relationKey: key,
@@ -834,6 +847,15 @@ export const validatePage = internalMutation({
           throw new Error(`BACKUP_REFERENCE_MISSING:${row.table}:${ref.table}`);
       }
       const m = row.metadata;
+      await validateMemoryBackupRelations(row.table, { ...m, _id: row.sourceId }, async id => {
+        const target = await sourceRow(ctx, job._id, id);
+        return target ? { table: target.table, row: { ...target.metadata, _id: target.sourceId } } : null;
+      });
+      if (row.table === 'modelMemoryVectors') {
+        const memory = await sourceRow(ctx, job._id, m.memoryId);
+        await validateVectorSource(m, memory?.table === 'memories' ? { ...memory.metadata, _id: memory.sourceId } : null,
+          memory?.metadata.sourceDigest);
+      }
       if (row.table === 'worlds') {
         if (
           !(await relatedRow(ctx, job._id, 'maps', row.sourceId)) ||
@@ -981,7 +1003,9 @@ export const saveCapture = internalMutation({
           rowIndex,
           state: 'CAPTURED',
           references: [],
-          metadata: {},
+          metadata: { ...(isMemoryBackupTable(entry.table) ? rowMetadata(entry.table, row) : {}),
+            ...(entry.table === 'memories' ? { worldId: row.worldId, playerId: row.playerId,
+              agentGlobalId: row.agentGlobalId, contentDigest: await sourceContentDigest(row as never) } : {}) },
         });
       }
       const { json, ...summary } = entry;
@@ -1103,7 +1127,7 @@ function activeFields(name: string, row: BackupRow, job: Job, allocation: boolea
       failure: undefined,
     };
   if (name === 'storagePolicies') fields = { ...fields, lastVerifiedBackupAt: undefined };
-  return restoredAutonomyFields(name, fields);
+  return memoryBackupFields(name, { ...restoredAutonomyFields(name, fields), _creationTime: row._creationTime });
 }
 async function mappingFor(
   ctx: { db: DatabaseReader },
@@ -1159,13 +1183,17 @@ export const applyChunk = internalMutation({
       throw new Error('BACKUP_CHECKSUM_MISMATCH');
     const skip =
       !rollback &&
-      (chunk.table === 'federationIdentity' ||
+      (chunk.table === 'modelMemoryVectors' || chunk.table === 'federationIdentity' ||
         (snapshotTables as readonly string[]).includes(chunk.table));
     if (!skip)
       for (const raw of chunk.rows) {
         const row = decodeRow(raw);
         const staged = await sourceRow(ctx, job._id, row._id, role);
         if (!staged) throw new Error('BACKUP_STAGED_ROW_MISSING');
+        if (skipMemoryBackupRow(chunk.table, row)) {
+          await ctx.db.patch(staged._id, { state: 'APPLIED' });
+          continue;
+        }
         if (
           !rollback &&
           job.mode === 'clone' &&
@@ -1203,14 +1231,14 @@ export const applyChunk = internalMutation({
           await ctx.db.patch(staged._id,{state:remapping?'APPLIED':'ALLOCATED'});
           continue;
         }
-        let fields = rollback ? stripSystem(row) : activeFields(chunk.table, row, job, !remapping);
+        let fields = rollback ? memoryBackupFields(chunk.table, row) : activeFields(chunk.table, row, job, !remapping);
         if (rollback && !remapping && chunk.table === 'memories') {
           const { embeddingId, ...canonical } = fields;
           fields = canonical;
           fields = allocationMemoryFields(fields);
         }
         const mapping = await mappingFor(ctx, job, role, fields);
-        if (!rollback)
+        if (!rollback && (remapping || !isMemoryBackupTable(chunk.table)))
           for (const ref of validateSourceRow(chunk.table, {
             ...fields,
             _id: row._id,
@@ -1239,16 +1267,26 @@ export const applyChunk = internalMutation({
       ? job.phase === 'ALLOCATE'
         ? 'REMAP'
         : job.phase === 'REMAP'
-          ? 'FINALIZE'
+          ? 'MEMORY_PROVENANCE'
           : job.phase === 'ROLLBACK_ALLOCATE'
             ? 'ROLLBACK_REMAP'
-            : 'ROLLBACK_FINISH'
+            : 'MEMORY_PROVENANCE_ROLLBACK'
       : job.phase;
     await ctx.db.patch(job._id, {
       phase,
+      ...(finished ? { tableIndex: 0, cursor: null } : {}),
       processedChunks: finished ? 0 : a.index + 1,
       updatedAt: Date.now(),
     });
+  },
+});
+export const repairMemoryProvenance = internalMutation({
+  args: { jobId: v.id('backupLargeJobs') },
+  handler: async (ctx, a) => {
+    const job = await owned(ctx, a.jobId);
+    if (!['MEMORY_PROVENANCE', 'MEMORY_PROVENANCE_ROLLBACK'].includes(job.phase)) throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    await repairMemoryBackupPage(ctx, job, job.phase === 'MEMORY_PROVENANCE' ? 'FINALIZE' : 'ROLLBACK_FINISH',
+      job.phase === 'MEMORY_PROVENANCE' ? 'SOURCE' : 'OLD');
   },
 });
 export const finalizeImport = internalMutation({
@@ -1474,7 +1512,9 @@ export const advanceImport = action({
           jobId: job._id,index:job.processedChunks,chunkJson:JSON.stringify(chunk),coldStorageId,
         });
         publicationPending=false;
-      } else if (job.phase === 'FINALIZE')
+      } else if (['MEMORY_PROVENANCE', 'MEMORY_PROVENANCE_ROLLBACK'].includes(job.phase))
+        await ctx.runMutation(writeRef('repairMemoryProvenance'), { jobId: job._id });
+      else if (job.phase === 'FINALIZE')
         await ctx.runMutation(writeRef('finalizeImport'), { jobId: job._id });
       else if (job.phase === 'ROLLBACK_DELETE')
         await ctx.runMutation(writeRef('rollbackDeletePage'), { jobId: job._id });

@@ -8,6 +8,8 @@ import { assertTownUnlocked } from '../federation/maintenanceLock';
 import { cacheWritesAllowed } from '../federation/storagePolicy';
 import { validateVector } from '../models/compatibility';
 import { trackedModelCall, UsageOwner } from '../models/usage';
+import { assertSpaceCertificate, guardEmbeddingRoute } from '../models/embeddingProvenance';
+import { fetchCertifiedOllamaEmbedding } from '../models/ollamaEvidence';
 
 export function cacheNamespace(route: EmbeddingRoute, inputMode: 'query' | 'document') {
   return JSON.stringify([
@@ -15,6 +17,7 @@ export function cacheNamespace(route: EmbeddingRoute, inputMode: 'query' | 'docu
     route.profile.fingerprint,
     route.profile.preprocessingRevision,
     inputMode,
+    route.space.embeddingCertificateId ?? null,
   ]);
 }
 export type CacheOptions = { route?: EmbeddingRoute; inputMode?: 'query' | 'document'; owner?: UsageOwner };
@@ -30,9 +33,10 @@ export async function fetchBatch(
   ctx: ActionCtx,
   texts: string[],
   options: CacheOptions = {},
-): Promise<{ embeddings: number[][]; hits: number; ms: number }> {
+): Promise<{ embeddings: number[][]; hits: number; ms: number; embeddingCertificateId?: Id<'embeddingCertificates'> }> {
   const route = options.route ?? (await activeRoute(ctx));
   const inputMode = options.inputMode ?? 'query';
+  const embeddingCertificateId = await guardEmbeddingRoute(ctx, route);
   const namespace = cacheNamespace(route, inputMode);
   const start = Date.now();
 
@@ -51,7 +55,9 @@ export async function fetchBatch(
     const missingIndexes = [...results.keys()].filter((i) => !results[i]);
     const missingTexts = missingIndexes.map((i) => texts[i]);
     const response = await trackedModelCall(ctx, 'EMBEDDING', { profileId: route.profile._id, ...options.owner }, async () => {
-      const result = await fetchEmbeddingBatch(missingTexts, profileEmbeddingConfig(route.profile), inputMode);
+      const result = embeddingCertificateId
+        ? { embeddings: await Promise.all(missingTexts.map(text => fetchCertifiedOllamaEmbedding(route.profile, text, inputMode))), retries: 0 }
+        : await fetchEmbeddingBatch(missingTexts, profileEmbeddingConfig(route.profile), inputMode);
       for (const embedding of result.embeddings) validateVector(embedding, route.profile.dimensions);
       return result;
     }, response => 'usage' in response ? response.usage : undefined);
@@ -70,13 +76,17 @@ export async function fetchBatch(
       results[resultIndex] = response.embeddings[i];
     }
   }
+  // Cached vectors need the same live serving check as a new provider response.
+  await guardEmbeddingRoute(ctx, route);
   if (toWrite.length > 0) {
-    await ctx.runMutation(selfInternal.writeEmbeddings, { embeddings: toWrite, namespace });
+    await ctx.runMutation(selfInternal.writeEmbeddings, { embeddings: toWrite, namespace,
+      spaceId: route.space._id, embeddingCertificateId });
   }
   return {
     embeddings: results,
     hits: cacheResults.length,
     ms: Date.now() - start,
+    ...(embeddingCertificateId ? { embeddingCertificateId } : {}),
   };
 }
 
@@ -126,6 +136,8 @@ export const getEmbeddingsByText = internalQuery({
 export const writeEmbeddings = internalMutation({
   args: {
     namespace: v.string(),
+    spaceId: v.optional(v.id('embeddingSpaces')),
+    embeddingCertificateId: v.optional(v.id('embeddingCertificates')),
     embeddings: v.array(
       v.object({
         textHash: v.bytes(),
@@ -135,6 +147,10 @@ export const writeEmbeddings = internalMutation({
   },
   handler: async (ctx, args): Promise<Id<'embeddingsCache'>[]> => {
     await assertTownUnlocked(ctx);
+    if (args.spaceId) {
+      const certificate = await assertSpaceCertificate(ctx.db, args.spaceId, args.embeddingCertificateId);
+      if (certificate && args.embeddingCertificateId !== certificate._id) throw new Error('EMBEDDING_GENERATION_EVIDENCE_MISSING');
+    } else if (args.embeddingCertificateId) throw new Error('EMBEDDING_CERTIFICATE_FENCED');
     if (!(await cacheWritesAllowed(ctx))) return [];
     const ids = [];
     for (const embedding of args.embeddings) {

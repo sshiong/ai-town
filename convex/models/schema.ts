@@ -2,6 +2,7 @@ import { defineTable } from 'convex/server';
 import { v } from 'convex/values';
 import { playerId } from '../aiTown/ids';
 import { modelUsageTables, requestQuota, residentRequestQuotas } from './usageSchema';
+import { certificateEvidenceFields } from './embeddingCertificateSchema';
 
 export const provider = v.union(
   v.literal('openai'),
@@ -32,6 +33,19 @@ export const embeddingProfileFields = {
 };
 export const modelTables = {
   ...modelUsageTables,
+  embeddingCertificates: defineTable({
+    profileId: v.id('embeddingProfiles'), ...certificateEvidenceFields,
+    state: v.union(v.literal('ACTIVE'), v.literal('REVOKED')),
+    verifiedAt: v.number(), checkedAt: v.number(), trustBoundary: v.string(),
+    revokedAt: v.optional(v.number()), reason: v.optional(v.string()),
+    generationEvidenceId: v.optional(v.string()), sourceTownId: v.optional(v.string()), sourcePublicKey: v.optional(v.string()),
+  }).index('profile', ['profileId']),
+  embeddingRestoreJobs: defineTable({
+    importId: v.id('backupImports'), targetProfileId: v.id('embeddingProfiles'), spaceId: v.id('embeddingSpaces'),
+    state: v.union(v.literal('COPYING'), v.literal('PENDING_VALIDATION'), v.literal('REBUILD_REQUIRED')),
+    cursor: v.union(v.string(), v.null()), offset: v.number(), copied: v.number(), skipped: v.number(),
+    reason: v.optional(v.string()), createdAt: v.number(), updatedAt: v.number(),
+  }).index('import', ['importId']),
   chatProfiles: defineTable({
     ...connectionFields,
     ...chatOptions,
@@ -90,6 +104,7 @@ export const modelTables = {
     updatedAt: v.number(),
   }).index('profile', ['profileId']).index('space', ['spaceId']),
   embeddingSpaces: defineTable({
+    embeddingCertificateId: v.optional(v.id('embeddingCertificates')),
     profileId: v.id('embeddingProfiles'),
     fingerprint: v.string(),
     status: v.union(
@@ -107,6 +122,7 @@ export const modelTables = {
     failure: v.optional(v.string()),
   }),
   modelMemoryVectors: defineTable({
+    embeddingCertificateId: v.optional(v.id('embeddingCertificates')),
     memoryId: v.id('memories'),
     sourceDigest: v.optional(v.string()),
     worldId: v.id('worlds'),

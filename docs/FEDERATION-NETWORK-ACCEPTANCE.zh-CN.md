@@ -27,7 +27,7 @@
 | 保存期间权限变化不会重复阻塞世界 | saveWorld 事务检查持久账本、权限与租约；回滚后 loadInputs 只对失效远程行为返回 deadline=0 副本，让拒绝结果与后续输入正常提交，保留原输入审计 | 续租/返乡/authority 三类 saveWorld 实际回滚、重新加载、拒绝旧输入并前进 engine cursor 的事务测试 |
 | 原本镇 AI 仍能完成活动与记忆 | 公开输入拒绝系统指令；工作线程通过专用内部入口提交完成输入 | 内部 activity/wander/remember 完成事务回归 |
 
-上述测试使用 Jest 与 convex-test，网络测试包含两个实际 TLS socket 和临时测试 CA。测试中的 DNS 映射/CA 只属于测试客户端；产品使用平台标准 TLS fetch，不设置忽略证书验证。事务测试调用真实引擎输入处理及 `Game.saveDiff`，没有使用内存状态机替代账本。
+上述测试使用 Jest 与 convex-test，网络测试包含两个实际 TLS socket 和临时测试 CA。测试中的 DNS 映射/CA 只属于测试客户端；产品直连请求使用核验 DNS 后固定 socket 的 Node HTTPS，保留 Host、SNI 和标准证书验证，不设置忽略证书验证。事务测试调用真实引擎输入处理及 `Game.saveDiff`，没有使用内存状态机替代账本。
 
 命令：
 
@@ -49,6 +49,14 @@ v1.7 第 21.5 与 31.4 节明确允许这一交付边界：安全库条件不满
 Ready 只证明时间窗口内经过认证的双向 Direct 路由，不证明任意 NAT 拓扑自动可通，也不验证 LLM 可用性。当前没有 WSS、Relay、NAT 打洞、VPN 配置或自动路径选择。管理员需自行提供双向可达的 HTTPS 端点、匹配证书与网络路由。
 
 安全返乡依赖可信节点遵守到期拒绝、持久授权账本、标准证书认证与有限时钟偏差假设。复制私钥的恶意双活节点或无限制时钟漂移不能由本地租约算法无条件排除；没有新增外部仲裁服务或区块链共识。
+
+### 自托管来源 metadata 的入口条件
+
+本轮在独立本机 D 的实际 Node internalAction 及其嵌套 mutation 上核验了请求 metadata：两层来源 IP 散列一致，但裸自托管 backend 会采用客户端提交的 `X-Forwarded-For`。改变该 Header 会改变来源散列，且散列与提交值匹配；单独改变 `X-Real-IP` 未改变无 Header 的基线。因此，直接使用 metadata API 不能证明这个部署的来源 IP/前缀不可伪造，当前裸入口的这一断言失败。这里只保存散列与判定，不保存凭据或聊天。
+
+生产自托管部署必须让外部请求经过可信入口，由入口根据实际 TCP peer 或受控代理链确定来源，覆盖客户端的 `X-Forwarded-For`、`X-Real-IP`、`Forwarded`，再将请求交给 backend。backend 直达监听必须限制在 loopback 或受控内网，不能允许不可信调用者绕过入口提交自己的转发头。产品仍只从 `ctx.meta.getRequestMetadata().ip` 取来源，不改为直接读客户端 Header；全局预算继续独立生效。
+
+专用测试入口可以证明经过它的伪造 Header 被覆盖，但单独启动代理不能证明整个部署已防绕过。目前实验容器的 backend 服务还可由 Docker 网络内调用，未完成生产防火墙/网络隔离验收；不能把代理路径通过扩张为所有直达入口安全。当前 D 的真实 Node 版本、metadata 传播和默认私网/危险目标拒绝已有独立证据，不能替代这个来源入口保障。
 
 
 ## 本轮补充故障证据

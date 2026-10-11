@@ -1,4 +1,62 @@
 export const dataMessages: Record<string, string> = {
+  'External cold storage': '外部冷存储',
+  'Copy verified cold history to a server-configured S3 destination. Credentials and destination URLs are configured only on the server.':
+    '将已验证的冷历史复制到服务器配置的 S3 存储目标。凭据和目标地址仅在服务器上配置。',
+  'Loading cold storage destinations and archives…': '正在加载冷存储目标和归档…',
+  'No external destination is configured. Ask the server administrator to configure COLD_ARCHIVE_S3_CONFIG, then return here.':
+    '尚未配置外部存储目标。请服务器管理员配置 COLD_ARCHIVE_S3_CONFIG 后，再返回此处。',
+  'Server-configured destination': '服务器配置的存储目标',
+  'Choose a destination': '选择存储目标',
+  'Cold storage operator': '冷存储操作人',
+  'Declared audit label, up to 100 characters.': '审计中记录的操作人标签，最多 100 个字符。',
+  'Bucket / region': '存储桶 / 区域',
+  'Destination verification': '存储目标验证',
+  'Not enabled': '未启用',
+  'Applying the server configuration enables this destination and resets its verification. Verify upload and read-back before creating a copy.':
+    '应用服务器配置会启用此目标并重置验证状态。创建副本前，请验证上传和读回结果。',
+  'Applying cold storage destination': '正在应用冷存储目标',
+  'Destination enabled. Verify upload and read-back next.': '目标已启用。接下来请验证上传和读回结果。',
+  'Apply server configuration': '应用服务器配置',
+  'Verifying destination upload and read-back': '正在验证目标上传和读回结果',
+  'Destination upload and read-back verified.': '目标上传和读回结果已验证。',
+  'Verify destination': '验证存储目标',
+  'Disabling cold storage destination': '正在禁用冷存储目标',
+  'Destination disabled. Local originals and uploaded remote objects remain.':
+    '目标已禁用。本地原件和已上传的远端对象均予以保留。',
+  'Disable destination': '禁用存储目标',
+  'Verified cold history archive': '已验证的冷历史归档',
+  'Choose verified cold history': '选择已验证的冷历史',
+  '{kind} · {date} · {count} messages': '{kind} · {date} · {count} 条消息',
+  'No verified cold history on this page. Create and verify a cold archive from a resident’s conversation or travel memory, or check the next page.':
+    '此页没有已验证的冷历史。请从居民的对话或旅行记忆创建并验证冷归档，或查看下一页。',
+  'Previous archives': '上一页归档',
+  'Next archives': '下一页归档',
+  'Each click uploads one part and verifies its read-back. The signed archive root is uploaded last. Local originals remain available throughout.':
+    '每次点击上传一个部分，并验证读回结果。签名归档根文件最后上传。本地原件始终保留。',
+  'Creating external archive copy': '正在创建外部归档副本',
+  'Copy task created. Upload and verify its next part to continue.':
+    '副本任务已创建。请上传并验证下一部分以继续。',
+  'Create external archive copy': '创建外部归档副本',
+  'External copy task': '外部副本任务',
+  '{state} · {date}': '{state} · {date}',
+  '{state} · {verified} / {total} parts verified, including the archive root':
+    '{state} · 已验证 {verified} / {total} 个部分（含归档根文件）',
+  'External copy complete. Every part and the signed archive root passed read-back verification. Local originals remain.':
+    '外部副本已完成。全部部分和签名归档根文件均已通过读回验证。本地原件予以保留。',
+  'External copy stopped ({code}). Retry the same checkpoint after resolving the server configuration or connection issue.':
+    '外部复制已停止（{code}）。解决服务器配置或连接问题后，可重试同一检查点。',
+  'Uploading and verifying one archive part': '正在上传并验证一个归档部分',
+  'One checkpoint processed. Review the task state before continuing.':
+    '已处理一个检查点。继续前请查看任务状态。',
+  'Retry current part': '重试当前部分',
+  'Upload and verify archive root': '上传并验证归档根文件',
+  'Upload and verify next part': '上传并验证下一部分',
+  'Cancelling external archive copy': '正在取消外部归档复制',
+  'Copy cancelled. Local originals and already-uploaded remote objects remain.':
+    '复制已取消。本地原件和已上传的远端对象均予以保留。',
+  'Cancel external copy': '取消外部复制',
+  'Failed parts can be retried from the saved checkpoint. Cancellation stops future uploads and does not delete already-uploaded remote objects or local originals.':
+    '失败的部分可从已保存的检查点重试。取消会停止后续上传，不会删除已上传的远端对象或本地原件。',
   'Restore this town or original Home resident': '恢复此小镇或原始归属地居民',
   'Requires this town identity, matching fingerprint and a stopped source deployment. Existing runtime authorizations are never restored.':
     '需要此小镇身份、匹配的指纹以及已停止的源部署。不会恢复已有的运行时授权。',

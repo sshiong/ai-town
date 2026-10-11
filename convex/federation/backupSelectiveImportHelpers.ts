@@ -1,6 +1,7 @@
 import { Infer, v } from 'convex/values';
 import { BackupRow, stripSystem } from './backupHelpers';
 import { Selection } from './backupSelectiveHelpers';
+import { memoryBackupFields } from './memoryBackup';
 
 export const ownerMapping = v.object({
   sourceAgentGlobalId: v.string(),
@@ -145,7 +146,7 @@ export function allocationFields(table: string, fields: BackupRow) {
   return fields;
 }
 export function canonicalFields(table: string, row: BackupRow) {
-  let fields = stripSystem(row);
+  let fields = memoryBackupFields(table, row);
   if (table === 'memories') {
     const { embeddingId: _embedding, embeddingSpaceId: _space, ...rest } = fields;
     fields = rest;

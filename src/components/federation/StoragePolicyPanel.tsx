@@ -10,7 +10,7 @@ const MIB = 1024 * 1024;
 const DAY = 86400000;
 const categories = [
   ['canonicalMemory', 'Canonical memory', 'hotMemoryBytes'],
-  ['history', 'History & relationships', 'historyBytes'],
+  ['history', 'History & stored objects', 'historyBytes'],
   ['vectors', 'Derived vectors', 'vectorBytes'],
   ['cache', 'Embedding cache', 'cacheBytes'],
   ['operational', 'Delivery & runtime', 'operationalBytes'],
@@ -219,9 +219,45 @@ export default function StoragePolicyPanel({ adminToken }: { adminToken: string 
           </dl>
           <p className="admin-muted">
             {t(
-              'Measurements estimate stored record bytes; they are not provider billing totals. Backups require an explicit archive export and download.',
+              'Database record bytes are estimates. Stored file sizes come from storage metadata; every object, including staged files, unreferenced uploads and other media, counts once against the history and stored objects budget. These are not provider billing totals. Backups require an explicit archive export and download.',
             )}
           </p>
+          {status.usage.objects && (
+            <>
+              <dl className="admin-facts">
+                <dt>{t('Stored file payloads')}</dt>
+                <dd>
+                  {status.usage.objects.objects}
+                  {t(' objects · ')}
+                  {bytes(status.usage.objects.bytes)}
+                </dd>
+                <dt>{t('Identified published cold history')}</dt>
+                <dd>
+                  {status.usage.objects.publishedColdObjects}
+                  {t(' objects · ')}
+                  {bytes(status.usage.objects.publishedColdBytes)}
+                </dd>
+                <dt>{t('Other or unpublished files')}</dt>
+                <dd>
+                  {status.usage.objects.otherOrUnpublishedObjects}
+                  {t(' objects · ')}
+                  {bytes(status.usage.objects.otherOrUnpublishedBytes)}
+                </dd>
+              </dl>
+              <p className="admin-muted">
+                {t(
+                  'This measurement spans multiple batches. Uploads after the scan starts are included on the next refresh; deletions during the scan can change its result.',
+                )}
+              </p>
+              {status.usage.objects.classificationLimitedObjects > 0 && (
+                <p className="admin-warning">
+                  {t(
+                    "Some files were not fully classified within this scan's read budget. All their payload bytes are included.",
+                  )}
+                </p>
+              )}
+            </>
+          )}
           <ul className="admin-list">
             {categories.map(([category, label, field]) => {
               const group = status.usage.groups.find(
@@ -237,6 +273,14 @@ export default function StoragePolicyPanel({ adminToken }: { adminToken: string 
                       {t(' records · ')}
                       {bytes(group?.bytes ?? 0)} / {bytes(status.policy[field])}
                     </p>
+                    {group?.metadataBytes !== undefined && (
+                      <p className="admin-muted">
+                        {t('Database records: ')}
+                        {bytes(group.metadataBytes)}
+                        {t(' · file payloads: ')}
+                        {bytes(group.payloadBytes ?? 0)}
+                      </p>
+                    )}
                   </div>
                   <span className="admin-badge">
                     {status.usage.measuredAt === null

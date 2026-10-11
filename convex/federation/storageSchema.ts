@@ -11,8 +11,16 @@ const usageGroups = v.array(
     ),
     records: v.number(),
     bytes: v.number(),
+    metadataBytes: v.optional(v.number()),
+    payloadBytes: v.optional(v.number()),
   }),
 );
+const storageObjects = v.object({
+  objects: v.number(), bytes: v.number(),
+  publishedColdObjects: v.number(), publishedColdBytes: v.number(),
+  otherOrUnpublishedObjects: v.number(), otherOrUnpublishedBytes: v.number(),
+  classificationLimitedObjects: v.number(),
+});
 export const storagePolicyFields = {
   hotMemoryBytes: v.number(),
   historyBytes: v.number(),
@@ -66,6 +74,9 @@ export const storagePolicyTables = {
     revision: v.optional(v.number()),
     cursor: v.union(v.string(), v.null()),
     groups: usageGroups,
+    objects: v.optional(storageObjects),
+    measurementVersion: v.optional(v.number()),
+    storageCreationCutoff: v.optional(v.number()),
     startedAt: v.number(),
     updatedAt: v.number(),
     error: v.optional(v.string()),
@@ -73,6 +84,9 @@ export const storagePolicyTables = {
   storageUsageSnapshots: defineTable({
     key: v.string(),
     groups: usageGroups,
+    objects: v.optional(storageObjects),
+    measurementVersion: v.optional(v.number()),
+    storageCreationCutoff: v.optional(v.number()),
     measuredAt: v.number(),
     scanStartedAt: v.number(),
   }).index('key', ['key']),
