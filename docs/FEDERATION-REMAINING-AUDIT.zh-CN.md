@@ -234,3 +234,5 @@ D/E 实际可信 Ollama 证书的最小链均通过：权重 artifact/pipeline/p
 续租和持久 CONVERSATION_ENDED 使用预留队列容量，但不因此绕过时钟、访问权威或非 ACTIVE 部署门禁。投递先按类型索引在全部到期队列选出退出、拒绝、续租、持久历史及恢复控制候选，再合并普通消息选最早 20 条；不再仅排序普通队列首批。总容量 1000 仍拒绝新增。
 
 传输整套 59 项通过，新增回归包括 1,800 会话实际调度尾页完成、1,500 份历史 cursor/Inbox/Outbox 的读限及 256 KiB 字节预算、最新 100 committed IDs、epoch 隔离、连续唯一 NACK 序号、多个间隙独立恢复、满队列安全重试、全局优先和容量/权限门禁。独立冻结版本 Convex 类型检查通过；相邻 visitorQueue、remoteFairness、chatScheduling 三套共 79 项通过。上述是 Convex 测试数据库及真实调度回归，不冒充 3–10 独立部署压力、本地 tick P95 或完整公网故障矩阵。
+
+传输提交 `f83b3d4` 随后从 Git 提交独立冻结为无私有 fixture 的正式产品版本，部署到隔离 I/J 均成功；经标准 CA/SAN 校验的真实 LAN HTTPS，双方正式管理员 probe 返回 TRANSPORT_READY。此实测确认新版本的双向探针仍工作，不将只有两镇及小量数据的探针结果升格为大规模运行证据。
