@@ -192,7 +192,7 @@ export async function residentChatCompletion(
   body: Omit<CreateChatCompletionRequest, 'model' | 'stream'> & { model?: string; stream?: false },
   config: ChatConfig,
   options?: ChatRequestOptions & { decisionJobId?: Id<'federationDecisionJobs'> },
-): Promise<{ content: string; retries: number; ms: number }> {
+): Promise<{ content: string; retries: number; ms: number; totalTokens?: number; finishReason?: string }> {
   const deadline = Math.min(options?.deadline ?? Infinity, Date.now() + REQUEST_TIMEOUT_MS);
   const requestId: Id<'federationLlmRequests'> = await ctx.runMutation(
     mutationRef('resources/enqueueChat'),

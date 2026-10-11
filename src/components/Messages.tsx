@@ -7,6 +7,7 @@ import { MessageInput } from './MessageInput';
 import { Player } from '../../convex/aiTown/player';
 import { Conversation } from '../../convex/aiTown/conversation';
 import { useEffect, useRef } from 'react';
+import { MessageTranslation, MessageTranslations } from './MessageTranslation';
 
 export function Messages({
   worldId,
@@ -25,7 +26,7 @@ export function Messages({
   humanPlayer?: Player;
   scrollViewRef: React.RefObject<HTMLDivElement>;
 }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const humanPlayerId = humanPlayer?.id;
   const descriptions = useQuery(api.world.gameDescriptions, { worldId });
   const messages = useQuery(api.messages.listMessages, {
@@ -76,11 +77,11 @@ export function Messages({
         <div className="flex gap-4">
           <span className="uppercase flex-grow">{m.authorName}</span>
           <time dateTime={m._creationTime.toString()}>
-            {new Date(m._creationTime).toLocaleString()}
+            {new Date(m._creationTime).toLocaleString(locale)}
           </time>
         </div>
         <div className={clsx('bubble', m.author === humanPlayerId && 'bubble-mine')}>
-          <p className="bg-white -mx-3 -my-1">{m.text}</p>
+          <MessageTranslation message={m} />
         </div>
       </div>
     );
@@ -139,30 +140,37 @@ export function Messages({
   return (
     <div className="chats text-base sm:text-sm">
       <div className="bg-brown-200 text-black p-2">
-        {nodes.length > 0 && nodes.map((n) => n.node)}
-        {currentlyTyping && currentlyTyping.playerId !== humanPlayerId && (
-          <div key="typing" className="leading-tight mb-6">
-            <div className="flex gap-4">
-              <span className="uppercase flex-grow">{currentlyTypingName}</span>
-              <time dateTime={currentlyTyping.since.toString()}>
-                {new Date(currentlyTyping.since).toLocaleString()}
-              </time>
+        <MessageTranslations
+          key={`${worldId}:${conversation.doc.id}`}
+          worldId={worldId}
+          conversationId={conversation.doc.id}
+          messages={messages}
+        >
+          {nodes.length > 0 && nodes.map((n) => n.node)}
+          {currentlyTyping && currentlyTyping.playerId !== humanPlayerId && (
+            <div key="typing" className="leading-tight mb-6">
+              <div className="flex gap-4">
+                <span className="uppercase flex-grow">{currentlyTypingName}</span>
+                <time dateTime={currentlyTyping.since.toString()}>
+                  {new Date(currentlyTyping.since).toLocaleString(locale)}
+                </time>
+              </div>
+              <div className={clsx('bubble')}>
+                <p className="bg-white -mx-3 -my-1">
+                  <i>{t('typing...')}</i>
+                </p>
+              </div>
             </div>
-            <div className={clsx('bubble')}>
-              <p className="bg-white -mx-3 -my-1">
-                <i>{t("typing...")}</i>
-              </p>
-            </div>
-          </div>
-        )}
-        {humanPlayer && inConversationWithMe && conversation.kind === 'active' && (
-          <MessageInput
-            worldId={worldId}
-            engineId={engineId}
-            conversation={conversation.doc}
-            humanPlayer={humanPlayer}
-          />
-        )}
+          )}
+          {humanPlayer && inConversationWithMe && conversation.kind === 'active' && (
+            <MessageInput
+              worldId={worldId}
+              engineId={engineId}
+              conversation={conversation.doc}
+              humanPlayer={humanPlayer}
+            />
+          )}
+        </MessageTranslations>
       </div>
     </div>
   );

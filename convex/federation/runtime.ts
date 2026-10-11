@@ -1,3 +1,4 @@
+import { scheduleNewMessageTranslation } from '../messageTranslationScheduling';
 import { assertClock, canResume, readClock } from './timePolicy';
 import { MAX_REPLY_TIMEOUT_MS, replyTimeoutMs } from './replyPolicy';
 import { v } from 'convex/values';
@@ -626,13 +627,14 @@ export async function commitRemoteActions(ctx: MutationCtx) {
       ledger.worldId &&
       ledger.hostPlayerId
     ) {
-      await ctx.db.insert('messages', {
+      const translationMessageId = await ctx.db.insert('messages', {
         worldId: ledger.worldId,
         conversationId: turn.conversationId,
         messageUuid: job.actionId,
         author: ledger.hostPlayerId,
         text: job.action.text,
       });
+      await scheduleNewMessageTranslation(ctx, translationMessageId);
       description = `At ${ledger.hostTownId}, I said: ${job.action.text}`;
     } else if (accepted) description = `At ${ledger.hostTownId}, completed ${job.action.type}.`;
     const observed = await ctx.db

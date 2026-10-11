@@ -1,3 +1,4 @@
+import { messageTranslationTables } from './messageTranslationSchema';
 import { defineSchema, defineTable } from 'convex/server';
 import { v } from 'convex/values';
 import { agentTables } from './agent/schema';
@@ -17,6 +18,7 @@ import { coldHistoryTables } from './federation/coldHistorySchema';
 import { residentPolicyTables } from './federation/residentPolicySchema';
 
 export default defineSchema({
+  ...messageTranslationTables,
   music: defineTable({
     storageId: v.string(),
     type: v.union(v.literal('background'), v.literal('player')),

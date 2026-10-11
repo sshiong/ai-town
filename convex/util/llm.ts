@@ -115,7 +115,7 @@ export async function chatCompletion(
   },
   configOverride?: ChatConfig,
   options?: ChatRequestOptions,
-): Promise<{ content: string; retries: number; ms: number; totalTokens?: number }>;
+): Promise<{ content: string; retries: number; ms: number; totalTokens?: number; finishReason?: string }>;
 // Overload for streaming
 export async function chatCompletion(
   body: Omit<CreateChatCompletionRequest, 'model'> & {
@@ -131,9 +131,10 @@ export async function chatCompletion(
   },
   configOverride?: ChatConfig,
   options?: ChatRequestOptions,
-): Promise<{ content: string | ChatCompletionContent; retries: number; ms: number; totalTokens?: number }> {
+): Promise<{ content: string | ChatCompletionContent; retries: number; ms: number; totalTokens?: number; finishReason?: string }> {
   const config = configOverride ?? getChatConfig();
   let totalTokens: number | undefined;
+  let finishReason: string | undefined;
   body.model = body.model ?? config.chatModel;
   body = {
     ...body,
@@ -184,6 +185,7 @@ export async function chatCompletion(
         const json = (await result.json()) as CreateChatCompletionResponse;
         totalTokens = json.usage?.total_tokens;
         const choice = json.choices?.[0];
+        finishReason = choice?.finish_reason;
         const content = choice?.message?.content;
         if (typeof content !== 'string' || !content.trim()) {
           // Reasoning is provider metadata, never a resident's executable action.
@@ -208,6 +210,7 @@ export async function chatCompletion(
       retries,
       ms,
       totalTokens,
+      finishReason,
     };
   } catch (error) {
     if (controller?.signal.aborted) throw new Error('CHAT_REQUEST_DEADLINE');

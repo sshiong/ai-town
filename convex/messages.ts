@@ -1,3 +1,4 @@
+import { scheduleNewMessageTranslation } from './messageTranslationScheduling';
 import { v } from 'convex/values';
 import { mutation, query } from './maintenanceFunctions';
 import { insertInput } from './aiTown/insertInput';
@@ -60,13 +61,14 @@ export const writeMessage = mutation({
       )
       .first();
     if (duplicate) return;
-    await ctx.db.insert('messages', {
+    const translationMessageId = await ctx.db.insert('messages', {
       conversationId: args.conversationId,
       author: args.playerId,
       messageUuid: args.messageUuid,
       text: args.text,
       worldId: args.worldId,
     });
+    await scheduleNewMessageTranslation(ctx, translationMessageId);
     await insertInput(ctx, args.worldId, 'finishSendingMessage', {
       conversationId: args.conversationId,
       playerId: args.playerId,

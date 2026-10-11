@@ -230,7 +230,9 @@ function agentPrompts(
   agent: { identity: string; plan: string } | null,
   otherAgent: { identity: string; plan: string } | null,
 ): string[] {
-  const prompt = [];
+  const prompt = [
+    'Write your conversation messages in English. Interface translations are created separately; do not add bilingual copies or translation commentary to the original dialogue.',
+  ];
   if (agent) {
     prompt.push(`About you: ${agent.identity}`);
     prompt.push(`Your goals for the conversation: ${agent.plan}`);

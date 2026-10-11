@@ -1,3 +1,4 @@
+import { scheduleNewMessageTranslation } from '../messageTranslationScheduling';
 import { serializedPlayer } from './player';
 import { PLAYER_CONVERSATION_COOLDOWN } from '../constants';
 import { distance } from '../util/geometry';
@@ -58,13 +59,14 @@ export const agentSendMessage = internalMutation({
       )
       .first();
     if (duplicate) return;
-    await ctx.db.insert('messages', {
+    const translationMessageId = await ctx.db.insert('messages', {
       conversationId: args.conversationId,
       author: args.playerId,
       text: args.text,
       messageUuid: args.messageUuid,
       worldId: args.worldId,
     });
+    await scheduleNewMessageTranslation(ctx, translationMessageId);
     await insertInput(ctx, args.worldId, 'agentFinishSendingMessage', {
       conversationId: args.conversationId,
       agentId: args.agentId,

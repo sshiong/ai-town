@@ -1,3 +1,4 @@
+import { makeFunctionReference } from 'convex/server';
 import { cronJobs } from 'convex/server';
 import { DELETE_BATCH_SIZE, IDLE_WORLD_TIMEOUT, VACUUM_MAX_AGE } from './constants';
 import { internal } from './_generated/api';
@@ -6,6 +7,7 @@ import { TableNames } from './_generated/dataModel';
 import { v } from 'convex/values';
 
 const crons = cronJobs();
+crons.interval('recover message translation jobs', { seconds: 60 }, makeFunctionReference<'mutation'>('messageTranslations:recover'));
 
 crons.interval(
   'stop inactive worlds',
