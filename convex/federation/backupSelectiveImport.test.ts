@@ -19,6 +19,7 @@ const modules = {
   '../federation/backupSelective.ts': () => import('./backupSelective'),
   '../federation/backupSelectiveImport.ts': () => import('./backupSelectiveImport'),
   '../federation/backupLarge.ts': () => import('./backupLarge'),
+  '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../federation/coldHistoryChunks.ts': () => import('./coldHistoryChunks'),
@@ -293,6 +294,74 @@ async function apply(f: Fixture, jobId: Id<'backupLargeJobs'>) {
   return drive(f, jobId);
 }
 
+test.each(['explicit', 'legacy'] as const)('formal selective clone %s historical ledger supports safe privacy clearing', async ownerFields => {
+  const source = await fixture('historical-source', 1), target = await fixture('historical-target', 1);
+  await source.t.run(async ctx => {
+    await ctx.db.patch(source.memories[0], { data: { type: 'travel', visitId: 'selective-history',
+      eventId: 'history-event', hostTownId: 'town:host', participants: [], occurredAt: 1 } });
+    await ctx.db.insert('visitLedger', { visitId: 'selective-history', agentGlobalId: source.globals[0],
+      ...(ownerFields === 'explicit' ? { worldId: source.worldId, homePlayerId: 'p:0' } : {}),
+      homeTownId: 'town:historical-source', hostTownId: 'town:host', homeDeploymentEpoch: 1,
+      hostDeploymentEpoch: 1, agentAuthorityEpoch: 1, visitLeaseVersion: 1,
+      leaseExpiry: 1, fencingToken: 'source-fence', state: 'COMPLETED', role: 'home',
+      profile: {}, createdAt: 1, updatedAt: 1 });
+  });
+  const exported = await archive(source);
+  const importJobId = await start(target, exported);
+  await apply(target, importJobId);
+  const imported = (await target.t.run(ctx => ctx.db.query('backupImports').first()))!;
+  const owner = (await target.t.run(ctx => ctx.db.get(importJobId)))!.metadata.targetOwners[0];
+  await target.t.run(async ctx => {
+    const staged = await ctx.db.query('backupLargeRows').withIndex('job_table', q =>
+      q.eq('jobId', importJobId).eq('role', 'SOURCE').eq('table', 'visitLedger')).collect();
+    expect(staged).toHaveLength(1);
+    expect(staged[0].relationKey).toBe('visit:selective-history');
+    expect(decodeRow(staged[0].metadata.envelope.record)).toMatchObject({ visitId: 'selective-history' });
+    const old = await ctx.db.query('backupSelectiveHistory').withIndex('job_source', q =>
+      q.eq('jobId', importJobId).eq('sourceId', staged[0].sourceId)).collect();
+    expect(old).toHaveLength(1);
+    expect(decodeRow(old[0].record)).toMatchObject({ _id: staged[0].sourceId, agentGlobalId: source.globals[0] });
+    expect(old[0].agentGlobalIds).toContain(owner.agentGlobalId);
+  });
+  const candidates = await target.t.query(ref('travelPrivacy', 'historicalCandidates', 'query'), {
+    adminToken, visitId: 'selective-history', paginationOpts: { cursor: null, numItems: 5 },
+  });
+  expect(candidates.page).toEqual([expect.objectContaining({ history: {
+    importId: imported._id, worldId: target.worldId, ownerGlobalId: owner.agentGlobalId,
+  } })]);
+  const readonlyLedger = await target.t.run(async ctx => {
+    const records = await ctx.db.query('backupSelectiveHistory').withIndex('job', q => q.eq('jobId', importJobId)).collect();
+    return records.find(row => row.table === 'visitLedger')!;
+  });
+  await target.t.run(ctx => ctx.db.patch(readonlyLedger._id, {
+    record: encodeRow({ ...decodeRow(readonlyLedger.record), leaseExpiry: Date.now() + 60000 }),
+  }));
+  await expect(target.t.mutation(ref('travelPrivacy', 'inspect', 'mutation'), {
+    adminToken, visitId: 'selective-history', scope: 'SENSITIVE', history: candidates.page[0].history,
+  })).rejects.toThrow('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+  expect(await target.t.run(ctx => ctx.db.query('travelPrivacyJobs').collect())).toEqual([]);
+  await target.t.run(ctx => ctx.db.patch(readonlyLedger._id, { record: readonlyLedger.record }));
+  jest.useFakeTimers();
+  try {
+    const jobId: Id<'travelPrivacyJobs'> = await target.t.mutation(ref('travelPrivacy', 'inspect', 'mutation'), {
+      adminToken, visitId: 'selective-history', scope: 'SENSITIVE', history: candidates.page[0].history,
+    });
+    await target.t.finishAllScheduledFunctions(() => jest.runAllTimers());
+    expect((await target.t.run(ctx => ctx.db.get(jobId)))!.state).toBe('READY');
+    await target.t.mutation(ref('travelPrivacy', 'start', 'mutation'), { adminToken, jobId });
+    await target.t.finishAllScheduledFunctions(() => jest.runAllTimers());
+    await target.t.run(async ctx => {
+      expect((await ctx.db.get(jobId))!.state).toBe('COMPLETE');
+      expect(await ctx.db.query('memories').withIndex('globalAgent', q =>
+        q.eq('agentGlobalId', owner.agentGlobalId)).collect()).toEqual([]);
+      expect(await ctx.db.get(target.memories[0])).not.toBeNull();
+      expect(await ctx.db.query('visitLedger').collect()).toEqual([]);
+      const old = await ctx.db.query('backupSelectiveHistory').withIndex('job', q => q.eq('jobId', importJobId)).collect();
+      expect(old.filter(row => row.table === 'visitLedger').map(row => decodeRow(row.record))[0])
+        .toMatchObject({ visitId: 'selective-history', state: 'COMPLETED' });
+    });
+  } finally { jest.useRealTimers(); }
+});
 test('selective privacy export ignores time bounds while excluding unrelated residents and config-only scope', async () => {
   const source = await fixture('privacy-source', 1);
   await source.t.run(async ctx => {

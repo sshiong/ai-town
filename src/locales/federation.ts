@@ -1,4 +1,6 @@
 export const federationMessages: Record<string, string> = {
+  'Imported backup history': '备份导入的旅行历史',
+  'Only safely ended backup history for a resident currently at home is selectable.': '仅可选择已安全结束、且对应居民当前在家的备份旅行历史。',
   'This visit has a current local ledger. Select the current travel record source.': '这次旅行已有当前本地账本，请选择当前旅行记录来源。',
   'The selected import does not contain supported historical visit evidence.': '所选导入记录不包含当前支持的历史旅行证据。',
   'The imported resident must be safely at home before clearing historical travel data.': '导入居民必须已安全在家，才能清理其历史旅行数据。',

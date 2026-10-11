@@ -14,7 +14,7 @@ export const backupLargeTables = {
     table: v.string(),
     agentGlobalIds: v.array(v.string()),
     record: v.string(),
-  }).index('job', ['jobId']),
+  }).index('job', ['jobId']).index('job_source', ['jobId', 'sourceId']),
   backupMaintenanceLocks: defineTable({
     key: v.string(),
     jobId: v.id('backupLargeJobs'),

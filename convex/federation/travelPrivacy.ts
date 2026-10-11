@@ -85,6 +85,41 @@ function safeTerminal(ledger: any) {
     Number.isFinite(ledger.leaseExpiry) && Number.isFinite(ledger.leaseSafetyMs ?? 0) &&
     ledger.leaseExpiry + Math.max(60000, ledger.leaseSafetyMs ?? 0) < Date.now();
 }
+async function importedVisitEvidence(ctx: QueryCtx | MutationCtx, imported: Doc<'backupImports'>, visitId: string) {
+  if (Array.isArray(imported.runtimeSnapshot?.visitLedger))
+    return imported.runtimeSnapshot.visitLedger.map(decodeRow).filter((row: any) => row.visitId === visitId)
+      .map((row: any) => ({ ledger: row,
+        worldId: imported.mapping[row.worldId] ?? row.worldId,
+        ownerGlobalId: imported.mapping[row.agentGlobalId] ?? row.agentGlobalId,
+        playerId: imported.mapping[row.homePlayerId] ?? row.homePlayerId }));
+  const jobId = imported.runtimeSnapshot?.selectiveJobId;
+  if (!jobId) return [];
+  const job = await ctx.db.get(jobId as Id<'backupLargeJobs'>);
+  if (!job || job.kind !== 'import' || job.state !== 'COMPLETE' ||
+    job.metadata?.importId !== imported._id || job.source.townId !== imported.sourceTownId)
+    throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+  const staged = await ctx.db.query('backupLargeRows').withIndex('job_relation', q =>
+    q.eq('jobId', job._id).eq('role', 'SOURCE').eq('table', 'visitLedger').eq('relationKey', `visit:${visitId}`)).take(2);
+  if (staged.length !== 1) return [];
+  const envelope = staged[0].metadata.envelope;
+  if (envelope?.kind !== 'record') throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+  const stagedLedger = decodeRow(envelope.record);
+  if (stagedLedger.visitId !== visitId) return [];
+  const records = await ctx.db.query('backupSelectiveHistory').withIndex('job_source', q =>
+    q.eq('jobId', job._id).eq('sourceId', staged[0].sourceId)).take(2);
+  if (records.length !== 1 || records[0].table !== 'visitLedger' || records[0].sourceTownId !== imported.sourceTownId)
+    throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+  const row = decodeRow(records[0].record);
+  if (row._id !== staged[0].sourceId || row.visitId !== visitId ||
+    JSON.stringify(row) !== JSON.stringify(stagedLedger))
+    throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
+  const sourceOwners = job.metadata.selection.owners.filter((owner: any) => owner.agentGlobalId === row.agentGlobalId);
+  if (sourceOwners.length !== 1 || (row.worldId && row.worldId !== sourceOwners[0].worldId) ||
+    (row.homePlayerId && row.homePlayerId !== sourceOwners[0].playerId)) return [];
+  return job.metadata.targetOwners.filter((owner: any) => owner.sourceAgentGlobalId === row.agentGlobalId &&
+    owner.operation !== 'skip' && records[0].agentGlobalIds.includes(owner.agentGlobalId))
+    .map((owner: any) => ({ ledger: row, worldId: owner.worldId, ownerGlobalId: owner.agentGlobalId, playerId: owner.playerId }));
+}
 async function assertTerminal(ctx: QueryCtx | MutationCtx, visitId: string, source?: Job['history']) {
   const ledger = await visit(ctx, visitId);
   if (source) {
@@ -92,19 +127,18 @@ async function assertTerminal(ctx: QueryCtx | MutationCtx, visitId: string, sour
     // current ledger always takes precedence over imported authority claims.
     if (ledger) throw new Error('TRAVEL_PRIVACY_HISTORY_HAS_CURRENT_LEDGER');
     const imported = await ctx.db.get(source.importId);
-    if (!imported || !Array.isArray(imported.runtimeSnapshot?.visitLedger))
+    if (!imported)
       throw new Error('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
-    const candidates = imported.runtimeSnapshot.visitLedger.map(decodeRow).filter((row: any) =>
-      row.visitId === visitId && (imported.mapping[row.worldId] ?? row.worldId) === source.worldId &&
-      (imported.mapping[row.agentGlobalId] ?? row.agentGlobalId) === source.ownerGlobalId);
-    if (candidates.length !== 1 || candidates[0].role !== 'home' || !safeTerminal(candidates[0]))
+    const candidates = (await importedVisitEvidence(ctx, imported, visitId)).filter((item: any) =>
+      item.worldId === source.worldId && item.ownerGlobalId === source.ownerGlobalId);
+    if (candidates.length !== 1 || candidates[0].ledger.role !== 'home' || !safeTerminal(candidates[0].ledger))
       throw new Error('TRAVEL_PRIVACY_VISIT_NOT_SAFE_TERMINAL');
     const bindings = await ctx.db.query('residentModelBindings')
       .withIndex('globalAgent', q => q.eq('agentGlobalId', source.ownerGlobalId)).take(2);
     const runtime = await ctx.db.query('federationAgentRuntimes')
       .withIndex('globalId', q => q.eq('agentGlobalId', source.ownerGlobalId)).unique();
     if (bindings.length !== 1 || bindings[0].worldId !== source.worldId ||
-      (imported.mapping[candidates[0].homePlayerId] ?? candidates[0].homePlayerId) !== bindings[0].playerId ||
+      candidates[0].playerId !== bindings[0].playerId ||
       !runtime || runtime.worldId !== source.worldId || runtime.playerId !== bindings[0].playerId ||
       runtime.state !== 'HOME_ACTIVE') throw new Error('TRAVEL_PRIVACY_HISTORY_RESIDENT_NOT_HOME');
     return { worldId: source.worldId, agentGlobalId: source.ownerGlobalId, role: 'home' };
@@ -209,11 +243,17 @@ export const historicalCandidates = query({
     });
     const page = [];
     for (const imported of records.page) {
-      if (!Array.isArray(imported.runtimeSnapshot?.visitLedger)) continue;
-      for (const row of imported.runtimeSnapshot.visitLedger.map(decodeRow)) {
+      let evidence;
+      try { evidence = await importedVisitEvidence(ctx, imported, args.visitId); }
+      catch (error) {
+        if (error instanceof Error && error.message === 'TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING') continue;
+        throw error;
+      }
+      for (const item of evidence) {
+        const row = item.ledger;
         if (row.visitId !== args.visitId || row.role !== 'home' || !safeTerminal(row)) continue;
-        const worldId = ctx.db.normalizeId('worlds', imported.mapping[row.worldId] ?? row.worldId);
-        const ownerGlobalId = imported.mapping[row.agentGlobalId] ?? row.agentGlobalId;
+        const worldId = ctx.db.normalizeId('worlds', item.worldId);
+        const ownerGlobalId = item.ownerGlobalId;
         if (!worldId || typeof ownerGlobalId !== 'string') continue;
         const source = { importId: imported._id, worldId, ownerGlobalId };
         try { await assertTerminal(ctx, args.visitId, source); }

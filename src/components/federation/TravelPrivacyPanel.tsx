@@ -94,7 +94,7 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
             setSource(event.target.value); setSelectedHistory(''); setJobId(undefined);
           }}>
             <option value="CURRENT">{t('Current local travel ledger')}</option>
-            <option value="IMPORTED">{t('Imported ordinary backup history')}</option>
+            <option value="IMPORTED">{t('Imported backup history')}</option>
           </select>
         </Field>
         {source === 'IMPORTED' && (
@@ -109,7 +109,7 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
                 </option>)}
               </select>
             </Field>
-            <p className="admin-muted">{t('Only safely ended ordinary backup history for a resident currently at home is selectable.')}</p>
+            <p className="admin-muted">{t('Only safely ended backup history for a resident currently at home is selectable.')}</p>
             {history.status === 'CanLoadMore' && <AdminButton type="button" onClick={() => history.loadMore(5)}>
               {t('Load more import records')}
             </AdminButton>}

@@ -294,3 +294,7 @@ D/E 实际可信 Ollama 证书的最小链均通过：权重 artifact/pipeline/p
 普通备份历史入口检查点：inspect 可携带已选 importId、当前世界和居民身份，从 runtimeSnapshot 中的原 Home 账本核对唯一 visitId、世界/全局身份/本地居民映射、终态与有限租约时间。要求当前绑定唯一且本地 runtime 为 HOME_ACTIVE；任一当前执行账本存在时必须改用当前记录入口，不能由历史证据覆盖。原始历史只作为清理证据，不插入 visitLedger，不恢复执行租约。来源保存于清理 job，start、retry 和历史分页 worker 都重新验证。界面新增当前/普通导入历史来源选择，按居民名称、源小镇和导入时间显示候选；后端每页最多五条导入记录、两 MiB 读取预算，前端可继续翻页，不以任意最近 N 条冒充全部历史。
 
 实际备份/隐私/语言/UI 四套 117 项通过，构建、Convex 类型和 diff 通过。新增场景通过正式 exportTown → importBackup(clone) → historicalCandidates → inspect → start/page，实际删除克隆旅行记忆而当前执行账本始终为空；导入的向量后台任务在此测试中取消以隔离 provider 工作，不当作向量重建验收。十二条无关导入后的分页仍找到更早的正式克隆记录；源活动/租约未安全过期/非有限时间/居民离家/错误归属/已有当前账本均在创建 job 前拒绝。该入口目前仅接入普通备份 Home 历史；大包/选择性历史、旧多次世界替换的别名证明、相关归档副本及真实浏览器操作仍待补齐，完整 V/P1 范围不变。
+
+选择性历史入口后续接入：从 backupImports 的 selectiveJobId 定位已完成且 importId/sourceTownId 一致的正式导入任务，通过 job_relation 读取唯一源 visitLedger，并由新增 job_source 索引定位只读 backupSelectiveHistory。编码源账本与只读账本逐项一致才能作为证据。以源 selection 中的唯一居民及正式 targetOwners 映射当前世界、居民和 playerId；旧版无 worldId/homePlayerId 的账本可由选择清单补证，显式字段矛盾则拒绝。沿用当前居民 HOME_ACTIVE、旧租约安全终态、无当前执行账本和逐步重新验证的要求。候选界面现在支持普通与选择性备份历史。
+
+正式选择性克隆新增两种集成场景：显式世界/角色字段和旧版缺字段，实际导出 → 暂存/验证/应用/完成 → 候选 → inspect/start/page 后克隆旅行记忆清除，目标已有居民记忆与只读账本保留，执行 visitLedger 始终为空。另篡改只读账本租约后确认在创建清理 job 前拒绝。普通备份/隐私/语言三套相邻 98 项通过，构建、Convex 类型与 diff 通过；选择性导出/导入完整两套 57 项通过（131 秒）。大包历史入口、连续世界替换后的别名证明、SOURCE/OLD/原始向量归档正文副本、真实浏览器和完整 V/P1 验收仍开放。
