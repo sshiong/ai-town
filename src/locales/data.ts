@@ -239,9 +239,9 @@ export const dataMessages: Record<string, string> = {
   'Recover the imported memory index': '恢复导入的记忆索引',
   " from this town's recorded import. Optional vectors still require source trust, independent target verification and complete retrieval validation.":
     '，请从此小镇的导入记录中操作。可选向量仍需满足源信任、独立目标验证及完整检索验证要求。',
-  'Downloading signed manifest': '正在下载签名清单',
-  'Signed manifest downloaded; also save every referenced chunk.':
-    '签名清单已下载；请同时保存所有引用的分块。',
+  'Downloading archive manifest': '正在下载归档清单',
+  'Archive manifest downloaded; also save every referenced chunk.':
+    '归档清单已下载；请同时保存所有引用的分块。',
   'Download manifest': '下载清单',
   'Saving archive folder': '正在保存归档文件夹',
   'Manifest and every referenced chunk saved to the selected folder.':
@@ -252,8 +252,8 @@ export const dataMessages: Record<string, string> = {
     '保存到文件夹时每次写入一个分块，无需将整个小镇加载到浏览器内存中。无法访问文件夹时，请分别下载各分块。',
   'Chunk index': '分块索引',
   'Downloading archive chunk': '正在下载归档分块',
-  'Chunk downloaded. Preserve its filename and signed manifest.':
-    '分块已下载。请保留其文件名及签名清单。',
+  'Chunk downloaded. Preserve its filename and archive manifest.':
+    '分块已下载。请保留其文件名及归档清单。',
   'Download selected chunk': '下载所选分块',
   'Stage a chunked archive for import': '暂存分块归档以便导入',
   'Signed archive manifest': '已签名的归档清单',

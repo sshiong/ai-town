@@ -1,3 +1,4 @@
+import { localArchiveExportSnapshot, readLocalArchiveManifest, validateLocalChunk, assertArchiveExportUnchanged, type LocalSanitizedChunkManifest } from './travelPrivacyLocalChunkManifest';
 import { trackedMutation as mutation, trackedInternalMutation as internalMutation } from '../maintenanceFunctions';
 import { assertBackupPrivacy, restorePrivacyRows } from './backupPrivacy';
 import { coldLargeOwner, checkColdLargeExport, validateColdLargeRow, coldScope, type ColdLargeRow } from './coldLarge';
@@ -519,31 +520,54 @@ export const signingIdentity = internalQuery({
     return local;
   },
 });
+export const exportReadData = internalQuery({
+  args: { jobId: v.id('backupLargeJobs'), index: v.optional(v.number()) },
+  handler: async (ctx, a) => localArchiveExportSnapshot(ctx, await owned(ctx, a.jobId), a.index),
+});
 export const getManifest = action({
   args,
-  handler: async (ctx, a): Promise<{ manifest: LargeManifest; signature: string }> => {
+  handler: async (ctx, a): Promise<{ manifest: LargeManifest | LocalSanitizedChunkManifest; signature: string; sourceSignatureValid?: false; localProof?: import('./travelPrivacyLocalChunkManifest').LocalArchiveProof }> => {
     requireAdmin(a.adminToken);
-    const job: Job = await ctx.runQuery(readRef('jobData'), { jobId: a.jobId });
-    if (
-      job.kind !== 'export' ||
-      job.state !== 'COMPLETE' ||
-      !job.manifestStorageId ||
-      !job.signature
-    )
-      throw new Error('BACKUP_MANIFEST_NOT_READY');
-    return { manifest: await load(ctx, job.manifestStorageId), signature: job.signature };
+    const saved = await ctx.runQuery(readRef('exportReadData'), { jobId: a.jobId });
+    const job: Job = saved.job;
+    let result;
+    if (job.archivePrivacyState === 'LOCAL_SANITIZED') {
+      const manifest = await readLocalArchiveManifest(ctx, job);
+      if (manifest.chunks.some(chunk => chunk.role === 'OLD')) throw new Error('LOCAL_ARCHIVE_PRIVATE_ROLLBACK_NOT_PORTABLE');
+      result = { manifest, signature: '', sourceSignatureValid: false as const,
+        ...(job.metadata?.archiveLocalProof ? { localProof: job.metadata.archiveLocalProof } : {}) };
+    } else {
+      if (!job.signature) throw new Error('BACKUP_MANIFEST_NOT_READY');
+      const blob = await ctx.storage.get(job.manifestStorageId!);
+      if (!blob) throw new Error('BACKUP_CHUNK_STORAGE_MISSING');
+      result = { manifest: JSON.parse(await blob.text()) as LargeManifest, signature: job.signature };
+    }
+    await assertArchiveExportUnchanged(saved, await ctx.runQuery(readRef('exportReadData'), { jobId: a.jobId }));
+    return result;
   },
 });
 export const getChunk = action({
   args: { ...args, index: v.number() },
   handler: async (ctx, a): Promise<string> => {
     requireAdmin(a.adminToken);
-    const job: Job = await ctx.runQuery(readRef('jobData'), { jobId: a.jobId });
-    if (job.kind !== 'export' || job.state !== 'COMPLETE')
-      throw new Error('BACKUP_MANIFEST_NOT_READY');
-    const chunk = await ctx.runQuery(readRef('chunkData'), { jobId: a.jobId, index: a.index });
-    if (!chunk) throw new Error('BACKUP_CHUNK_NOT_FOUND');
-    return JSON.stringify(await load(ctx, chunk.storageId));
+    const readArgs = { jobId: a.jobId, index: a.index };
+    const saved = await ctx.runQuery(readRef('exportReadData'), readArgs);
+    if (!saved.chunk) throw new Error('BACKUP_CHUNK_NOT_FOUND');
+    const blob = await ctx.storage.get(saved.chunk.storageId);
+    if (!blob) throw new Error('BACKUP_CHUNK_STORAGE_MISSING');
+    if (blob.size > MAX_CHUNK_BYTES) throw new Error('LOCAL_ARCHIVE_CHUNK_BUDGET');
+    const json = await blob.text();
+    if (saved.job.archivePrivacyState === 'LOCAL_SANITIZED') {
+      const manifest = await readLocalArchiveManifest(ctx, saved.job);
+      const expected = manifest.chunks.find(chunk => chunk.index === a.index);
+      if (!expected) throw new Error('BACKUP_CHUNK_NOT_FOUND');
+      if (expected.role === 'OLD') throw new Error('LOCAL_ARCHIVE_PRIVATE_ROLLBACK_NOT_PORTABLE');
+      if (expected.role !== 'EXPORT' || ['index', 'table', 'count', 'bytes', 'digest'].some(key =>
+        expected[key as keyof typeof expected] !== saved.chunk[key])) throw new Error('LOCAL_ARCHIVE_CHUNK_POINTER_MISMATCH');
+      await validateLocalChunk(JSON.parse(json), expected);
+    }
+    await assertArchiveExportUnchanged(saved, await ctx.runQuery(readRef('exportReadData'), readArgs));
+    return json;
   },
 });
 

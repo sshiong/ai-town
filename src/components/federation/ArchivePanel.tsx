@@ -23,7 +23,10 @@ import { selectArchiveDirectory, supportsArchiveDirectory, writeArchiveText } fr
 import { VectorExportOption } from './EmbeddingPanel';
 import ColdArchivePanel from './ColdArchivePanel';
 
-type ArchiveManifest = FunctionReturnType<typeof api.federation.backupLarge.getManifest>;
+type ArchiveManifest = {
+  manifest: Extract<FunctionReturnType<typeof api.federation.backupLarge.getManifest>['manifest'], { format: 'ai-town-chunks' }>;
+  signature: string;
+};
 export default function ArchivePanel({ adminToken }: { adminToken: string }) {
   const { t } = useLocale();
   const convex = useConvex();
@@ -75,7 +78,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
       await readBackupText(file, 5_000_000, 'manifest', secret),
     ) as ArchiveManifest;
     if (
-      !value?.manifest ||
+      value?.manifest?.format !== 'ai-town-chunks' ||
       !Array.isArray(value.manifest.chunks) ||
       typeof value.signature !== 'string'
     )
@@ -427,7 +430,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
                   disabled={!!task.pending || !canDownload}
                   onClick={() =>
                     void task.run(
-                      t('Downloading signed manifest'),
+                      t('Downloading archive manifest'),
                       async () => {
                         const secret = takeExportPassphrase();
                         downloadJsonText(
@@ -444,7 +447,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
                           `ai-town-manifest-${job.jobId}.json`,
                         );
                       },
-                      t('Signed manifest downloaded; also save every referenced chunk.'),
+                      t('Archive manifest downloaded; also save every referenced chunk.'),
                     )
                   }
                 >
@@ -542,7 +545,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
                           `chunk-${String(chunkIndex).padStart(6, '0')}.json`,
                         );
                       },
-                      t('Chunk downloaded. Preserve its filename and signed manifest.'),
+                      t('Chunk downloaded. Preserve its filename and archive manifest.'),
                     )
                   }
                 >

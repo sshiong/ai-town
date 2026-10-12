@@ -139,6 +139,14 @@ export function adminErrorSummary(message: string, t: MessageTranslator = englis
       'A checkpointed archive task is holding the town maintenance lock. Finish it or cancel and complete rollback before changing town data.',
     TOWN_TRAVEL_PRIVACY_BUSY:
       'A travel privacy check or cleanup is running. Wait for it to finish before starting an archive.',
+    BACKUP_PRIVACY_REWRITE_ACTIVE:
+      'Archive privacy cleanup is rewriting files. Wait for it to finish before downloading.',
+    BACKUP_CHECKPOINT_CHANGED:
+      'The archive changed while it was being read. Retry the download from the current checkpoint.',
+    LOCAL_ARCHIVE_PRIVATE_ROLLBACK_NOT_PORTABLE:
+      'This local archive contains private rollback data and cannot be downloaded as a portable backup.',
+    LOCAL_ARCHIVE_:
+      'The cleaned archive could not be verified. Keep the saved checkpoint and review the archive before retrying.',
     TRAVEL_PRIVACY_HISTORY_HAS_CURRENT_LEDGER:
       'This visit has a current local ledger. Select the current travel record source.',
     TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING:

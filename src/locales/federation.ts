@@ -729,5 +729,13 @@ export const federationMessages: Record<string, string> = {
   "{minutes}m {seconds}s remaining": "剩余 {minutes} 分 {seconds} 秒",
   "The remote HTTPS service returned HTTP {status}.": "远程 HTTPS 服务返回 HTTP {status}。",
   "Host history committed through {durable}; home acknowledged through {acked}. {pending} event page(s) await acknowledgment.": "接待方历史已提交至 {durable}；家乡已确认至 {acked}。还有 {pending} 页事件等待确认。",
-  "Home history committed through {durable}; acknowledgment issued through {acked}. Unreceived host events cannot be reconstructed.": "家乡历史已提交至 {durable}；已发出确认至 {acked}。未收到的接待方事件无法重建。"
+  "Home history committed through {durable}; acknowledgment issued through {acked}. Unreceived host events cannot be reconstructed.": "家乡历史已提交至 {durable}；已发出确认至 {acked}。未收到的接待方事件无法重建。",
+  'Archive privacy cleanup is rewriting files. Wait for it to finish before downloading.':
+    '归档隐私清理正在重写文件，请等待完成后再下载。',
+  'The archive changed while it was being read. Retry the download from the current checkpoint.':
+    '读取期间归档发生了变化，请从当前断点重新下载。',
+  'This local archive contains private rollback data and cannot be downloaded as a portable backup.':
+    '该本地归档包含私有回滚数据，无法作为可移植备份下载。',
+  'The cleaned archive could not be verified. Keep the saved checkpoint and review the archive before retrying.':
+    '无法验证清理后的归档，请保留已保存的断点，检查归档后再重试。',
 };

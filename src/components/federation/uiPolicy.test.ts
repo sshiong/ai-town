@@ -140,6 +140,10 @@ test('localized safety summaries retain countdown values and unknown evidence', 
   expect(adminErrorSummary('HOST_CAPACITY_EXCEEDED', t)).toContain('可用访客名额');
   expect(adminErrorSummary('TOWN_TRAVEL_PRIVACY_BUSY', t)).toBe('旅行隐私检查或清理正在运行，请等待完成后再开始归档。');
   expect(adminErrorSummary('BACKUP_PRIVACY_REDACTED', t)).toBe('该归档包含已标记清除的内容，请使用清理完成后导出的备份。');
+  expect(adminErrorSummary('BACKUP_PRIVACY_REWRITE_ACTIVE', t)).toBe('归档隐私清理正在重写文件，请等待完成后再下载。');
+  expect(adminErrorSummary('BACKUP_CHECKPOINT_CHANGED', t)).toBe('读取期间归档发生了变化，请从当前断点重新下载。');
+  expect(adminErrorSummary('LOCAL_ARCHIVE_PRIVATE_ROLLBACK_NOT_PORTABLE', t)).toBe('该本地归档包含私有回滚数据，无法作为可移植备份下载。');
+  expect(adminErrorSummary('LOCAL_ARCHIVE_DIGEST_MISMATCH', t)).toBe('无法验证清理后的归档，请保留已保存的断点，检查归档后再重试。');
   expect(adminErrorSummary('Opaque evidence: town-id', t)).toBe('Opaque evidence: town-id');
   expect(safeReturnSummary('UNRECOGNIZED_EVIDENCE', t)).toBe('UNRECOGNIZED_EVIDENCE');
 });
