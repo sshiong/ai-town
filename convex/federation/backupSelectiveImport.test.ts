@@ -20,6 +20,7 @@ const modules = {
   '../federation/backupSelectiveImport.ts': () => import('./backupSelectiveImport'),
   '../federation/backupLarge.ts': () => import('./backupLarge'),
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
+  '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../federation/coldHistoryChunks.ts': () => import('./coldHistoryChunks'),

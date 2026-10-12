@@ -24,7 +24,7 @@ export default defineSchema({
   music: defineTable({
     storageId: v.string(),
     type: v.union(v.literal('background'), v.literal('player')),
-  }),
+  }).index('storage', ['storageId']),
 
   messages: defineTable({
     conversationId,

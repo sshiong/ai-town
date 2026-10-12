@@ -33,6 +33,7 @@ const modules = {
   '../federation/backupLarge.ts': () => import('./backupLarge'),
   '../federation/backup.ts': () => import('./backup'),
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
+  '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
   '../federation/admin.ts': () => import('./admin'),
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),

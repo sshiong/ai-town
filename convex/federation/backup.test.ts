@@ -35,6 +35,7 @@ const modules = {
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../federation/backup.ts': () => import('./backup'),
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
+  '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
   '../federation/admin.ts': () => import('./admin'),
   '../federation/backupExportAudit.ts': () => import('./backupExportAudit'),
   '../models/embeddings.ts': () => import('../models/embeddings'),

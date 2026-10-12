@@ -11,7 +11,8 @@ import {
 import type { Doc, Id, TableNames } from '../_generated/dataModel';
 import { requireAdmin } from './security';
 import { visit } from './store';
-import { mutationRef } from './refs';
+import { actionRef, mutationRef } from './refs';
+import { beginArchiveRewrite } from './travelPrivacyArchives';
 import { decodeRow, encodeRow } from './backupHelpers';
 import { sanitizeTravelAuditSummary } from './travelAuditWriter';
 import { dataRevision, sourceKey, privacyRevisionKey } from '../models/embeddingDataRevision';
@@ -145,7 +146,7 @@ async function importedVisitEvidence(ctx: QueryCtx | MutationCtx, imported: Doc<
     owner.operation !== 'skip' && records[0].agentGlobalIds.includes(owner.agentGlobalId))
     .map((owner: any) => ({ ledger: row, worldId: owner.worldId, ownerGlobalId: owner.agentGlobalId, playerId: owner.playerId }));
 }
-async function assertTerminal(ctx: QueryCtx | MutationCtx, visitId: string, source?: Job['history']) {
+export async function assertTerminal(ctx: QueryCtx | MutationCtx, visitId: string, source?: Job['history']) {
   const ledger = await visit(ctx, visitId);
   if (source) {
     // Historical evidence is never inserted into the execution ledger. A
@@ -193,22 +194,27 @@ function add<T>(array: T[], value: T) {
 function block(job: Job, reason: string) {
   if (!job.blockers.includes(reason)) job.blockers.push(reason);
 }
-async function bodyMemory(ctx: MutationCtx, job: Job, row: Doc<'memories'>) {
-  if (row.data.type === 'travel' && row.data.visitId === job.visitId) {
-    const binding = row.worldId ? await ctx.db.query('residentModelBindings')
-      .withIndex('resident', q => q.eq('worldId', row.worldId!).eq('playerId', row.playerId)).unique() : null;
-    const owner = row.agentGlobalId ?? binding?.agentGlobalId;
-    if (!row.worldId || !owner) {
-      block(job, 'MISSING_MEMORY_OWNERSHIP');
-      return false;
-    }
-    if (row.worldId !== job.worldId || owner !== job.ownerGlobalId ||
-      (binding?.agentGlobalId && binding.agentGlobalId !== owner)) {
-      block(job, 'SHARED_VISIT_OWNERSHIP');
-      return false;
-    }
-    return true;
+async function ownedMemory(ctx: MutationCtx, job: Job, row: Doc<'memories'>, sharedReason: string) {
+  const bindings = row.worldId ? await ctx.db.query('residentModelBindings')
+    .withIndex('resident', q => q.eq('worldId', row.worldId!).eq('playerId', row.playerId)).take(2) : [];
+  const binding = bindings[0], owner = row.agentGlobalId ?? binding?.agentGlobalId;
+  if (!row.worldId || !owner) {
+    block(job, 'MISSING_MEMORY_OWNERSHIP');
+    return false;
   }
+  const ownerBindings = await ctx.db.query('residentModelBindings')
+    .withIndex('globalAgent', q => q.eq('agentGlobalId', owner)).take(2);
+  if (bindings.length > 1 || ownerBindings.length > 1 || row.worldId !== job.worldId || owner !== job.ownerGlobalId ||
+    (binding?.agentGlobalId && binding.agentGlobalId !== owner) ||
+    ownerBindings.some(current => current.worldId !== row.worldId || current.playerId !== row.playerId)) {
+    block(job, sharedReason);
+    return false;
+  }
+  return true;
+}
+async function bodyMemory(ctx: MutationCtx, job: Job, row: Doc<'memories'>) {
+  if (row.data.type === 'travel' && row.data.visitId === job.visitId)
+    return ownedMemory(ctx, job, row, 'SHARED_VISIT_OWNERSHIP');
   return (
     (row.data.type === 'conversation' &&
       row.worldId === job.worldId &&
@@ -229,8 +235,9 @@ function snapshotInputs(job: Job, snapshot: Record<string, any>) {
     .map((action: any) => action.inputId));
   return { selected, shared: [...selected].some(id => other.has(id)) };
 }
-async function scheduled(ctx: MutationCtx, job: Job) {
-  await ctx.scheduler.runAfter(0, mutationRef('travelPrivacy/page'), {
+export async function scheduled(ctx: MutationCtx, job: Job) {
+  await ctx.scheduler.runAfter(0, job.phase.startsWith('ARCHIVE_')
+    ? actionRef('travelPrivacyArchives/page') : mutationRef('travelPrivacy/page'), {
     jobId: job._id,
     revision: job.revision,
   });
@@ -248,6 +255,8 @@ function publicJob(job: Job) {
     processedRows: job.processedRows,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
+    archiveError: job.archiveError,
+    archiveCoverage: job.archiveCoverage,
   };
 }
 export const status = query({
@@ -350,8 +359,8 @@ export const retry = mutation({
       throw new Error('TRAVEL_PRIVACY_PREVIEW_STALE');
     // A failed mutation leaves its entire page uncommitted. Preserve that
     // checkpoint and fence any older scheduled invocation with a new revision.
-    const next = { ...job, revision: job.revision + 1, updatedAt: Date.now() };
-    await ctx.db.patch(job._id, { revision: next.revision, updatedAt: next.updatedAt });
+    const next = { ...job, revision: job.revision + 1, updatedAt: Date.now(), archiveError: undefined };
+    await ctx.db.patch(job._id, { revision: next.revision, updatedAt: next.updatedAt, archiveError: undefined });
     await ctx.db.insert('federationTravelAudit', {
       visitId: job.visitId, source: 'travelPrivacy', operation: 'ADMIN_LOCAL_CLEAR_RETRY',
       at: Date.now(), next: { state: job.state, role: job.role },
@@ -428,13 +437,16 @@ export const start = mutation({
               : {}),
           });
     }
+    const archiveRewrite = job.scope === 'SENSITIVE' && await beginArchiveRewrite(ctx, job);
     const next = {
       state: 'RUNNING',
-      phase: 'PURGE',
+      phase: archiveRewrite ? 'ARCHIVE_REWRITE' : 'PURGE',
       tableIndex: 0,
       cursor: null,
       revision: job.revision + 1,
       updatedAt: Date.now(),
+      ...(job.scope === 'SENSITIVE' ? { archiveCoverage: { ordinaryBundles: archiveRewrite ? 'RUNNING' as const : 'COMPLETE' as const,
+        largeChunks: 'NOT_IMPLEMENTED' as const, orphanObjects: 'NOT_VERIFIED' as const } } : {}),
     };
     await ctx.db.patch(job._id, next);
     await ctx.db.insert('federationTravelAudit', {
@@ -481,6 +493,9 @@ async function inspectMemory(ctx: MutationCtx, job: Job, row: Doc<'memories'>, f
     row.data.type === 'reflection' &&
     row.data.relatedMemoryIds.some((id) => job.memoryIds.includes(id))
   ) {
+    // Exclusive dependencies do not prove ownership. A foreign or ambiguous
+    // dependent must block clearing its sources as well as its own body.
+    if (!await ownedMemory(ctx, job, row, 'SHARED_DERIVED_MEMORY')) return;
     if (row.data.relatedMemoryIds.every((id) => job.memoryIds.includes(id))) {
       if (!job.memoryIds.includes(row._id)) {
         add(job.memoryIds, row._id);
@@ -919,6 +934,8 @@ export const page = internalMutation({
     )
       return;
     if (stored.history) await assertTerminal(ctx, stored.visitId, stored.history);
+    // Archive phases are actions because storage bodies cannot be read in mutations.
+    if (stored.phase.startsWith('ARCHIVE_')) { await scheduled(ctx, stored); return; }
     const job = {
       ...stored,
       conversationIds: [...stored.conversationIds],
@@ -978,7 +995,10 @@ export const page = internalMutation({
           job.privacyRevision !== (await dataRevision(ctx.db, privacyRevisionKey))
         )
           block(job, 'PREVIEW_STALE');
-        job.state = job.blockers.length ? 'BLOCKED' : 'READY';
+        if (job.scope === 'SENSITIVE' && !job.blockers.length) {
+          job.phase = 'ARCHIVE_CHECK';
+          job.archiveCoverage = { ordinaryBundles: 'CHECKING', largeChunks: 'NOT_IMPLEMENTED', orphanObjects: 'NOT_VERIFIED' };
+        } else job.state = job.blockers.length ? 'BLOCKED' : 'READY';
         job.counts = {
           memories: job.memoryIds.length,
           conversations: job.conversationIds.length,

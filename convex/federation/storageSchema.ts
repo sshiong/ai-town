@@ -37,6 +37,23 @@ export const storagePolicyFields = {
   vectorRebuildBatchSize: v.number(),
 };
 export const storagePolicyTables = {
+  travelPrivacyArchiveObjects: defineTable({
+    jobId: v.id('travelPrivacyJobs'), importId: v.id('backupImports'),
+    state: v.union(v.literal('CHECKING_REFERENCES'), v.literal('PLANNED'), v.literal('PUBLISHED'), v.literal('DELETED')),
+    originalStorageId: v.id('_storage'), originalDigest: v.string(),
+    expectedArchiveRevision: v.number(), expectedImportDigest: v.string(),
+    rewritingImportDigest: v.optional(v.string()), publishedImportDigest: v.optional(v.string()),
+    replacementDigest: v.string(), replacementStorageId: v.optional(v.id('_storage')),
+    sourceEvidence: v.object({ manifest: v.any(), signature: v.string(), sourcePublicKey: v.string(),
+      originalStorageId: v.id('_storage'), originalDigest: v.string() }),
+    importBytes: v.number(), deletedAt: v.optional(v.number()),
+    referenceCursor: v.union(v.string(), v.null()),
+    semanticDigest: v.string(),
+    references: v.array(v.object({ importId: v.id('backupImports'), expectedArchiveRevision: v.number(),
+      expectedImportDigest: v.string(), importBytes: v.number(), rewritingImportDigest: v.optional(v.string()),
+      publishedImportDigest: v.optional(v.string()) })),
+  }).index('job', ['jobId']).index('job_state', ['jobId', 'state']).index('job_import', ['jobId', 'importId'])
+    .index('job_storage', ['jobId', 'originalStorageId']),
   travelPrivacyTombstones: defineTable({
     key: v.string(), visitId: v.string(), createdAt: v.number(),
     worldId: v.optional(v.id('worlds')), ownerGlobalId: v.optional(v.string()), playerId: v.optional(v.string()), playerIds: v.optional(v.array(v.string())),
@@ -52,6 +69,11 @@ export const storagePolicyTables = {
     textHashes: v.array(v.string()), blockers: v.array(v.string()), externalCopies: v.number(),
     counts: v.any(), processedRows: v.number(), createdAt: v.number(), updatedAt: v.number(),
     finishedAt: v.optional(v.number()),
+    archiveError: v.optional(v.string()),
+    archiveCoverage: v.optional(v.object({
+      ordinaryBundles: v.union(v.literal('CHECKING'), v.literal('READY'), v.literal('RUNNING'), v.literal('COMPLETE')),
+      largeChunks: v.literal('NOT_IMPLEMENTED'), orphanObjects: v.literal('NOT_VERIFIED'),
+    })),
   }).index('visit', ['visitId']).index('state', ['state']).index('scope_state', ['scope', 'state']),
   coldHistoryArchives: defineTable({
     sourceKey: v.string(),

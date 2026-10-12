@@ -14,6 +14,7 @@ const modules = {
   '../federation/backupLarge.ts': () => import('./backupLarge'),
   '../federation/backup.ts': () => import('./backup'),
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
+  '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
   '../agent/embeddingsCache.ts': () => import('../agent/embeddingsCache'),
   '../_generated/server.ts': () => import('../_generated/server'),
 };
@@ -117,6 +118,7 @@ async function fixture(t: ReturnType<typeof convexTest<typeof schema.tables>>, r
     const summaryId = await ctx.db.insert('memories', {
       worldId,
       playerId: 'p:0',
+      agentGlobalId: 'resident-global',
       description: 'private first reflection',
       importance: 5,
       lastAccess: Date.now(),
@@ -125,6 +127,7 @@ async function fixture(t: ReturnType<typeof convexTest<typeof schema.tables>>, r
     const childId = await ctx.db.insert('memories', {
       worldId,
       playerId: 'p:0',
+      agentGlobalId: 'resident-global',
       description: 'private derived reflection',
       importance: 5,
       lastAccess: Date.now(),
@@ -857,6 +860,7 @@ test('mixed derived memories block sensitive clearing without changing either tr
       worldId: ids.worldId,
       playerId: 'p:0',
       description: 'mixed-private-inference',
+      agentGlobalId: 'resident-global',
       importance: 5,
       lastAccess: Date.now(),
       data: { type: 'reflection', relatedMemoryIds: [ids.memoryIds[0], ids.otherId] },
@@ -870,6 +874,70 @@ test('mixed derived memories block sensitive clearing without changing either tr
   ).rejects.toThrow('TRAVEL_PRIVACY_PREFLIGHT_BLOCKED');
   expect(await t.run((ctx) => ctx.db.get(mixedId))).toMatchObject({
     description: 'mixed-private-inference',
+  });
+});
+test.each([
+  ['summary', 'other-owner'], ['summary', 'other-world'], ['summary', 'missing-world'],
+  ['summary', 'missing-owner'], ['summary', 'conflicting-binding'], ['summary', 'conflicting-global-binding'],
+  ['summary', 'duplicate-binding'], ['child', 'other-owner'],
+] as const)('a %s reflection with %s blocks deletion of its exclusive source memories', async (generation, ownership) => {
+  const t = convexTest(schema, modules), ids = await fixture(t);
+  const reflectionId = generation === 'summary' ? ids.summaryId : ids.childId;
+  await t.run(async ctx => {
+    if (ownership === 'other-owner') await ctx.db.patch(reflectionId, { agentGlobalId: 'other-resident', playerId: 'p:1' });
+    else if (ownership === 'other-world') {
+      const worldId = await ctx.db.insert('worlds', { nextId: 1, players: [], agents: [], conversations: [] });
+      await ctx.db.patch(reflectionId, { worldId });
+    } else if (ownership === 'missing-world') await ctx.db.patch(reflectionId, { worldId: undefined });
+    else if (ownership === 'missing-owner') await ctx.db.patch(reflectionId, { agentGlobalId: undefined, playerId: 'p:1' });
+    else {
+      const chatProfileId = await ctx.db.insert('chatProfiles', { name: 'ownership-fixture', provider: 'ollama',
+        url: 'http://localhost:11434', model: 'test-model', stopWords: [], createdAt: 1 });
+      await ctx.db.patch(reflectionId, { playerId: 'p:1' });
+      const binding = { worldId: ids.worldId, playerId: ownership === 'conflicting-global-binding' ? 'p:0' : 'p:1',
+        agentGlobalId: ownership === 'conflicting-global-binding' ? 'resident-global' : 'other-resident',
+        chatProfileId, createdAt: 1, updatedAt: 1 };
+      await ctx.db.insert('residentModelBindings', binding);
+      if (ownership === 'duplicate-binding') await ctx.db.insert('residentModelBindings', binding);
+    }
+  });
+  const originals = await t.run(ctx => ctx.db.query('memories').collect());
+  const { jobId, report } = await preview(t);
+  expect(report.state).toBe('BLOCKED');
+  expect(report.blockers).toContain(ownership.startsWith('missing-') ? 'MISSING_MEMORY_OWNERSHIP' : 'SHARED_DERIVED_MEMORY');
+  expect((await t.run(ctx => ctx.db.get(jobId)))!.memoryIds).not.toContain(reflectionId);
+  await expect(t.mutation(mutationRef('travelPrivacy/start'), { adminToken, jobId }))
+    .rejects.toThrow('TRAVEL_PRIVACY_PREFLIGHT_BLOCKED');
+  expect(await t.run(ctx => ctx.db.query('memories').collect())).toEqual(originals);
+  expect(await t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).toEqual([]);
+});
+test('same-owner legacy reflections follow the fixed point through their resident binding and retain tombstone ownership', async () => {
+  const t = convexTest(schema, modules), ids = await fixture(t);
+  await t.run(async ctx => {
+    const chatProfileId = await ctx.db.insert('chatProfiles', { name: 'ownership-fixture', provider: 'ollama',
+      url: 'http://localhost:11434', model: 'test-model', stopWords: [], createdAt: 1 });
+    await ctx.db.insert('residentModelBindings', { worldId: ids.worldId, playerId: 'p:0',
+      agentGlobalId: 'resident-global', chatProfileId, createdAt: 1, updatedAt: 1 });
+    await ctx.db.patch(ids.summaryId, { agentGlobalId: undefined });
+    await ctx.db.patch(ids.childId, { agentGlobalId: undefined });
+  });
+  const { jobId, report } = await preview(t);
+  expect(report.state).toBe('READY');
+  expect(report.counts.memories).toBe(15);
+  const job = (await t.run(ctx => ctx.db.get(jobId)))!;
+  for (const memoryId of [ids.summaryId, ids.childId]) expect(job.memoryOwners).toContainEqual({
+    memoryId, worldId: ids.worldId, playerId: 'p:0', ownerGlobalId: 'resident-global',
+  });
+  await t.mutation(mutationRef('travelPrivacy/start'), { adminToken, jobId });
+  await drain(t);
+  expect((await t.query(queryRef('travelPrivacy/status'), { adminToken, jobId }))!.state).toBe('COMPLETE');
+  await t.run(async ctx => {
+    for (const memoryId of [ids.summaryId, ids.childId]) {
+      expect(await ctx.db.get(memoryId)).toBeNull();
+      expect(await ctx.db.query('travelPrivacyTombstones').withIndex('key', q => q.eq('key', `memory:${memoryId}`)).unique())
+        .toMatchObject({ worldId: ids.worldId, playerId: 'p:0', ownerGlobalId: 'resident-global' });
+    }
+    expect(await ctx.db.get(ids.otherId)).not.toBeNull();
   });
 });
 test('shared host conversations are reported and never erase other visitor dialogue', async () => {

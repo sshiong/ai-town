@@ -33,7 +33,9 @@ export const backupTables = {
       manifest: v.any(), signature: v.string(), sourcePublicKey: v.string(),
       originalStorageId: v.id('_storage'), originalDigest: v.string(),
     })),
-  }).index('sourceTown', ['sourceTownId']),
+  }).index('sourceTown', ['sourceTownId'])
+    .index('vectorArchiveStorage', ['manifest.vectorArchiveStorageId'])
+    .index('localArchiveStorage', ['localArchiveStorageId']),
   backupReconciliations: defineTable({
     importId: v.id('backupImports'),
     agentGlobalId: v.string(),
