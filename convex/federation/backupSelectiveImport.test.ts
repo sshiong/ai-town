@@ -21,6 +21,7 @@ const modules = {
   '../federation/backupLarge.ts': () => import('./backupLarge'),
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
   '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
+  '../federation/travelPrivacyChunkArchives.ts': () => import('./travelPrivacyChunkArchives'),
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../federation/coldHistoryChunks.ts': () => import('./coldHistoryChunks'),
@@ -209,6 +210,23 @@ async function archive(f: Fixture, overrides: Record<string, unknown> = {}) {
   return { manifest, signature: result.signature as string, chunks };
 }
 type Archive = Awaited<ReturnType<typeof archive>>;
+async function formalChunkPlan(t: Fixture['t'], jobId: Id<'travelPrivacyJobs'>) {
+  const scanId = await t.mutation(ref('travelPrivacyChunkArchives', 'startInspection', 'mutation'), { jobId });
+  for (let page = 0; page < 5000; page++) {
+    const scan = (await t.query(ref('travelPrivacyChunkArchives', 'result', 'query'), { scanId }))!;
+    if (['READY_TO_REWRITE', 'BLOCKED'].includes(scan.phase)) {
+      expect(scan.phase).toBe('READY_TO_REWRITE'); expect(scan.cleanupComplete).toBe(false);
+      return t.run(async ctx => {
+        const objects = await ctx.db.query('travelPrivacyChunkObjects').withIndex('scan', q => q.eq('scanId', scanId)).collect();
+        expect(objects).toHaveLength((await ctx.db.query('backupLargeChunks').collect()).length);
+        expect(objects.every(o => o.state === 'CHECKED' && !o.blockers.length)).toBe(true);
+        return objects;
+      });
+    }
+    await t.action(ref('travelPrivacyChunkArchives', 'inspectPage', 'action'), { scanId, revision: scan.revision });
+  }
+  throw new Error('Formal chunk inspection exceeded deterministic page budget');
+}
 test('selected travel audit history uses event time and imports only as read-only historical records', async () => {
   const f = await fixture();
   await f.t.run(async ctx => {
@@ -342,6 +360,7 @@ test.each(['explicit', 'legacy'] as const)('formal selective clone %s historical
   })).rejects.toThrow('TRAVEL_PRIVACY_HISTORY_EVIDENCE_MISSING');
   expect(await target.t.run(ctx => ctx.db.query('travelPrivacyJobs').collect())).toEqual([]);
   await target.t.run(ctx => ctx.db.patch(readonlyLedger._id, { record: readonlyLedger.record }));
+  await archive(target, { agentGlobalIds: [owner.agentGlobalId] });
   jest.useFakeTimers();
   try {
     const jobId: Id<'travelPrivacyJobs'> = await target.t.mutation(ref('travelPrivacy', 'inspect', 'mutation'), {
@@ -349,6 +368,24 @@ test.each(['explicit', 'legacy'] as const)('formal selective clone %s historical
     });
     await target.t.finishAllScheduledFunctions(() => jest.runAllTimers());
     expect((await target.t.run(ctx => ctx.db.get(jobId)))!.state).toBe('READY');
+    const chunkObjects = await formalChunkPlan(target.t, jobId);
+    expect(new Set(chunkObjects.map(o => o.role))).toEqual(new Set(['SOURCE', 'OLD', 'EXPORT']));
+    expect(chunkObjects.some(o => o.role === 'SOURCE' && o.selectedRows > 0)).toBe(true);
+    expect(chunkObjects.some(o => o.role === 'EXPORT' && o.selectedRows > 0)).toBe(true);
+    expect(chunkObjects.filter(o => o.role === 'OLD').every(o => !o.selectedRows)).toBe(true);
+    expect(chunkObjects.filter(o => o.role === 'SOURCE').every(o => o.sourceSignature === exported.signature &&
+      o.sourcePublicKey === exported.manifest.source.publicKey)).toBe(true);
+    const selectedSource = await target.t.run(ctx => ctx.db.query('travelPrivacyChunkRows').withIndex('selected', q =>
+      q.eq('scanId', chunkObjects[0].scanId).eq('selected', true)).collect());
+    expect(selectedSource).toEqual(expect.arrayContaining([expect.objectContaining({ role: 'SOURCE',
+      evidence: expect.objectContaining({ table: 'memories', sourceId: source.memories[0], ownerGlobalId: source.globals[0] }) })]));
+    for (const object of chunkObjects) {
+      const stored = await target.t.action(async ctx => {
+        const blob = await ctx.storage.get(object.originalStorageId);
+        return blob ? descriptor(JSON.parse(await blob.text())) : null;
+      });
+      expect(stored).toEqual(object.descriptor);
+    }
     await target.t.mutation(ref('travelPrivacy', 'start', 'mutation'), { adminToken, jobId });
     await target.t.finishAllScheduledFunctions(() => jest.runAllTimers());
     await target.t.run(async ctx => {

@@ -338,3 +338,9 @@ K 的 signed 与 unsigned 两种真实普通归档场景均由原 scheduler 完�
 两种测试均另行精确清理其合成对象，保留合成 Chat Profile，版本计数保持单调，不声称整个数据库字节回滚。已移除临时入口并重新部署正式 c0922de 到 K，实际调用确认临时函数不存在、身份 ACTIVE、合成旅行数为零。此验收证明普通单对象 signed/unsigned 文件删除；共享对象、故障注入仍是事务测试证据，浏览器实际删除、分块/孤立对象和完整旅行验收仍开放。
 
 分块预检的来源版本前置保护：backupLargeJobs、backupLargeChunks、backupLargeGlobalMappings 的注册 insert/patch/replace/delete 现纳入 privacy revision，防止分页扫描期间 producer、descriptor 或 owner mapping 改变后沿用旧计划；不改变 canonical memory 的 source revision。三种表各四种写操作的三项新增测试通过。根代理排除分块草稿的独立冻结树上，隐私/普通归档/来源版本三套共 85 项通过（38 秒），Convex 类型检查通过。分块 scanner 仍在正式导出/导入格式验收中，尚未接到敏感清理 READY 前，也未实现分块重写发布和删除。
+
+独立分块预检阶段现已完成：逐页扫描全部 SOURCE/OLD/export 实体，校验实际文件 descriptor、来源签名与对应原 manifest 指针，持久化不含正文/向量的标识证据，跨块建立记忆、反思、纠错、对话、转录和输入依赖闭包。保存原 storage、完整 descriptor、producer 摘要、world/global 映射摘要及共享引用；最终重新验证来源版本与归属。终态仅 READY_TO_REWRITE 或带证据的 BLOCKED，result 固定 cleanupComplete=false，不修改父任务的 coverage。
+
+GPT-6.1-sol medium 独立审阅复现并推动修复五项真实缺口：重复 global binding、cutoff 后新归档、descriptor count/table 变动、SOURCE world 映射变动及缺显式 global 的 foreign correction。原复现改成安全预期后五项通过，不能把原确认错误行为的五项通过算修复证据。分块模块最终 19 项实际 Storage 测试通过；根代理独立冻结复验 19 项通过（37.139 秒），两份类型检查与生产构建通过。
+
+正式生产格式三项兼容验证通过：真实大包 clone 一项、选择性显式/legacy clone 两项，均实际 export→stage→validate→apply COMPLETE 后、父敏感预检 READY 与 start 之间运行分块预检到 READY_TO_REWRITE，再逐对象回读 descriptor 并核对来源签名、公钥、源 memory ID 映射。选择性场景覆盖 SOURCE/OLD/export，OLD 原目标记录未误选；大包空目标 clone 没有 OLD 正文，未虚构该覆盖。已进入下一阶段开发局部派生 manifest 契约、持久候选上传 provenance、分块重写与真实删除；当前生产敏感清理尚未调用分块预检，也不能据此宣称 chunk/孤立对象清除完成。

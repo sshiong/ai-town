@@ -18,6 +18,7 @@ import { endpointTables } from './federation/endpointsSchema';
 import { coldHistoryTables } from './federation/coldHistorySchema';
 import { coldArchiveTables } from './federation/coldArchiveSchema';
 import { residentPolicyTables } from './federation/residentPolicySchema';
+import { travelPrivacyChunkTables } from './federation/travelPrivacyChunkSchema';
 
 export default defineSchema({
   ...messageTranslationTables,
@@ -52,4 +53,5 @@ export default defineSchema({
   ...coldHistoryTables,
   ...coldArchiveTables,
   ...residentPolicyTables,
+  ...travelPrivacyChunkTables,
 });
