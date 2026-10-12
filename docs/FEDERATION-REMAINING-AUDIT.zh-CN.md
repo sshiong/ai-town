@@ -330,3 +330,11 @@ GPT-6.1-sol high 子代理后端两套 47 项通过；根代理冻结仅待发�
 上传校验失败和发布回执丢失通过候选回收事务处理：先使旧发布版本失效，再核查持久 journal 和实际引用；已发布候选保留，确定未发布候选实际删除。重试沿用检查点，旧 action 不能迟到发布。独立 GPT-6.1-sol medium 审阅发现 manifest 未知扩展字段可能夹带正文；普通和本地来源证据入口现严格检查固定元数据与摘要，未知字段阻止清理，原文件及原记忆保持完整，不裁掉字段后声称原签名有效。
 
 最终 worker/原生隐私两套 82 项通过（22.399 秒）；根代理冻结普通归档改动、排除分块草稿，Convex 类型检查和生产构建通过，完整普通备份套件 61 项通过（26.384 秒）。正式普通/选择性/大型导入历史入口三套定向 4 项通过（26.207 秒，其余 156 项未运行）；向量/语言/界面策略三套相邻 40 项通过。上述数量存在重叠，不累加为全项目通过数。实际存储证明来自 convex-test Blob 与 `_storage` 检查，本机真实后端的 SENSITIVE 文件删除、浏览器实际清理与失败重试仍待验收。大型 SOURCE/OLD/export 分块、原始 metadata/provenance、可分类和未知孤立对象仍未覆盖，整体目标未完成。
+
+提交 c0922de 已推送，正式冻结代码成功部署 I/J。两镇权限、空历史候选及已有终态旅行 CACHE 预检复验通过，身份不变。随后新建隔离 K 实际本机 Convex 后端，初始化零 agent、暂停原生世界并配置仅作绑定的合成 Chat Profile；没有调用大模型或改动 I/J。临时 admin-gated 验收入口只部署 K，所有操作校验唯一 prefix、精确 ID 和 MAC 签收据，已有缓存非空或选择包含其他对象时拒绝执行。
+
+K 的 signed 与 unsigned 两种真实普通归档场景均由原 scheduler 完成 inspect→READY→start→COMPLETE。独立回读证明原 `storage.get` 和 `_storage` 元数据均为空，新本地文件摘要正确且所选正文不存在，另一访次的 canonical memory 和归档记录完整摘要不变。signed 来源签名真实保留；unsigned 不虚构签名。模型、小镇身份、非测试表记录及其他存储元数据摘要均未改变。首次 signed 验收因临时入口错误地直接以业务 token 作为 base64 MAC key 而失败；事务未提交，经域隔离摘要派生修复后恢复同一 prefix 验收，没有换场景掩盖失败。
+
+两种测试均另行精确清理其合成对象，保留合成 Chat Profile，版本计数保持单调，不声称整个数据库字节回滚。已移除临时入口并重新部署正式 c0922de 到 K，实际调用确认临时函数不存在、身份 ACTIVE、合成旅行数为零。此验收证明普通单对象 signed/unsigned 文件删除；共享对象、故障注入仍是事务测试证据，浏览器实际删除、分块/孤立对象和完整旅行验收仍开放。
+
+分块预检的来源版本前置保护：backupLargeJobs、backupLargeChunks、backupLargeGlobalMappings 的注册 insert/patch/replace/delete 现纳入 privacy revision，防止分页扫描期间 producer、descriptor 或 owner mapping 改变后沿用旧计划；不改变 canonical memory 的 source revision。三种表各四种写操作的三项新增测试通过。根代理排除分块草稿的独立冻结树上，隐私/普通归档/来源版本三套共 85 项通过（38 秒），Convex 类型检查通过。分块 scanner 仍在正式导出/导入格式验收中，尚未接到敏感清理 READY 前，也未实现分块重写发布和删除。

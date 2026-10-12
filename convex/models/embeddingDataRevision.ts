@@ -4,7 +4,7 @@ import type { Doc } from '../_generated/dataModel';
 
 export const sourceKey = 'memories';
 export const privacyRevisionKey = 'travelPrivacySources';
-const privacySourceTables = ['coldHistoryArchives', 'coldHistoryChunks', 'homeTravelTranscripts', 'memorySourceCorrections', 'federationTurns', 'federationTranscriptJobs', 'backupImports', 'backupLargeRows', 'backupSelectiveHistory', 'residentModelBindings'] as const;
+const privacySourceTables = ['coldHistoryArchives', 'coldHistoryChunks', 'homeTravelTranscripts', 'memorySourceCorrections', 'federationTurns', 'federationTranscriptJobs', 'backupImports', 'backupLargeJobs', 'backupLargeChunks', 'backupLargeGlobalMappings', 'backupLargeRows', 'backupSelectiveHistory', 'residentModelBindings'] as const;
 export const vectorKey = (spaceId: string) => `vectors:${spaceId}`;
 export async function dataRevision(db: DatabaseReader, key: string) {
   return (await db.query('embeddingDataRevisions').withIndex('key', q => q.eq('key', key)).unique())?.revision ?? 0;
