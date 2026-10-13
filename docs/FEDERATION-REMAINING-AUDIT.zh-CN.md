@@ -392,3 +392,8 @@ SENSITIVE 预检在普通归档检查后继续分块检查，归属、来源签�
 
 
 独立审阅发现 coldHistoryChunks 和 backupSelective 的实际注册写入入口绕过 withEmbeddingRevision：前者写冷历史 archive/chunks，后者写选择性导出的 backupLargeJobs/chunks/rows。现改用 trackedMutation/trackedInternalMutation，在保留各自维护锁流程的同时，每次引用来源写入递增 archiveStorageReferences。新增实际 start/capture/importPart/cancel 及选择性 start/advance 发布测试，不只调用版本 helper。根代理仅冻结这四份技术文件，冷分块、引用版本、选择性备份四套 34 项通过（48.537 秒），Convex 类型检查通过。新分页删除接入与嵌套物理归档递归扫描仍在独立开发，本检查点不宣告完整分页引用覆盖。
+
+
+普通导入界面现为一次已验证导入生成稳定 uploadAttemptKey，并在 RPC 前冻结原请求于组件内存。若提交成功但回执丢失，身份/世界响应式更新导致预检消失，仍可发送相同请求和 key；重试不重复安全导出。文件/模式/端点/源停止授权/恢复操作者或原因改变、撤回确认或显式开始另一次导入，清除旧尝试；语言切换保留。快照不保存 adminToken，不写 browser storage。
+
+当前后端幂等仅覆盖含实际向量行的普通 bundle，因此界面只向这种导入提供同次重试；无向量明确显示检查导入历史与目标数据的提示，不冒称可安全自动恢复。根代理独立冻结 UI 四文件，实际 DataPanel 事件处理器 harness 与 uiPolicy 两套 30 项通过，语言四项另行通过，生产构建通过。此 harness 无 DOM，不等于真实浏览器交互验收；刷新/关闭面板会丢失内存尝试，无向量导入的后端幂等仍未补齐。

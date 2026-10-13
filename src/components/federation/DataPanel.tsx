@@ -1,8 +1,12 @@
 import { useLocale } from '../../i18n';
 import { useEffect, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
-import type { FunctionReturnType } from 'convex/server';
-import { requiresStoppedSource } from './uiPolicy';
+import type { FunctionArgs, FunctionReturnType } from 'convex/server';
+import {
+  backupImportSupportsRetry,
+  newBackupUploadAttemptKey,
+  requiresStoppedSource,
+} from './uiPolicy';
 import { encryptBackupText, readBackupText, validBackupPassphrase } from './backupEncryption';
 import { api } from '../../../convex/_generated/api';
 import RecoveryPanel from './RecoveryPanel';
@@ -77,6 +81,10 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
     useState<FunctionReturnType<typeof api.federation.backup.preflight>>();
   const [result, setResult] =
     useState<FunctionReturnType<typeof api.federation.backup.importBackup>>();
+  const [importAttempt, setImportAttempt] = useState<{
+    request: Omit<FunctionArgs<typeof api.federation.backup.importBackup>, 'adminToken'>;
+    supportsRetry: boolean;
+  }>();
   const [encryptDownloads, setEncryptDownloads] = useState(false);
   const [includeVectors, setIncludeVectors] = useState(false);
   const [exportOperator, setExportOperator] = useState('');
@@ -140,6 +148,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
       : undefined,
   };
   function invalidate() {
+    setImportAttempt(undefined);
     setReport(undefined);
     setResult(undefined);
     setAcknowledged(false);
@@ -525,6 +534,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
         <AdminButton
           disabled={
             !!task.pending ||
+            !!importAttempt ||
             !bundle ||
             (mode !== 'clone' && !targetPaused) ||
             (mode === 'merge' && !world) ||
@@ -608,6 +618,8 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                   disabled={!!task.pending}
                   onChange={(event) => {
                     setOperator(event.target.value);
+                    setImportAttempt(undefined);
+                    setResult(undefined);
                     setAcknowledged(false);
                   }}
                 />
@@ -619,6 +631,8 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                   disabled={!!task.pending}
                   onChange={(event) => {
                     setReason(event.target.value);
+                    setImportAttempt(undefined);
+                    setResult(undefined);
                     setAcknowledged(false);
                   }}
                 />
@@ -630,7 +644,14 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               type="checkbox"
               checked={acknowledged}
               disabled={!!task.pending}
-              onChange={(event) => setAcknowledged(event.target.checked)}
+              onChange={(event) => {
+                setAcknowledged(event.target.checked);
+                // Revoking confirmation starts a fresh operation after another review.
+                if (!event.target.checked) {
+                  setImportAttempt(undefined);
+                  setResult(undefined);
+                }
+              }}
             />{' '}
             {report.residentRestorePlan
               ? t(
@@ -643,6 +664,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               danger
               disabled={
                 !!task.pending ||
+                !!importAttempt ||
                 !report.valid ||
                 !acknowledged ||
                 (!!report.residentRestorePlan && (!operator.trim() || !reason.trim())) ||
@@ -669,7 +691,18 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                         secret,
                       );
                     }
-                    setResult(await convex.action(api.federation.backup.importBackup, args));
+                    const { adminToken: _adminToken, ...request } = args;
+                    const attempt = {
+                      request: { ...request, uploadAttemptKey: newBackupUploadAttemptKey() },
+                      supportsRetry: backupImportSupportsRetry(bundle),
+                    };
+                    // Keep the exact request before awaiting its ACK. Reactive world/identity
+                    // updates can remove preflight after a committed import with a lost response.
+                    setImportAttempt(attempt);
+                    setResult(await convex.action(api.federation.backup.importBackup, {
+                      ...attempt.request,
+                      adminToken,
+                    }));
                   },
                   t(
                     'Data import completed. Review the mapping and rebuild memory vectors before activation.',
@@ -678,6 +711,48 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
               }
             >
               {t('Import validated package')}
+            </AdminButton>
+          </div>
+        </>
+      )}
+      {importAttempt && (
+        <>
+          {!result && (
+            <p className="admin-muted">
+              {importAttempt.supportsRetry
+                ? t(
+                    'Retry sends the same import request. Its upload and publication can be recovered if the response was lost. Keep this panel open; retry state is held only in browser memory.',
+                  )
+                : t(
+                    'This backup has no vector upload checkpoint. A lost response cannot be retried safely here; review import history and target data before starting another import.',
+                  )}
+            </p>
+          )}
+          <div className="admin-toolbar">
+            {!result && importAttempt.supportsRetry && (
+              <AdminButton
+                danger
+                disabled={!!task.pending}
+                onClick={() =>
+                  void task.run(
+                    t('Importing validated backup'),
+                    async () => {
+                      setResult(await convex.action(api.federation.backup.importBackup, {
+                        ...importAttempt.request,
+                        adminToken,
+                      }));
+                    },
+                    t(
+                      'Data import completed. Review the mapping and rebuild memory vectors before activation.',
+                    ),
+                  )
+                }
+              >
+                {t('Retry the same import')}
+              </AdminButton>
+            )}
+            <AdminButton disabled={!!task.pending} onClick={invalidate}>
+              {t('Start another import')}
             </AdminButton>
           </div>
         </>

@@ -49,6 +49,23 @@ export function requiresStoppedSource(mode: string) {
   return mode === 'restore' || mode === 'migrate';
 }
 
+export function backupImportSupportsRetry(bundle: unknown) {
+  if (!bundle || typeof bundle !== 'object' || Array.isArray(bundle)) return false;
+  const value = bundle as {
+    manifest?: { includeVectors?: unknown };
+    sections?: { modelMemoryVectors?: unknown };
+  };
+  const vectors = value.sections?.modelMemoryVectors;
+  return value.manifest?.includeVectors === true && Array.isArray(vectors) && vectors.length > 0;
+}
+
+export function newBackupUploadAttemptKey() {
+  // getRandomValues also works on HTTP development hosts where randomUUID is unavailable.
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+}
+
 export function canResumeRestoredResident(
   resident: { safeAfter: number | null; engineStopped: boolean; reason: string | null },
   now: number,
