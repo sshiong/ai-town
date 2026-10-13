@@ -138,6 +138,8 @@ function view(j: Job) {
     options: m.options,
     targetOwners: m.targetOwners,
     uploadedChunks: m.uploaded,
+    privacyChunkCount: j.metadata.derivativePrivacyChunkCount ?? 0,
+    uploadedPrivacyChunks: j.metadata.uploadedPrivacyChunks ?? 0,
     chunkCount: j.chunkCount,
     recordCount: j.recordCount,
     bytes: j.bytes,

@@ -1,4 +1,6 @@
 export const federationMessages: Record<string, string> = {
+  'Privacy evidence chunks: {uploaded} / {count}': '删除证据分块：{uploaded} / {count}',
+  'Resume this saved task by selecting its remaining data and privacy files. The server keeps the authenticated manifest and mappings; no manifest reload is needed.': '选择剩余的数据文件和删除证据文件，继续此已保存任务。服务器保留了已认证清单和映射，无需重新加载清单。',
   'Action type': '动作类型',
   'Movement destination': '移动目标坐标',
   "Privacy page index": "删除证据页索引",

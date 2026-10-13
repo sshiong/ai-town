@@ -1626,6 +1626,11 @@ test.each(['clone', 'merge', 'restore'] as const)('formal selective export → s
     storage: await ctx.db.system.query('_storage').collect() }));
   let { jobId }: { jobId: Id<'backupLargeJobs'> } = await target.t.action(aa('createImport'), { adminToken, ...configured,
     manifest: derived.manifest, signature: '', localProof: derived.localProof, expectedLocalProofFingerprint: fingerprint });
+  const savedView = await target.t.query(aq('status'), { adminToken, jobId });
+  expect(savedView.privacyChunkCount).toBe(privacyPages.length);
+  expect(savedView.uploadedPrivacyChunks).toBe(0);
+  expect(savedView).not.toHaveProperty('archiveLocalProof');
+  expect(savedView).not.toHaveProperty('privacyRows');
   const saved = (await target.t.run(ctx => ctx.db.get(jobId)))!;
   const tamperedDigest = await digest({ tampered: true });
   await target.t.run(ctx => ctx.db.patch(jobId, { metadata: { ...saved.metadata, archiveLocalManifestDigest: tamperedDigest } }));

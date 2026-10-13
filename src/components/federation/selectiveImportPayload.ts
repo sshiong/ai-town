@@ -9,3 +9,10 @@ export function selectiveImportPayload(value: { manifest: unknown; signature: st
     ...(value.localProof ? { localProof: value.localProof, expectedLocalProofFingerprint: trustedFingerprint.trim() } : {}),
   };
 }
+
+
+/** Staging must include both independent file namespaces before server preflight can begin. */
+export function selectiveStagingComplete(job: { uploadedChunks: number; chunkCount: number;
+  uploadedPrivacyChunks?: number; privacyChunkCount?: number }) {
+  return job.uploadedChunks === job.chunkCount && (job.uploadedPrivacyChunks ?? 0) === (job.privacyChunkCount ?? 0);
+}

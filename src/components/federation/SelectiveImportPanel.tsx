@@ -1,4 +1,4 @@
-import { selectiveImportPayload } from './selectiveImportPayload';
+import { selectiveImportPayload, selectiveStagingComplete } from './selectiveImportPayload';
 import type { LocalArchiveProof, LocalSanitizedChunkManifest } from '../../../convex/federation/travelPrivacyLocalChunkManifest';
 import { useLocale } from '../../i18n';
 import { useEffect, useRef, useState } from 'react';
@@ -30,6 +30,8 @@ type Job = {
   selection: SelectiveManifest['selection'];
   options: Options;
   uploadedChunks: number;
+  uploadedPrivacyChunks: number;
+  privacyChunkCount: number;
   chunkCount: number;
   recordCount: number;
   planDigest?: string;
@@ -184,7 +186,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
     (mode !== 'restore' || sourceStopped);
 
   async function loadManifest() {
-    if (!manifestFile) return;
+    if (jobId || !manifestFile) return;
     setSigned(undefined);
     setInspected(false);
     setJobId(undefined);
@@ -316,7 +318,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
     setJobId(result.jobId);
   }
   async function upload() {
-    if (!jobId || !files.length) throw new Error(t('Select the archive chunks to upload.'));
+    if (!jobId || (!files.length && !privacyFiles.length)) throw new Error(t('Select the archive chunks to upload.'));
     stop.current = false;
     try {
       for (const [i, file] of files.entries()) {
@@ -374,12 +376,12 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
         <input
           type="file"
           accept=".json,application/json"
-          disabled={!!task.pending}
+          disabled={!!task.pending || !!jobId}
           onChange={(e) => setManifestFile(e.target.files?.[0])}
         />
       </Field>
       <AdminButton
-        disabled={!!task.pending || !manifestFile}
+        disabled={!!task.pending || !!jobId || !manifestFile}
         onClick={() =>
           void task.run(
             t('Reading selective manifest'),
@@ -398,10 +400,6 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
               <input disabled={!editable} value={trustedFingerprint} onChange={e => setTrustedFingerprint(e.target.value)} placeholder="sha256:…" />
             </Field>
             <p className="admin-muted">{t('Enter the fingerprint verified through the local identity or a trusted channel. It is not filled from the uploaded archive.')}</p>
-            <Field label={t('Privacy evidence chunk files')}>
-              <input type="file" multiple accept=".json" disabled={!!task.pending} onChange={e => setPrivacyFiles(Array.from(e.target.files ?? []))} />
-            </Field>
-            <p>{t('Upload all privacy evidence chunks before preflight.')}</p>
           </>}
           <p>
             {t('Source: ')}
@@ -471,6 +469,13 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
           )}
         </>
       )}
+      {((!jobId && signed?.localProof) || (job?.phase === 'STAGING' && job.privacyChunkCount > 0)) && <>
+        <Field label={t('Privacy evidence chunk files')}>
+          <input type="file" multiple accept=".json,application/json" disabled={!!task.pending}
+            onChange={e => setPrivacyFiles(Array.from(e.target.files ?? []))} />
+        </Field>
+        <p>{t('Upload all privacy evidence chunks before preflight.')}</p>
+      </>}
       {progress && <p role="status">{progress}</p>}
       {inspected && !jobId && (
         <>
@@ -796,6 +801,9 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
           onChange={(e) => {
             setJobId(jobs?.find((j) => j.jobId === e.target.value)?.jobId);
             setReviewed(false);
+            setFiles([]);
+            setPrivacyFiles([]);
+            setManifestFile(undefined);
           }}
         >
           <option value="">{t('New import / choose a task')}</option>
@@ -813,6 +821,8 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
             {t(' uploaded chunks ·')} {job.recordCount}
             {t(' source records')}
           </p>
+          <p role="status">{t('Privacy evidence chunks: {uploaded} / {count}', { uploaded: job.uploadedPrivacyChunks, count: job.privacyChunkCount })}</p>
+          {job.phase === 'STAGING' && <p className="admin-muted">{t('Resume this saved task by selecting its remaining data and privacy files. The server keeps the authenticated manifest and mappings; no manifest reload is needed.')}</p>}
           {job.error && <p role="alert">{job.error}</p>}
           <details className="admin-disclosure">
             <summary>{t('Saved mapping plan')}</summary>
@@ -870,7 +880,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
           <div className="admin-toolbar">
             <AdminButton
               disabled={
-                !!task.pending || job.phase !== 'STAGING' || !files.length || job.state === 'FAILED'
+                !!task.pending || job.phase !== 'STAGING' || (!files.length && !privacyFiles.length) || job.state === 'FAILED'
               }
               onClick={() =>
                 void task.run(
@@ -886,7 +896,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
               disabled={
                 !!task.pending ||
                 ['READY', 'COMPLETE', 'FAILED', 'CANCELLED'].includes(job.state) ||
-                (job.phase === 'STAGING' && job.uploadedChunks !== job.chunkCount)
+                (job.phase === 'STAGING' && !selectiveStagingComplete(job))
               }
               onClick={() =>
                 void task.run(
