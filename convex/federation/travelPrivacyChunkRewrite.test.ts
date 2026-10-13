@@ -6,7 +6,7 @@ import { actionRef, mutationRef, queryRef } from './refs';
 import { encodeRow, decodeRow, type BackupRow } from './backupHelpers';
 import { descriptor, largeTables, type LargeManifest } from './backupLargeHelpers';
 import { digest, toBase64, verifySignature } from './security';
-import { rewriteChunkRows } from './travelPrivacyChunkRewrite';
+import { rewriteChunkRows, loadManifestDescriptors } from './travelPrivacyChunkRewrite';
 import { canonicalJson } from './protocol';
 import { dataRevision, privacyRevisionKey } from '../models/embeddingDataRevision';
 import { describeArchiveUpload } from './archiveUploadProvenance';
@@ -642,4 +642,202 @@ test('a nested encoded reference inside another physical archive prevents deleti
   );
   expect((await step(f)).errorCode).toBe('NESTED_STORAGE_REFERENCE');
   expect(await f.t.run((ctx) => ctx.db.system.get(f.storageId))).not.toBeNull();
+});
+
+async function manifestOnlyFixture(entries: number, chunkBytes: number) {
+  const f = await fixture();
+  const manifestId = await f.t.run(async (ctx) => {
+    await ctx.db.delete(f.chunkId);
+    await ctx.db.patch(f.backupId, {
+      chunkCount: Math.min(20000, entries),
+      archivePrivacyState: 'REWRITING',
+      archiveRevision: 1,
+    });
+    await ctx.db.patch(f.rewriteId, { phase: 'MANIFESTS' });
+    return ctx.db.insert('travelPrivacyChunkManifestRewrites', {
+      rewriteId: f.rewriteId,
+      backupJobId: f.backupId,
+      expectedProducerDigest: await digest((await ctx.db.get(f.backupId))!),
+      producerRevision: 1,
+      state: 'PLANNED',
+      cursor: null,
+      sourceManifestDigest: await digest({}),
+      sourceSignature: '',
+      sourcePublicKey: '',
+      clearedVisits: ['selected-visit'],
+    });
+  });
+  // This test exercises real DB pagination at the full descriptor limit. It deliberately does not
+  // claim to have uploaded/read 2GiB of bodies: storage-byte proof has its own separate test path.
+  for (let offset = 0; offset < entries; offset += 500) {
+    await f.t.run(async (ctx) => {
+      for (let index = offset; index < Math.min(offset + 500, entries); index++)
+        await ctx.db.insert('backupLargeChunks', {
+          jobId: f.backupId,
+          index,
+          table: 'memories',
+          count: 0,
+          bytes: chunkBytes,
+          digest: f.d.digest,
+          storageId: f.storageId,
+        });
+    });
+  }
+  return { ...f, manifestId };
+}
+async function buildDescriptors(f: Awaited<ReturnType<typeof manifestOnlyFixture>>) {
+  let steps = 0;
+  for (;;) {
+    const producer = (await f.t.run((ctx) => ctx.db.get(f.manifestId)))!;
+    if (producer.state === 'BUILDING') return { producer, steps };
+    await f.t.mutation(mutationRef('travelPrivacyChunkRewrite/buildManifestPage'), {
+      rewriteId: f.rewriteId,
+      revision: (await status(f))!.revision,
+    });
+    if (++steps > 500) throw new Error('Descriptor page limit');
+  }
+}
+
+test('40k mixed SOURCE/OLD descriptors paginate without a large producer document or truncating 2GiB budget', async () => {
+  const f = await manifestOnlyFixture(40000, Math.floor((2 * 1024 ** 3) / 40000));
+  const { producer, steps } = await buildDescriptors(f);
+  expect(steps).toBe(400);
+  expect(producer.chunks).toBeUndefined();
+  expect(producer.descriptorCount).toBe(40000);
+  expect(producer.descriptorPageCount).toBe(400);
+  expect(producer.lastDescriptorIndex).toBe(39999);
+  expect(producer.archiveBytes).toBe(40000 * Math.floor((2 * 1024 ** 3) / 40000));
+  expect(new TextEncoder().encode(JSON.stringify(producer)).length).toBeLessThan(2048);
+  let cursor: string | null = null,
+    count = 0,
+    source = 0,
+    old = 0,
+    nextPage = 0;
+  for (;;) {
+    const page: any = await f.t.query(
+      queryRef('travelPrivacyChunkRewrite/manifestDescriptorPage'),
+      {
+        rewriteId: f.rewriteId,
+        revision: (await status(f))!.revision,
+        manifestId: f.manifestId,
+        cursor,
+        expectedPageNumber: nextPage,
+      },
+    );
+    expect(page.page.length).toBeLessThanOrEqual(1);
+    for (const row of page.page) {
+      expect(row.pageNumber).toBe(nextPage++);
+      expect(row.descriptors.length).toBeLessThanOrEqual(100);
+      expect(new TextEncoder().encode(JSON.stringify(row)).length).toBeLessThan(32768);
+      for (const d of row.descriptors) {
+        expect(d.index).toBe(count++);
+        expect(d.count).toBe(0);
+        if (d.role === 'SOURCE') source++;
+        else if (d.role === 'OLD') old++;
+      }
+    }
+    if (page.isDone) break;
+    cursor = page.continueCursor;
+  }
+  expect(count).toBe(40000);
+  expect(source).toBe(20000);
+  expect(old).toBe(20000);
+}, 180000);
+
+test('manifest page append rejects mixed archive bytes over 2GiB without committing a partial journal', async () => {
+  const f = await manifestOnlyFixture(1, 900000);
+  await f.t.run((ctx) => ctx.db.patch(f.manifestId, { archiveBytes: 2 * 1024 ** 3 - 1 }));
+  await expect(
+    f.t.mutation(mutationRef('travelPrivacyChunkRewrite/buildManifestPage'), {
+      rewriteId: f.rewriteId,
+      revision: (await status(f))!.revision,
+    }),
+  ).rejects.toThrow('MANIFEST_BUDGET');
+  expect(
+    await f.t.run((ctx) => ctx.db.query('travelPrivacyChunkManifestPages').collect()),
+  ).toHaveLength(0);
+  expect((await f.t.run((ctx) => ctx.db.get(f.manifestId)))!.state).toBe('PLANNED');
+});
+
+test('bounded legacy descriptor array migrates atomically and remains readable by original index', async () => {
+  const f = await manifestOnlyFixture(2, 100);
+  const legacy = {
+    index: 0,
+    table: 'memories',
+    count: 0,
+    bytes: 100,
+    digest: f.d.digest,
+    role: 'SOURCE' as const,
+    encoding: 'RAW' as const,
+  };
+  await f.t.run(async (ctx) => {
+    const zero = await ctx.db
+      .query('backupLargeChunks')
+      .withIndex('job_index', (q) => q.eq('jobId', f.backupId).eq('index', 0))
+      .unique();
+    await ctx.db.delete(zero!._id);
+    await ctx.db.patch(f.manifestId, { chunks: [legacy] });
+  });
+  const { producer } = await buildDescriptors(f);
+  expect(producer.chunks).toBeUndefined();
+  expect(producer.descriptorCount).toBe(2);
+  const pages = await f.t.run((ctx) =>
+    ctx.db
+      .query('travelPrivacyChunkManifestPages')
+      .withIndex('manifest_page', (q) => q.eq('manifestId', f.manifestId))
+      .collect(),
+  );
+  expect(pages.flatMap((page) => page.descriptors).map((d) => d.index)).toEqual([0, 1]);
+  expect(pages[0].descriptors[0]).toEqual(legacy);
+});
+
+async function readDescriptors(f: Awaited<ReturnType<typeof manifestOnlyFixture>>) {
+  const manifest = (await f.t.run((ctx) => ctx.db.get(f.manifestId)))!;
+  return loadManifestDescriptors(
+    { runQuery: (ref: any, args: any) => f.t.query(ref, args) },
+    { rewriteId: f.rewriteId, revision: (await status(f))!.revision },
+    manifest,
+  );
+}
+
+test.each(['missing', 'duplicate', 'unordered', 'digest', 'replacement'])(
+  'descriptor reader rejects %s page corruption before upload reservation',
+  async (corruption) => {
+    const f = await manifestOnlyFixture(101, 100);
+    await buildDescriptors(f);
+    expect(await readDescriptors(f)).toHaveLength(101);
+    await f.t.run(async (ctx) => {
+      const pages = await ctx.db
+        .query('travelPrivacyChunkManifestPages')
+        .withIndex('manifest_page', (q) => q.eq('manifestId', f.manifestId))
+        .collect();
+      const last = pages[1];
+      if (corruption === 'missing') await ctx.db.delete(last._id);
+      else if (corruption === 'duplicate')
+        await ctx.db.insert('travelPrivacyChunkManifestPages', {
+          manifestId: f.manifestId,
+          pageNumber: last.pageNumber,
+          descriptors: last.descriptors,
+          digest: last.digest,
+        });
+      else if (corruption === 'unordered') await ctx.db.patch(last._id, { pageNumber: 5 });
+      else if (corruption === 'digest') await ctx.db.patch(last._id, { digest: 'changed' });
+      else {
+        const descriptors = last.descriptors.map((d) => ({ ...d, table: 'inputs' }));
+        // A recomputed per-page digest alone cannot replace the append chain pinned on producer.
+        await ctx.db.patch(last._id, { descriptors, digest: await digest(descriptors) });
+      }
+    });
+    await expect(readDescriptors(f)).rejects.toThrow('MANIFEST_PAGE_CHANGED');
+    expect(await f.t.run((ctx) => ctx.db.query('archiveUploadOperations').collect())).toHaveLength(
+      0,
+    );
+  },
+);
+
+test('descriptor reads fail CAS when canonical producer changes after descriptor pagination', async () => {
+  const f = await manifestOnlyFixture(101, 100);
+  await buildDescriptors(f);
+  await f.t.run((ctx) => ctx.db.patch(f.backupId, { recordCount: 500 }));
+  await expect(readDescriptors(f)).rejects.toThrow('PRODUCER_CHANGED');
 });

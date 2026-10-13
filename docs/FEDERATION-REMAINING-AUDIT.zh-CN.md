@@ -379,3 +379,8 @@ SENSITIVE 预检在普通归档检查后继续分块检查，归属、来源签�
 分页引用证明的前置版本机制：新增独立 archiveStorageReferences revision，注册写入器对备份/分块/嵌套回滚副本、冷归档与镜像根、音乐、隐私替换及上传操作/候选等 16 张引用来源表的 insert/patch/replace/delete 在同一事务递增版本。它与 canonical memory / travelPrivacySources 独立，读取缓存、记忆 lastAccess 不误作存储引用变更；失败的指针事务连同 revision 一起回滚。实际冷镜像 root 的嵌套 alias 更新证明：原 privacy revision 不变而 archive revision 递增，因此未来分页证明可以检测原版本机制遗漏的引用变动。证明自身无指针的页 journal 不加入来源表，避免扫描自失效。
 
 根代理冻结仅该版本机制的两份技术文件，与正式旧 writer 及上传/冷镜像四套共 36 项通过（26.593 秒），Convex 类型通过。此检查点仅建立分页证明失效条件，尚未接入最终删除证明，也没有解除当前 128 分块/8MB 安全限制。描述符分页持久化由 GPT-6.1-sol medium 子代理继续开发，尚未用其草稿作为本检查点验证依据。
+
+
+清单描述符分页持久化已完成专项冻结验证：新任务将每 100 个描述符保存为独立带摘要、连续 hash-chain 的页，producer 仅保存页数、数量、字节总数及链摘要，不把完整描述符数组堆进一条数据库记录。旧 PLANNED 的有界 chunks 数组在同事务迁移后再删除，旧 BUILDING 保留只读兼容。每次查询只读一个页，组装时检查页顺序、数量、摘要链及 producer checkpoint；原 SOURCE 空槽位、OLD 角色与原签名来源证据保持不变。
+
+实测 40,000 个 SOURCE+OLD 描述符保存为 400 小页，producer 小于 2KB，每页小于 32KB；descriptor.bytes 合计按 2GiB 预算验证。这是描述符容量验证，没有伪称已读取或删除 2GiB 的实际文件。缺页、重复页、乱序、内容篡改、重新计算单页摘要及 producer 变化均有拒绝测试。根代理冻结仅三份描述符相关文件，与正式 coordinator/ordinary worker 三套 54 项通过（150.099 秒），Convex 类型通过。全域分页引用证明仍在开发，未解除 128 物理分块/8MB 删除证明限制；没有混入其 schema 或代码草稿作为本检查点发布内容。

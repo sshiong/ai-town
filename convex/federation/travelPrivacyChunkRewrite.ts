@@ -8,7 +8,14 @@ import {
 } from '../maintenanceFunctions';
 import type { Doc, Id } from '../_generated/dataModel';
 import { decodeRow, encodeRow, type BackupRow } from './backupHelpers';
-import { descriptor, MAX_CHUNK_BYTES, rowMetadata, type LargeChunk } from './backupLargeHelpers';
+import {
+  descriptor,
+  MAX_CHUNK_BYTES,
+  MAX_CHUNKS,
+  MAX_ARCHIVE_BYTES,
+  rowMetadata,
+  type LargeChunk,
+} from './backupLargeHelpers';
 import { digest } from './security';
 import { mutationRef, queryRef } from './refs';
 import {
@@ -38,6 +45,7 @@ type Producer = Doc<'travelPrivacyChunkManifestRewrites'>;
 type DB = QueryCtx | MutationCtx;
 const checkpoint = { rewriteId: v.id('travelPrivacyChunkRewrites'), revision: v.number() };
 const ROW_PAGE = 5;
+const MANIFEST_DESCRIPTOR_PAGE = 100;
 const runtimeTypes = new Set(['OBSERVATION', 'DECISION', 'ACTION_RESULT', 'CONVERSATION_ENDED']);
 const removeTables = new Set([
   'memories',
@@ -762,39 +770,133 @@ export const buildManifestPage = internalMutation({
     const page = await ctx.db
       .query('backupLargeChunks')
       .withIndex('job_index', (q) => q.eq('jobId', producer.backupJobId))
-      .paginate({ cursor: producer.cursor, numItems: 20, maximumBytesRead: 128 * 1024 });
-    const chunks = [
-      ...(producer.chunks ?? []),
-      ...page.page.map((chunk) => {
-        const role =
-          job.kind === 'export'
-            ? ('EXPORT' as const)
-            : chunk.index < job.chunkCount
-              ? ('SOURCE' as const)
-              : ('OLD' as const);
-        return {
-          ...expectedDescriptor(chunk),
-          role,
-          encoding:
-            role !== 'OLD' && job.mode?.startsWith('selective-')
-              ? ('SELECTIVE' as const)
-              : ('RAW' as const),
-        };
-      }),
-    ];
-    if (
-      chunks.length > 20000 ||
-      new TextEncoder().encode(JSON.stringify(chunks)).length > 5_000_000
-    )
-      fail('MANIFEST_BUDGET');
+      .paginate({
+        cursor: producer.cursor,
+        numItems: MANIFEST_DESCRIPTOR_PAGE,
+        maximumBytesRead: 128 * 1024,
+      });
+    const chunks: LocalChunkDescriptor[] = page.page.map((chunk) => {
+      const role =
+        job.kind === 'export'
+          ? ('EXPORT' as const)
+          : chunk.index < job.chunkCount
+            ? ('SOURCE' as const)
+            : ('OLD' as const);
+      return {
+        ...expectedDescriptor(chunk),
+        role,
+        encoding:
+          role !== 'OLD' && job.mode?.startsWith('selective-')
+            ? ('SELECTIVE' as const)
+            : ('RAW' as const),
+      };
+    });
+    // Migrate bounded legacy PLANNED sessions once; their existing descriptors are not discarded.
+    const legacy = producer.chunks ?? [];
+    if (legacy.length > 128) fail('LEGACY_MANIFEST_BUDGET');
+    let pageNumber = producer.descriptorPageCount ?? 0;
+    let descriptorChainDigest = producer.descriptorChainDigest ?? (await digest([]));
+    let count = producer.descriptorCount ?? 0,
+      descriptorBytes = producer.descriptorBytes ?? 0;
+    let archiveBytes = producer.archiveBytes ?? 0,
+      lastIndex = producer.lastDescriptorIndex ?? -1;
+    for (const batch of [legacy, chunks]) {
+      for (let offset = 0; offset < batch.length; offset += MANIFEST_DESCRIPTOR_PAGE) {
+        const descriptors = batch.slice(offset, offset + MANIFEST_DESCRIPTOR_PAGE);
+        for (const entry of descriptors) {
+          if (
+            !Number.isSafeInteger(entry.index) ||
+            entry.index <= lastIndex ||
+            entry.index >= 2 * MAX_CHUNKS ||
+            entry.count < 0 ||
+            entry.count > 20 ||
+            entry.bytes < 1 ||
+            entry.bytes > MAX_CHUNK_BYTES
+          )
+            fail('MANIFEST_DESCRIPTOR_INVALID');
+          lastIndex = entry.index;
+          count++;
+          archiveBytes += entry.bytes;
+          // Include array separator bytes in the running bound, including across journal pages.
+          descriptorBytes +=
+            new TextEncoder().encode(JSON.stringify(entry)).length + (count > 1 ? 1 : 0);
+        }
+        if (
+          count > 2 * MAX_CHUNKS ||
+          descriptorBytes > 10_000_000 ||
+          archiveBytes > 2 * MAX_ARCHIVE_BYTES
+        )
+          fail('MANIFEST_BUDGET');
+        if (
+          await ctx.db
+            .query('travelPrivacyChunkManifestPages')
+            .withIndex('manifest_page', (q) =>
+              q.eq('manifestId', producer._id).eq('pageNumber', pageNumber),
+            )
+            .first()
+        )
+          fail('MANIFEST_PAGE_CHANGED');
+        const pageDigest = await digest(descriptors);
+        descriptorChainDigest = await digest([descriptorChainDigest, pageNumber, pageDigest]);
+        await ctx.db.insert('travelPrivacyChunkManifestPages', {
+          manifestId: producer._id,
+          pageNumber,
+          descriptors,
+          digest: pageDigest,
+        });
+        pageNumber++;
+      }
+    }
     await ctx.db.patch(producer._id, {
-      chunks,
+      chunks: undefined,
+      descriptorChainDigest,
+      descriptorCount: count,
+      descriptorBytes,
+      archiveBytes,
+      descriptorPageCount: pageNumber,
+      lastDescriptorIndex: lastIndex,
       cursor: page.isDone ? null : page.continueCursor,
       state: page.isDone ? 'BUILDING' : 'PLANNED',
     });
     await advance(ctx, session, {});
   },
 });
+/** Read a fixed number of small journals; the producer checkpoint pins the entire page set. */
+export const manifestDescriptorPage = internalQuery({
+  args: { ...manifestArgs, cursor: v.union(v.string(), v.null()), expectedPageNumber: v.number() },
+  handler: async (ctx, a) => {
+    const current = await checked(ctx, a);
+    if (!current || current.session.phase !== 'MANIFESTS') return null;
+    const producer = await ctx.db.get(a.manifestId);
+    if (!producer || producer.rewriteId !== a.rewriteId || producer.state !== 'BUILDING')
+      fail('MANIFEST_CHECKPOINT_CHANGED');
+    await producerChecked(ctx, producer);
+    const page = await ctx.db
+      .query('travelPrivacyChunkManifestPages')
+      .withIndex('manifest_page', (q) => q.eq('manifestId', producer._id))
+      .paginate({ cursor: a.cursor, numItems: 1, maximumBytesRead: 32 * 1024 });
+    if (
+      (page.page.length && page.page[0].pageNumber !== a.expectedPageNumber) ||
+      (page.isDone && a.expectedPageNumber + page.page.length !== producer.descriptorPageCount)
+    )
+      fail('MANIFEST_PAGE_CHANGED');
+    for (const row of page.page)
+      if (
+        row.descriptors.length > MANIFEST_DESCRIPTOR_PAGE ||
+        (await digest(row.descriptors)) !== row.digest
+      )
+        fail('MANIFEST_PAGE_CHANGED');
+    return {
+      ...page,
+      descriptorCount: producer.descriptorCount ?? 0,
+      descriptorPageCount: producer.descriptorPageCount ?? 0,
+      descriptorBytes: producer.descriptorBytes ?? 0,
+      archiveBytes: producer.archiveBytes ?? 0,
+      lastDescriptorIndex: producer.lastDescriptorIndex ?? -1,
+    };
+  },
+});
+
 export const reserveManifest = internalMutation({
   args: { ...manifestArgs, manifestDigest: v.string(), sha256Hex: v.string(), size: v.number() },
   handler: async (ctx, a) => {
@@ -1429,7 +1531,7 @@ export const page = internalAction({
         const local = await createLocalChunkManifest({
           archiveId: producer._id,
           derivedAt: session.createdAt,
-          chunks: manifest.chunks as LocalChunkDescriptor[],
+          chunks: await loadManifestDescriptors(ctx, a, manifest),
           clearedVisits: manifest.clearedVisits,
           sourceEvidence: {
             ...(source ? { manifest: source } : {}),
@@ -1531,6 +1633,73 @@ export const page = internalAction({
     }
   },
 });
+
+export async function loadManifestDescriptors(
+  ctx: { runQuery: any },
+  a: { rewriteId: Id<'travelPrivacyChunkRewrites'>; revision: number },
+  manifest: Producer,
+) {
+  if (manifest.chunks) {
+    if (manifest.chunks.length > 128) fail('LEGACY_MANIFEST_BUDGET');
+    return manifest.chunks;
+  }
+  const chunks: LocalChunkDescriptor[] = [];
+  let cursor: string | null = null,
+    pageNumber = 0,
+    bytes = 0,
+    archiveBytes = 0,
+    lastIndex = -1;
+  let chainDigest = await digest([]);
+  do {
+    const page: {
+      page: Doc<'travelPrivacyChunkManifestPages'>[];
+      isDone: boolean;
+      continueCursor: string;
+      descriptorCount: number;
+      descriptorPageCount: number;
+      descriptorBytes: number;
+      archiveBytes: number;
+      lastDescriptorIndex: number;
+    } | null = await ctx.runQuery(queryRef('travelPrivacyChunkRewrite/manifestDescriptorPage'), {
+      ...a,
+      manifestId: manifest._id,
+      cursor,
+      expectedPageNumber: pageNumber,
+    });
+    if (!page) fail('MANIFEST_CHECKPOINT_CHANGED');
+    for (const row of page.page) {
+      if (row.pageNumber !== pageNumber++) fail('MANIFEST_PAGE_CHANGED');
+      chainDigest = await digest([chainDigest, row.pageNumber, row.digest]);
+      for (const entry of row.descriptors) {
+        if (entry.index <= lastIndex) fail('MANIFEST_DESCRIPTOR_INVALID');
+        lastIndex = entry.index;
+        archiveBytes += entry.bytes;
+        bytes += new TextEncoder().encode(JSON.stringify(entry)).length + (chunks.length ? 1 : 0);
+        chunks.push(entry);
+        if (
+          chunks.length > 2 * MAX_CHUNKS ||
+          bytes > 10_000_000 ||
+          archiveBytes > 2 * MAX_ARCHIVE_BYTES
+        )
+          fail('MANIFEST_BUDGET');
+      }
+    }
+    if (page.isDone) {
+      if (
+        chunks.length !== page.descriptorCount ||
+        pageNumber !== page.descriptorPageCount ||
+        bytes !== page.descriptorBytes ||
+        archiveBytes !== page.archiveBytes ||
+        lastIndex !== page.lastDescriptorIndex ||
+        chainDigest !== manifest.descriptorChainDigest
+      )
+        fail('MANIFEST_PAGE_CHANGED');
+      return chunks;
+    }
+    if (page.continueCursor === cursor) fail('MANIFEST_CURSOR_CHANGED');
+    cursor = page.continueCursor;
+  } while (true);
+}
 
 async function recoverLease(
   ctx: { runMutation: any; runQuery: any },

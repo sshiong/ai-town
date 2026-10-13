@@ -8,6 +8,15 @@ const descriptor = v.object({
   bytes: v.number(),
   digest: v.string(),
 });
+const localDescriptor = v.object({
+  index: v.number(),
+  table: v.string(),
+  count: v.number(),
+  bytes: v.number(),
+  digest: v.string(),
+  role: v.union(v.literal('SOURCE'), v.literal('OLD'), v.literal('EXPORT')),
+  encoding: v.union(v.literal('RAW'), v.literal('SELECTIVE')),
+});
 export const travelPrivacyChunkRewriteTables = {
   travelPrivacyChunkRewrites: defineTable({
     scanId: v.id('travelPrivacyChunkScans'),
@@ -74,6 +83,13 @@ export const travelPrivacyChunkRewriteTables = {
   })
     .index('rewrite_state', ['rewriteId', 'state'])
     .index('rewrite_storage', ['rewriteId', 'originalStorageId']),
+  // Bounded descriptor pages never contain row bodies or storage pointers.
+  travelPrivacyChunkManifestPages: defineTable({
+    manifestId: v.id('travelPrivacyChunkManifestRewrites'),
+    pageNumber: v.number(),
+    descriptors: v.array(localDescriptor),
+    digest: v.string(),
+  }).index('manifest_page', ['manifestId', 'pageNumber']),
   travelPrivacyChunkManifestRewrites: defineTable({
     rewriteId: v.id('travelPrivacyChunkRewrites'),
     backupJobId: v.id('backupLargeJobs'),
@@ -87,19 +103,14 @@ export const travelPrivacyChunkRewriteTables = {
       v.literal('COMPLETE'),
     ),
     cursor: v.union(v.string(), v.null()),
-    chunks: v.optional(
-      v.array(
-        v.object({
-          index: v.number(),
-          table: v.string(),
-          count: v.number(),
-          bytes: v.number(),
-          digest: v.string(),
-          role: v.union(v.literal('SOURCE'), v.literal('OLD'), v.literal('EXPORT')),
-          encoding: v.union(v.literal('RAW'), v.literal('SELECTIVE')),
-        }),
-      ),
-    ),
+    // Legacy safe-size sessions may still contain chunks; new sessions use descriptor pages.
+    chunks: v.optional(v.array(localDescriptor)),
+    descriptorChainDigest: v.optional(v.string()),
+    descriptorCount: v.optional(v.number()),
+    descriptorBytes: v.optional(v.number()),
+    archiveBytes: v.optional(v.number()),
+    descriptorPageCount: v.optional(v.number()),
+    lastDescriptorIndex: v.optional(v.number()),
     operationId: v.optional(v.id('archiveUploadOperations')),
     operationRevision: v.optional(v.number()),
     manifestStorageId: v.optional(v.id('_storage')),
