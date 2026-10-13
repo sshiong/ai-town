@@ -7,6 +7,7 @@ import { digest, verifySignature } from './security';
 import { mutationRef, queryRef } from './refs';
 import { chunkEvidence } from './travelPrivacyChunkSchema';
 import { dataRevision, privacyRevisionKey } from '../models/embeddingDataRevision';
+import { validateLocalChunkManifest, validateLocalChunk } from './travelPrivacyLocalChunkManifest';
 
 type ObjectPlan = Doc<'travelPrivacyChunkObjects'>;
 type Row = Doc<'travelPrivacyChunkRows'>;
@@ -63,7 +64,7 @@ async function checked(ctx: DB, a: { scanId: Id<'travelPrivacyChunkScans'>; revi
 
 export async function beginChunkInspection(ctx: MutationCtx, job: Doc<'travelPrivacyJobs'>) {
   if (job.scope !== 'SENSITIVE') throw new Error('CHUNK_INSPECTION_REQUIRES_SENSITIVE');
-  const prior = await ctx.db.query('travelPrivacyChunkScans').withIndex('job', q => q.eq('jobId', job._id)).first();
+  const prior = await ctx.db.query('travelPrivacyChunkScans').withIndex('job', q => q.eq('jobId', job._id)).order('desc').first();
   if (prior?.privacyRevision === job.revision) return prior._id;
   const latest = await ctx.db.query('backupLargeChunks').order('desc').first();
   return ctx.db.insert('travelPrivacyChunkScans', { jobId: job._id, privacyRevision: job.revision, version: 1,
@@ -186,7 +187,28 @@ export const inspectPage = internalAction({
         actual.table !== chunk.table || actual.index !== chunk.index) throw new Error('DESCRIPTOR_MISMATCH');
       const role: Role = backup.kind === 'export' ? 'EXPORT' : chunk.index < backup.chunkCount ? 'SOURCE' : 'OLD';
       if (role !== 'OLD' && backup.state === 'COMPLETE' && !backup.manifestStorageId) throw new Error('SOURCE_MANIFEST_MISSING');
-      if (backup.manifestStorageId && role !== 'OLD') {
+      if (backup.archivePrivacyState === 'LOCAL_SANITIZED') {
+        if (!backup.manifestStorageId) throw new Error('SOURCE_MANIFEST_MISSING');
+        const manifestBlob = await ctx.storage.get(backup.manifestStorageId);
+        if (!manifestBlob || manifestBlob.size > 10_000_000) throw new Error('MANIFEST_MISSING_OR_SIZE');
+        const manifest = await validateLocalChunkManifest(JSON.parse(await manifestBlob.text()), {
+          expectedDigest: backup.metadata?.archiveLocalManifestDigest,
+          localProof: backup.metadata?.archiveLocalProof,
+        });
+        if (manifest.archiveId !== backup._id) throw new Error('ARCHIVE_ID_MISMATCH');
+        const expected = manifest.chunks.find(c => c.index === chunk.index);
+        if (!expected || expected.role !== role || await digest({ index: expected.index, table: expected.table,
+          count: expected.count, bytes: expected.bytes, digest: expected.digest }) !== await digest(actual))
+          throw new Error('MANIFEST_DESCRIPTOR_MISMATCH');
+        await validateLocalChunk(raw, expected);
+        if (manifest.sourceEvidence.manifest &&
+          (manifest.sourceEvidence.manifest.source.townId !== backup.source?.townId ||
+            manifest.sourceEvidence.publicKey !== backup.source?.publicKey)) throw new Error('SOURCE_IDENTITY_MISMATCH');
+        // Pin the current derivative separately from the original signed evidence embedded inside it.
+        sourceManifestDigest = await digest(manifest);
+        sourcePublicKey = manifest.sourceEvidence.publicKey;
+        sourceSignature = manifest.sourceEvidence.signature;
+      } else if (backup.manifestStorageId && role !== 'OLD') {
         const manifestBlob = await ctx.storage.get(backup.manifestStorageId);
         if (!manifestBlob || manifestBlob.size > 6 * 1024 * 1024) throw new Error('MANIFEST_MISSING_OR_SIZE');
         const manifest = JSON.parse(await manifestBlob.text());

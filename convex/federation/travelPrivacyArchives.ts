@@ -1,4 +1,5 @@
 import { v } from 'convex/values';
+import { beginChunkInspection } from './travelPrivacyChunkArchives';
 import { internalAction, internalMutation, internalQuery, type MutationCtx, type QueryCtx } from '../maintenanceFunctions';
 import type { Doc, Id } from '../_generated/dataModel';
 import { assertNoSecrets, decodeRow, encodeRow, validateBundle, type BackupBundle, type BackupRow } from './backupHelpers';
@@ -366,13 +367,19 @@ export const saveInspection = internalMutation({
       job.privacyRevision !== await dataRevision(ctx.db, privacyRevisionKey))) blockers.push('PREVIEW_STALE');
     // A final import page can still have a reference scan pending. Finish that scan before READY.
     const finish = a.done && !(a.plan && !blocker);
+    const chunkCheck = finish && !blockers.length;
     const next = { ...job, blockers, cursor: a.done ? 'ARCHIVE_IMPORTS_DONE' : a.cursor, revision: job.revision + 1, updatedAt: Date.now(),
-      state: finish ? (blockers.length ? 'BLOCKED' : 'READY') : job.state,
+      phase: chunkCheck ? 'CHUNK_CHECK' : job.phase,
+      state: finish ? (blockers.length ? 'BLOCKED' : 'INSPECTING') : job.state,
       archiveCoverage: { ordinaryBundles: finish ? 'READY' as const : 'CHECKING' as const,
-        largeChunks: 'NOT_IMPLEMENTED' as const, orphanObjects: 'NOT_VERIFIED' as const } };
+        largeChunks: chunkCheck ? 'CHECKING' as const : 'NOT_IMPLEMENTED' as const, orphanObjects: 'NOT_VERIFIED' as const } };
     await ctx.db.patch(job._id, { blockers: next.blockers, cursor: next.cursor, revision: next.revision,
-      updatedAt: next.updatedAt, state: next.state, archiveCoverage: next.archiveCoverage });
-    if (!finish) await scheduled(ctx, next);
+      updatedAt: next.updatedAt, state: next.state, phase: next.phase, archiveCoverage: next.archiveCoverage });
+    if (chunkCheck) {
+      const chunkScanId = await beginChunkInspection(ctx, next);
+      await ctx.db.patch(job._id, { chunkScanId });
+    }
+    if (!finish || chunkCheck) await scheduled(ctx, next);
   },
 });
 export const publish = internalMutation({
@@ -434,7 +441,7 @@ export const finishRewrite = internalMutation({
     if (await ctx.db.query('travelPrivacyArchiveObjects').withIndex('job', q => q.eq('jobId', job._id))
       .filter(q => q.neq(q.field('state'), 'DELETED')).first()) error('DELETE_NOT_CONFIRMED');
     const next = { ...job, phase: 'PURGE', cursor: null, tableIndex: 0, revision: job.revision + 1, archiveError: undefined,
-      archiveCoverage: { ordinaryBundles: 'COMPLETE' as const, largeChunks: 'NOT_IMPLEMENTED' as const, orphanObjects: 'NOT_VERIFIED' as const } };
+      archiveCoverage: { ordinaryBundles: 'COMPLETE' as const, largeChunks: job.archiveCoverage?.largeChunks ?? 'NOT_IMPLEMENTED', orphanObjects: 'NOT_VERIFIED' as const } };
     await ctx.db.patch(job._id, { phase: next.phase, cursor: next.cursor, tableIndex: next.tableIndex,
       revision: next.revision, archiveError: undefined, archiveCoverage: next.archiveCoverage });
     await scheduled(ctx, next);

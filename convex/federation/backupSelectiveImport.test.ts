@@ -1,3 +1,4 @@
+import { drivePrivacyWithStorageMetadata } from '../../tests/helpers/privacyTestDriver';
 import * as selectiveImportFunctions from './backupSelectiveImport';
 import { seedMemoryBackupEvidence, assertMemoryBackupEvidence, useLegacyMemoryBackupDigests } from './memoryBackupTestHelpers';
 import { captureSource } from '../agent/memorySources';
@@ -15,13 +16,16 @@ import { LargeChunk, descriptor } from './backupLargeHelpers';
 import { SelectiveManifest } from './backupSelectiveHelpers';
 import { Options } from './backupSelectiveImportHelpers';
 const modules = {
+  '../federation/archiveUploadProvenance.ts': () => import('./archiveUploadProvenance'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/backupSelective.ts': () => import('./backupSelective'),
   '../federation/backupSelectiveImport.ts': () => import('./backupSelectiveImport'),
   '../federation/backupLarge.ts': () => import('./backupLarge'),
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
   '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
+  '../federation/travelPrivacyChunkCoordinator.ts': () => import('./travelPrivacyChunkCoordinator'),
   '../federation/travelPrivacyChunkArchives.ts': () => import('./travelPrivacyChunkArchives'),
+  '../federation/travelPrivacyChunkRewrite.ts': () => import('./travelPrivacyChunkRewrite'),
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../federation/coldHistoryChunks.ts': () => import('./coldHistoryChunks'),
@@ -366,7 +370,7 @@ test.each(['explicit', 'legacy'] as const)('formal selective clone %s historical
     const jobId: Id<'travelPrivacyJobs'> = await target.t.mutation(ref('travelPrivacy', 'inspect', 'mutation'), {
       adminToken, visitId: 'selective-history', scope: 'SENSITIVE', history: candidates.page[0].history,
     });
-    await target.t.finishAllScheduledFunctions(() => jest.runAllTimers());
+    await target.t.finishAllScheduledFunctions(() => jest.runAllTimers(), 2000);
     expect((await target.t.run(ctx => ctx.db.get(jobId)))!.state).toBe('READY');
     const chunkObjects = await formalChunkPlan(target.t, jobId);
     expect(new Set(chunkObjects.map(o => o.role))).toEqual(new Set(['SOURCE', 'OLD', 'EXPORT']));
@@ -387,9 +391,11 @@ test.each(['explicit', 'legacy'] as const)('formal selective clone %s historical
       expect(stored).toEqual(object.descriptor);
     }
     await target.t.mutation(ref('travelPrivacy', 'start', 'mutation'), { adminToken, jobId });
-    await target.t.finishAllScheduledFunctions(() => jest.runAllTimers());
+    await drivePrivacyWithStorageMetadata(target.t, jobId);
     await target.t.run(async ctx => {
-      expect((await ctx.db.get(jobId))!.state).toBe('COMPLETE');
+      const completed = (await ctx.db.get(jobId))!;
+      if (completed.state !== 'COMPLETE') throw new Error(JSON.stringify({ state: completed.state, phase: completed.phase, code: completed.archiveError }));
+      expect(completed.state).toBe('COMPLETE');
       expect(await ctx.db.query('memories').withIndex('globalAgent', q =>
         q.eq('agentGlobalId', owner.agentGlobalId)).collect()).toEqual([]);
       expect(await ctx.db.get(target.memories[0])).not.toBeNull();

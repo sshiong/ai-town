@@ -108,7 +108,7 @@ async function validateStructure(value: unknown, portable = false): Promise<Loca
       !Number.isSafeInteger(chunk.count) || chunk.count < 0 || chunk.count > 20 ||
       !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 1 || chunk.bytes > MAX_CHUNK_BYTES || !checksum(chunk.digest))
       fail('DESCRIPTOR_INVALID');
-    const tables = chunk.role === 'OLD' ? oldTables : chunk.encoding === 'SELECTIVE' ? [...selectiveTables, 'coldHistoryFiles', 'referenceMappings'] : largeTables;
+    const tables = chunk.role === 'OLD' ? [...oldTables, 'federationIdentity'] : chunk.encoding === 'SELECTIVE' ? [...selectiveTables, 'coldHistoryFiles', 'referenceMappings'] : largeTables;
     if (!(tables as readonly string[]).includes(chunk.table) || chunk.table === 'coldHistoryFiles' && chunk.count > 1 ||
       chunk.role === 'OLD' && chunk.encoding !== 'RAW') fail('DESCRIPTOR_INVALID');
     if (portable && chunk.role === 'OLD') fail('PRIVATE_ROLLBACK_NOT_PORTABLE');
@@ -172,7 +172,7 @@ export async function portableLocalChunkManifest(manifest: LocalSanitizedChunkMa
 /** New descriptors cover the complete stored JSON, including the optional upload recovery marker. */
 export async function validateLocalChunk(value: unknown, expected: LocalChunkDescriptor): Promise<BackupRow[] | ArchiveEnvelope[]> {
   keys(expected, ['index', 'table', 'count', 'bytes', 'digest', 'role', 'encoding']);
-  const tables = expected.role === 'OLD' ? oldTables : expected.encoding === 'SELECTIVE' ? [...selectiveTables, 'coldHistoryFiles', 'referenceMappings'] : largeTables;
+  const tables = expected.role === 'OLD' ? [...oldTables, 'federationIdentity'] : expected.encoding === 'SELECTIVE' ? [...selectiveTables, 'coldHistoryFiles', 'referenceMappings'] : largeTables;
   if (!['RAW', 'SELECTIVE'].includes(expected.encoding) || !['SOURCE', 'OLD', 'EXPORT'].includes(expected.role) ||
     !(tables as readonly string[]).includes(expected.table) || !checksum(expected.digest) ||
     !Number.isSafeInteger(expected.index) || expected.index < 0 ||

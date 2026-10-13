@@ -13,6 +13,8 @@ import { requireAdmin } from './security';
 import { visit } from './store';
 import { actionRef, mutationRef } from './refs';
 import { beginArchiveRewrite } from './travelPrivacyArchives';
+import { beginChunkInspection } from './travelPrivacyChunkArchives';
+import { beginChunkRewrite } from './travelPrivacyChunkRewrite';
 import { decodeRow, encodeRow } from './backupHelpers';
 import { sanitizeTravelAuditSummary } from './travelAuditWriter';
 import { dataRevision, sourceKey, privacyRevisionKey } from '../models/embeddingDataRevision';
@@ -236,7 +238,8 @@ function snapshotInputs(job: Job, snapshot: Record<string, any>) {
   return { selected, shared: [...selected].some(id => other.has(id)) };
 }
 export async function scheduled(ctx: MutationCtx, job: Job) {
-  await ctx.scheduler.runAfter(0, job.phase.startsWith('ARCHIVE_')
+  await ctx.scheduler.runAfter(0, job.phase.startsWith('CHUNK_')
+    ? actionRef('travelPrivacyChunkCoordinator/page') : job.phase.startsWith('ARCHIVE_')
     ? actionRef('travelPrivacyArchives/page') : mutationRef('travelPrivacy/page'), {
     jobId: job._id,
     revision: job.revision,
@@ -360,11 +363,22 @@ export const retry = mutation({
     // A failed mutation leaves its entire page uncommitted. Preserve that
     // checkpoint and fence any older scheduled invocation with a new revision.
     const next = { ...job, revision: job.revision + 1, updatedAt: Date.now(), archiveError: undefined };
+    const rewrite = job.chunkRewriteId ? await ctx.db.get(job.chunkRewriteId) : null;
+    if (rewrite && rewrite.phase !== 'DONE' && rewrite.sourceRevision !== await dataRevision(ctx.db, privacyRevisionKey))
+      throw new Error('TRAVEL_PRIVACY_PREVIEW_STALE');
     await ctx.db.patch(job._id, { revision: next.revision, updatedAt: next.updatedAt, archiveError: undefined });
     await ctx.db.insert('federationTravelAudit', {
       visitId: job.visitId, source: 'travelPrivacy', operation: 'ADMIN_LOCAL_CLEAR_RETRY',
       at: Date.now(), next: { state: job.state, role: job.role },
     });
+    if (rewrite && (rewrite.phase !== 'DONE' || job.phase === 'CHUNK_REWRITE')) await ctx.db.patch(rewrite._id, {
+      revision: rewrite.revision + 1, expectedParentRevision: next.revision,
+      sourceRevision: rewrite.phase === 'DONE' ? rewrite.sourceRevision : await dataRevision(ctx.db, privacyRevisionKey), errorCode: undefined,
+    });
+    if (job.phase === 'CHUNK_CHECK') {
+      const chunkScanId = await beginChunkInspection(ctx, next);
+      await ctx.db.patch(job._id, { chunkScanId });
+    }
     await scheduled(ctx, next);
     return publicJob(next);
   },
@@ -391,6 +405,18 @@ export const start = mutation({
       job.privacyRevision !== (await dataRevision(ctx.db, privacyRevisionKey))
     )
       throw new Error('TRAVEL_PRIVACY_PREVIEW_STALE');
+    let chunkRewriteId: Id<'travelPrivacyChunkRewrites'> | undefined;
+    if (job.scope === 'SENSITIVE') {
+      if (job.chunkScanId) {
+        const scan = await ctx.db.get(job.chunkScanId);
+        if (!scan || scan.jobId !== job._id || scan.privacyRevision !== job.revision || scan.phase !== 'READY_TO_REWRITE' ||
+          scan.blockers || scan.sourceRevision !== await dataRevision(ctx.db, privacyRevisionKey))
+          throw new Error('TRAVEL_PRIVACY_PREVIEW_STALE');
+        if (scan.selectedRows) chunkRewriteId = await beginChunkRewrite(ctx, scan._id);
+      }
+      else if (await ctx.db.query('backupLargeChunks').first())
+        throw new Error('TRAVEL_PRIVACY_PREVIEW_STALE');
+    }
     if (job.scope === 'SENSITIVE') {
       const cacheRevision = await ctx.db
         .query('embeddingDataRevisions')
@@ -440,13 +466,14 @@ export const start = mutation({
     const archiveRewrite = job.scope === 'SENSITIVE' && await beginArchiveRewrite(ctx, job);
     const next = {
       state: 'RUNNING',
-      phase: archiveRewrite ? 'ARCHIVE_REWRITE' : 'PURGE',
+      phase: chunkRewriteId ? 'CHUNK_REWRITE' : archiveRewrite ? 'ARCHIVE_REWRITE' : 'PURGE',
+      ...(chunkRewriteId ? { chunkRewriteId } : {}),
       tableIndex: 0,
       cursor: null,
       revision: job.revision + 1,
       updatedAt: Date.now(),
       ...(job.scope === 'SENSITIVE' ? { archiveCoverage: { ordinaryBundles: archiveRewrite ? 'RUNNING' as const : 'COMPLETE' as const,
-        largeChunks: 'NOT_IMPLEMENTED' as const, orphanObjects: 'NOT_VERIFIED' as const } } : {}),
+        largeChunks: chunkRewriteId ? 'RUNNING' as const : 'COMPLETE' as const, orphanObjects: 'NOT_VERIFIED' as const } } : {}),
     };
     await ctx.db.patch(job._id, next);
     await ctx.db.insert('federationTravelAudit', {
@@ -457,6 +484,8 @@ export const start = mutation({
       at: Date.now(),
       next: { state: 'RUNNING', role: job.role },
     });
+    if (chunkRewriteId) await ctx.db.patch(chunkRewriteId, { expectedParentRevision: next.revision,
+      sourceRevision: await dataRevision(ctx.db, privacyRevisionKey) });
     await scheduled(ctx, { ...job, ...next });
     return publicJob({ ...job, ...next });
   },
@@ -935,7 +964,7 @@ export const page = internalMutation({
       return;
     if (stored.history) await assertTerminal(ctx, stored.visitId, stored.history);
     // Archive phases are actions because storage bodies cannot be read in mutations.
-    if (stored.phase.startsWith('ARCHIVE_')) { await scheduled(ctx, stored); return; }
+    if (stored.phase.startsWith('ARCHIVE_') || stored.phase.startsWith('CHUNK_')) { await scheduled(ctx, stored); return; }
     const job = {
       ...stored,
       conversationIds: [...stored.conversationIds],

@@ -1,3 +1,4 @@
+import { drivePrivacyWithStorageMetadata } from '../../tests/helpers/privacyTestDriver';
 import * as largeFunctions from './backupLarge';
 import { assertBackupPrivacy } from './backupPrivacy';
 import { seedMemoryBackupEvidence, assertMemoryBackupEvidence, useLegacyMemoryBackupDigests } from './memoryBackupTestHelpers';
@@ -29,12 +30,15 @@ import {
 } from './backupLargeHelpers';
 
 const modules = {
+  '../federation/archiveUploadProvenance.ts': () => import('./archiveUploadProvenance'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/backupLarge.ts': () => import('./backupLarge'),
   '../federation/backup.ts': () => import('./backup'),
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
   '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
+  '../federation/travelPrivacyChunkCoordinator.ts': () => import('./travelPrivacyChunkCoordinator'),
   '../federation/travelPrivacyChunkArchives.ts': () => import('./travelPrivacyChunkArchives'),
+  '../federation/travelPrivacyChunkRewrite.ts': () => import('./travelPrivacyChunkRewrite'),
   '../federation/admin.ts': () => import('./admin'),
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
@@ -967,7 +971,7 @@ test('formal large clone supplies terminal historical evidence for privacy clean
     const jobId: Id<'travelPrivacyJobs'> = await target.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:inspect'), {
       adminToken, visitId: 'large-history', scope: 'SENSITIVE', history: candidates.page[0].history,
     });
-    await target.finishAllScheduledFunctions(() => jest.runAllTimers());
+    await target.finishAllScheduledFunctions(() => jest.runAllTimers(), 2000);
     expect((await target.run(ctx => ctx.db.get(jobId)))!.state).toBe('READY');
     const chunkObjects = await formalChunkPlan(target, jobId);
     expect(chunkObjects.some(o => o.role === 'SOURCE' && o.selectedRows > 0)).toBe(true);
@@ -986,9 +990,11 @@ test('formal large clone supplies terminal historical evidence for privacy clean
       expect(stored).toEqual(object.descriptor);
     }
     await target.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:start'), { adminToken, jobId });
-    await target.finishAllScheduledFunctions(() => jest.runAllTimers());
+    await drivePrivacyWithStorageMetadata(target, jobId);
     await target.run(async ctx => {
-      expect((await ctx.db.get(jobId))!.state).toBe('COMPLETE');
+      const completed = (await ctx.db.get(jobId))!;
+      if (completed.state !== 'COMPLETE') throw new Error(JSON.stringify({ state: completed.state, phase: completed.phase, code: completed.archiveError }));
+      expect(completed.state).toBe('COMPLETE');
       expect(await ctx.db.query('memories').collect()).toEqual([]);
       expect(await ctx.db.query('visitLedger').collect()).toEqual([]);
       expect((await ctx.db.get(ledger._id))!.metadata).toMatchObject({ visitId: 'large-history', state: 'COMPLETED' });

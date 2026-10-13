@@ -70,9 +70,11 @@ export const storagePolicyTables = {
     counts: v.any(), processedRows: v.number(), createdAt: v.number(), updatedAt: v.number(),
     finishedAt: v.optional(v.number()),
     archiveError: v.optional(v.string()),
+    chunkScanId: v.optional(v.id('travelPrivacyChunkScans')),
+    chunkRewriteId: v.optional(v.id('travelPrivacyChunkRewrites')),
     archiveCoverage: v.optional(v.object({
       ordinaryBundles: v.union(v.literal('CHECKING'), v.literal('READY'), v.literal('RUNNING'), v.literal('COMPLETE')),
-      largeChunks: v.literal('NOT_IMPLEMENTED'), orphanObjects: v.literal('NOT_VERIFIED'),
+      largeChunks: v.union(v.literal('NOT_IMPLEMENTED'), v.literal('CHECKING'), v.literal('READY'), v.literal('RUNNING'), v.literal('COMPLETE')), orphanObjects: v.literal('NOT_VERIFIED'),
     })),
   }).index('visit', ['visitId']).index('state', ['state']).index('scope_state', ['scope', 'state']),
   coldHistoryArchives: defineTable({

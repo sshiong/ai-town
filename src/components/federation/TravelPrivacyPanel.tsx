@@ -24,7 +24,7 @@ type Report = {
   archiveError?: string;
   archiveCoverage?: {
     ordinaryBundles: 'CHECKING' | 'READY' | 'RUNNING' | 'COMPLETE';
-    largeChunks: 'NOT_IMPLEMENTED';
+    largeChunks: 'NOT_IMPLEMENTED' | 'CHECKING' | 'READY' | 'RUNNING' | 'COMPLETE';
     orphanObjects: 'NOT_VERIFIED';
   };
 };
@@ -186,7 +186,10 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
             <>
               <p>{t('Ordinary backup files')}: {t({ CHECKING: 'Checking archive copies', READY: 'Archive cleanup prepared',
                 RUNNING: 'Cleaning archive copies', COMPLETE: 'Archive cleanup complete' }[report.archiveCoverage.ordinaryBundles])}</p>
-              <p className="admin-muted">{t('Large chunk archives are not yet covered. Unreferenced storage objects have not been verified; this result does not certify removal of every local copy.')}</p>
+              <p>{t('Large chunk backup files')}: {t({ NOT_IMPLEMENTED: 'Large chunk archives are not yet covered.',
+                CHECKING: 'Checking archive copies', READY: 'Archive cleanup prepared', RUNNING: 'Cleaning archive copies',
+                COMPLETE: 'Archive cleanup complete' }[report.archiveCoverage.largeChunks])}</p>
+              <p className="admin-muted">{t('Unreferenced storage objects have not been verified; this result does not certify removal of every local copy.')}</p>
             </>
           )}
           {report.archiveError && (

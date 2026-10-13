@@ -3,7 +3,10 @@ import { assertArchiveCanStart } from './maintenanceLock';
 import { assertBackupPrivacy, privacyBackupTables, residentPrivacyRows, restorePrivacyRows, remapLocalPrivacy } from './backupPrivacy';
 import { packColdFiles, restoreColdFiles, type PreparedColdFile } from './coldBackup';
 import { fileStorageDescriptor } from './coldHistoryFiles';
-import { queryRef } from './refs';
+import { queryRef, mutationRef, actionRef } from './refs';
+import { archiveUploadSha256Hex, archiveUploadMetadataMatches, describeArchiveUpload, reserveArchiveUpload, beginArchiveUpload,
+  confirmArchiveUploadCandidate, assertArchiveUploadPublishable, markArchiveUploadPublished,
+  retireArchiveUpload, confirmArchiveUploadProducerTerminal, eraseRetiredArchiveUploadCandidate } from './archiveUploadProvenance';
 import { ObjectType, v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
 import {
@@ -66,6 +69,7 @@ const importArgs = {
   sourceStopped: v.optional(v.boolean()),
   targetEndpoint: v.optional(v.string()),
   residentRestore: v.optional(residentRestoreConfirmation),
+  uploadAttemptKey: v.optional(v.string()),
 };
 const table = (name: string) => name as TableNames;
 function importBundle(args: { bundle?: unknown; bundleJson?: string }): unknown {
@@ -495,6 +499,106 @@ export const checkPreflight = internalQuery({
     };
   },
 });
+const ordinaryCheckpoint = { operationId: v.id('archiveUploadOperations'), revision: v.number() };
+async function ordinaryUploadOwner(args: ObjectType<typeof importArgs>) {
+  return `ordinary:${await digest({ mode: args.mode, targetWorldId: args.targetWorldId ?? null,
+    targetEndpoint: args.targetEndpoint ?? null, sourceStopped: args.sourceStopped ?? false,
+    residentRestore: args.residentRestore ?? null })}`;
+}
+async function assertOrdinaryUploadRequest(ctx: QueryCtx | MutationCtx, args: ObjectType<typeof importArgs>, operationId: Id<'archiveUploadOperations'>) {
+  requireAdmin(args.adminToken);
+  const op = await ctx.db.get(operationId);
+  const blob = new Blob([JSON.stringify(await validateBundle(importBundle(args)))]);
+  const descriptor = await describeArchiveUpload(blob);
+  if (!op || op.producerKind !== 'ORDINARY_BUNDLE' || !args.uploadAttemptKey ||
+    op.ownerKey !== await archiveUploadSha256Hex(new TextEncoder().encode(await ordinaryUploadOwner(args))) ||
+    op.operationKey !== await archiveUploadSha256Hex(new TextEncoder().encode(args.uploadAttemptKey)) ||
+    op.sha256Hex !== descriptor.sha256Hex || op.size !== descriptor.size) throw new Error('BACKUP_UPLOAD_REQUEST_CHANGED');
+  return op;
+}
+async function ordinaryUploadStatus(ctx: MutationCtx, args: ObjectType<typeof importArgs>, operationId: Id<'archiveUploadOperations'>) {
+  const op = await assertOrdinaryUploadRequest(ctx, args, operationId);
+  const checkpoint = { operationId, revision: op.revision };
+  if (op.state === 'PUBLISHED') {
+    const imported = op.publication?.table === 'backupImports' ? await ctx.db.get(op.publication.rowId as Id<'backupImports'>) : null;
+    if (!op.publishedStorageId) throw new Error('BACKUP_UPLOAD_PUBLICATION_CHANGED');
+    const candidate = await ctx.db.query('archiveUploadCandidates').withIndex('operation_storage', q =>
+      q.eq('operationId', op._id).eq('storageId', op.publishedStorageId!)).unique();
+    const metadata = await ctx.db.system.get(op.publishedStorageId);
+    if (!imported || op.publication?.field !== 'manifest.vectorArchiveStorageId' ||
+      imported.manifest.vectorArchiveStorageId !== op.publishedStorageId || !imported.runtimeSnapshot.archiveUploadResult ||
+      candidate?.state !== 'PUBLISHED' || !metadata || !archiveUploadMetadataMatches(op, metadata))
+      throw new Error('BACKUP_UPLOAD_PUBLICATION_CHANGED');
+    return { ...checkpoint, state: op.state, contentType: op.contentType, uploadNeeded: false,
+      storageId: op.publishedStorageId, result: imported.runtimeSnapshot.archiveUploadResult };
+  }
+  if (!['UPLOADING', 'UPLOADED'].includes(op.state) || op.recoveryConflict) throw new Error('BACKUP_UPLOAD_NOT_RESUMABLE');
+  const candidates = await ctx.db.query('archiveUploadCandidates').withIndex('operation', q => q.eq('operationId', operationId))
+    .filter(q => q.eq(q.field('state'), 'STORED')).take(2);
+  if (candidates.length > 1) throw new Error('BACKUP_UPLOAD_CANDIDATE_AMBIGUOUS');
+  const storageId = candidates[0]?.storageId;
+  if (storageId) await assertArchiveUploadPublishable(ctx, { ...checkpoint, storageId });
+  return { ...checkpoint, state: op.state, contentType: op.contentType, uploadNeeded: false, storageId, result: undefined };
+}
+/** Reservation and the single-start lease commit together; no upload starts without their acknowledgement. */
+export const reserveOrdinaryUpload = importInternalMutation({ args: importArgs, handler: async (ctx, args) => {
+  requireAdmin(args.adminToken);
+  const bundle = await validateBundle(importBundle(args));
+  if (!bundle.manifest.includeVectors || !bundle.sections.modelMemoryVectors?.length || !args.uploadAttemptKey)
+    throw new Error('BACKUP_UPLOAD_NOT_REQUIRED');
+  const op = await reserveArchiveUpload(ctx, { producerKind: 'ORDINARY_BUNDLE', ownerKey: await ordinaryUploadOwner(args),
+    operationKey: args.uploadAttemptKey, ...await describeArchiveUpload(new Blob([JSON.stringify(bundle)])) });
+  if (op.state !== 'RESERVED') return ordinaryUploadStatus(ctx, args, op.operationId);
+  if (args.mode === 'restore' && bundle.manifest.scope === 'resident') await residentRestorePlan(ctx, { ...args, bundle });
+  else await checkImport(ctx, { ...args, bundle });
+  const lease = await beginArchiveUpload(ctx, op);
+  return { operationId: lease.operationId, revision: lease.revision, state: lease.state,
+    contentType: lease.contentType, uploadNeeded: true, storageId: undefined, result: undefined };
+} });
+export const resumeOrdinaryUpload = importInternalMutation({ args: { ...importArgs, operationId: ordinaryCheckpoint.operationId },
+  handler: (ctx, args) => ordinaryUploadStatus(ctx, args, args.operationId) });
+export const confirmOrdinaryUpload = importInternalMutation({ args: { ...importArgs, ...ordinaryCheckpoint, storageId: v.id('_storage') },
+  handler: async (ctx, args) => {
+    await assertOrdinaryUploadRequest(ctx, args, args.operationId);
+    await confirmArchiveUploadCandidate(ctx, args);
+  } });
+/** Only an acknowledged sole upload can prove its invocation terminal. Publication is fenced before cleanup. */
+export const retireOrdinaryUpload = importInternalMutation({ args: { ...importArgs, ...ordinaryCheckpoint, candidateStorageId: v.id('_storage') },
+  handler: async (ctx, args) => {
+    const op = await assertOrdinaryUploadRequest(ctx, args, args.operationId);
+    if (op.revision !== args.revision || op.state !== 'UPLOADED' || !op.uploadAcknowledged) throw new Error('BACKUP_UPLOAD_TERMINAL_UNKNOWN');
+    const candidate = await ctx.db.query('archiveUploadCandidates').withIndex('operation_storage', q =>
+      q.eq('operationId', op._id).eq('storageId', args.candidateStorageId)).unique();
+    if (!candidate || candidate.state !== 'STORED') throw new Error('BACKUP_UPLOAD_CANDIDATE_UNKNOWN');
+    const retired = await retireArchiveUpload(ctx, { ...args, reasonCode: 'ORDINARY_PREPARATION_FAILED' });
+    await confirmArchiveUploadProducerTerminal(ctx, retired, async () => {
+      // The single-start lease and successful confirmation prove storage.store returned before this mutation.
+      if (!op.uploadAcknowledged) throw new Error('BACKUP_UPLOAD_TERMINAL_UNKNOWN');
+    });
+    return { ...retired, candidateId: candidate._id };
+  } });
+export const eraseOrdinaryUpload = importInternalMutation({ args: { ...ordinaryCheckpoint, adminToken: v.string(), candidateId: v.id('archiveUploadCandidates') },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    const op = await ctx.db.get(args.operationId);
+    if (op?.producerKind !== 'ORDINARY_BUNDLE') throw new Error('BACKUP_UPLOAD_REQUEST_CHANGED');
+    const deleted = await eraseRetiredArchiveUploadCandidate(ctx, args, async () => {
+      // Opaque persisted manifests cannot be read in a mutation. Their presence means absence is UNKNOWN.
+      for (const table of ['backupImports', 'backupLargeJobs', 'coldHistoryArchives'] as const) {
+        const rows = await ctx.db.query(table).take(129);
+        if (rows.length > 128 || rows.some(row => {
+          const r = row as unknown as Record<string, any>;
+          return r.storageId || r.manifestStorageId || r.localArchiveStorageId || r.manifest?.vectorArchiveStorageId;
+        })) throw new Error('BACKUP_UPLOAD_REFERENCE_COVERAGE_UNKNOWN');
+      }
+      for (const table of ['backupLargeChunks', 'coldHistoryChunks'] as const)
+        if (await ctx.db.query(table).first()) throw new Error('BACKUP_UPLOAD_REFERENCE_COVERAGE_UNKNOWN');
+      if (await ctx.db.query('archiveUploadOperations').filter(q => q.and(q.neq(q.field('_id'), op._id),
+        q.neq(q.field('state'), 'CLEANED'))).first()) throw new Error('BACKUP_UPLOAD_REFERENCE_COVERAGE_UNKNOWN');
+    });
+    return { deleted, coverage: 'CANDIDATE_ONLY' as const };
+  } });
+
 export const importBackup = action({
   args: importArgs,
   handler: async (
@@ -513,13 +617,36 @@ export const importBackup = action({
     // Generate fresh identity material outside the database transaction; never accept an imported private key.
     const keys = args.mode === 'clone' ? await createIdentityKeys() : undefined;
     const bundle = await validateBundle(importBundle(args));
-    // Review all canonical ownership and target constraints before creating storage objects.
-    await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:checkPreflight'), args);
-    const vectorArchiveStorageId = bundle.manifest.includeVectors && (bundle.sections.modelMemoryVectors?.length ?? 0)
-      ? await ctx.storage.store(new Blob([JSON.stringify(bundle)], { type: 'application/json' })) : undefined;
+    const needsBundle = !!bundle.manifest.includeVectors && !!bundle.sections.modelMemoryVectors?.length;
+    // The exact byte string crosses RPC unchanged; Convex object transport can reorder JSON keys.
+    args = { ...args, ...(needsBundle ? { bundle: undefined, bundleJson: JSON.stringify(bundle),
+      uploadAttemptKey: args.uploadAttemptKey ?? crypto.randomUUID() } : {}) };
+    let upload: Awaited<ReturnType<typeof ordinaryUploadStatus>> | undefined;
+    let vectorArchiveStorageId: Id<'_storage'> | undefined;
+    if (needsBundle) {
+      upload = await ctx.runMutation(mutationRef('backup/reserveOrdinaryUpload'), args);
+      if (upload!.state === 'PUBLISHED') return upload!.result;
+      if (upload!.uploadNeeded) {
+        vectorArchiveStorageId = await ctx.storage.store(new Blob([JSON.stringify(bundle)], { type: upload!.contentType }));
+        await ctx.runMutation(mutationRef('backup/confirmOrdinaryUpload'), { ...args,
+          operationId: upload!.operationId, revision: upload!.revision, storageId: vectorArchiveStorageId });
+      } else {
+        if (!upload!.storageId) {
+          await ctx.runAction(actionRef('archiveUploadProvenance/recoverPage'), { adminToken: args.adminToken,
+            operationId: upload!.operationId, revision: upload!.revision });
+          upload = await ctx.runMutation(mutationRef('backup/resumeOrdinaryUpload'), { ...args, operationId: upload!.operationId });
+        }
+        if (!upload!.storageId) throw new Error('BACKUP_UPLOAD_ACKNOWLEDGEMENT_UNKNOWN');
+        vectorArchiveStorageId = upload!.storageId;
+        // A recovered candidate is publishable, but metadata does not prove the original invocation terminal.
+        // Preserve uploadAcknowledged=false so cleanup cannot invent that proof after a lost storage response.
+      }
+    }
     const preparedColdFiles: PreparedColdFile[] = [];
     let publicationStarted = false, acknowledged = false;
     try {
+      // Published retries return above; every new publication reviews current canonical constraints.
+      await ctx.runQuery(makeFunctionReference<'query'>('federation/backup:checkPreflight'), args);
       for (const [index, attachment] of (bundle.coldHistoryFiles ?? []).entries()) {
         const storageId = await ctx.storage.store(new Blob([JSON.stringify(attachment.file.payload)], {type:'application/json'}));
         preparedColdFiles.push({index,storageId});
@@ -531,14 +658,20 @@ export const importBackup = action({
       publicationStarted = true;
       const result = await ctx.runMutation(makeFunctionReference<'mutation'>('federation/backup:applyImport'), {
         ...args, keys, preparedColdFiles, vectorArchiveStorageId,
+        ...(upload ? { archiveUpload: { operationId: upload.operationId, revision: upload.revision } } : {}),
       });
       acknowledged = true;
       return result;
     } finally {
-      // Before publication no database writer has received this object ID.
-      // Reclaim the complete private bundle if preparing cold files failed.
-      if (vectorArchiveStorageId && !publicationStarted)
-        await ctx.storage.delete(vectorArchiveStorageId);
+      // Fence preparation failures before proving references absent. An unknown publication response retains its candidate.
+      if (vectorArchiveStorageId && upload && !publicationStarted) {
+        try {
+          const retired = await ctx.runMutation(mutationRef('backup/retireOrdinaryUpload'), { ...args,
+            operationId: upload.operationId, revision: upload.revision, candidateStorageId: vectorArchiveStorageId });
+          await ctx.runMutation(mutationRef('backup/eraseOrdinaryUpload'), { adminToken: args.adminToken,
+            operationId: retired.operationId, revision: retired.revision, candidateId: retired.candidateId });
+        } catch { /* Unknown reference coverage or acknowledgement preserves the source-proven candidate. */ }
+      }
       for (const {storageId} of preparedColdFiles) {
         // A lost response can leave publication in flight. A separate read cannot
         // prove that it will never commit later, so preserve every staged object.
@@ -565,18 +698,32 @@ function mergePosition(map: WorldMap, occupied: Point[], desired: Point): Point 
 }
 const applyImportFields = {
   ...importArgs,
+  archiveUpload: v.optional(v.object(ordinaryCheckpoint)),
   vectorArchiveStorageId: v.optional(v.id('_storage')),
   preparedColdFiles: v.optional(v.array(v.object({index:v.number(),storageId:v.id('_storage')}))),
   keys: v.optional(
     v.object({ publicKey: v.string(), privateKeyEncrypted: v.string(), fingerprint: v.string() }),
   ),
 };
+async function publishOrdinaryBundle(ctx: MutationCtx, args: ObjectType<typeof applyImportFields>, result: { importId: Id<'backupImports'> }) {
+  if (!args.archiveUpload) return;
+  const imported = (await ctx.db.get(result.importId))!;
+  await ctx.db.patch(imported._id, { runtimeSnapshot: { ...imported.runtimeSnapshot, archiveUploadResult: result } });
+  await markArchiveUploadPublished(ctx, { ...args.archiveUpload, storageId: args.vectorArchiveStorageId!,
+    publication: { table: 'backupImports', rowId: imported._id, field: 'manifest.vectorArchiveStorageId' } });
+}
 export async function applyBackupData(
   ctx: MutationCtx,
   args: ObjectType<typeof applyImportFields>,
 ) {
   requireAdmin(args.adminToken);
-  args = { ...args, bundle: importBundle(args) };
+  args = { ...args, bundle: importBundle(args), bundleJson: undefined };
+  if (!!args.vectorArchiveStorageId !== !!args.archiveUpload) throw new Error('BACKUP_UPLOAD_PROVENANCE_REQUIRED');
+  if (args.archiveUpload) {
+    await assertOrdinaryUploadRequest(ctx, args, args.archiveUpload.operationId);
+    if (!args.vectorArchiveStorageId) throw new Error('BACKUP_UPLOAD_CANDIDATE_UNKNOWN');
+    await assertArchiveUploadPublishable(ctx, { ...args.archiveUpload, storageId: args.vectorArchiveStorageId });
+  }
   if (args.mode === 'restore' && args.bundle?.manifest?.scope === 'resident') {
     const source = decodeRow(args.bundle.sections.federationIdentity[0]);
     const vectorSourceTrusted = !!args.bundle.signature && await trustedVectorSource(ctx.db, source as { townId: string; publicKey: string; fingerprint: string });
@@ -585,7 +732,9 @@ export async function applyBackupData(
     const coldFilesRestored = await restoreColdFiles(ctx,args.adminToken,bundle,result.mapping,args.preparedColdFiles);
     const imported = await ctx.db.get(result.importId);
     if (imported) await ctx.db.patch(imported._id, { manifest: { ...imported.manifest, vectorSourceTrusted, vectorArchiveStorageId: args.vectorArchiveStorageId } });
-    return {...result,coldFilesRestored};
+    const publishedResult = {...result,coldFilesRestored};
+    await publishOrdinaryBundle(ctx, args, publishedResult);
+    return publishedResult;
   }
   const { bundle, local, rows } = await checkImport(ctx, args);
   const vectorSourceTrusted = !!bundle.signature && await trustedVectorSource(ctx.db, rows.federationIdentity[0] as { townId: string; publicKey: string; fingerprint: string });
@@ -897,7 +1046,7 @@ export async function applyBackupData(
       { memoryId: mapping[memory._id] },
     );
   const coldFilesRestored = await restoreColdFiles(ctx,args.adminToken,bundle,mapping,args.preparedColdFiles);
-  return {
+  const result = {
     coldFilesRestored,
     importId,
     mode: args.mode,
@@ -905,6 +1054,8 @@ export async function applyBackupData(
     mapping,
     rebuildRequired: true as const,
   };
+  await publishOrdinaryBundle(ctx, args, result);
+  return result;
 }
 export const applyImport = importInternalMutation({ args: applyImportFields, handler: applyBackupData });
 

@@ -26,7 +26,7 @@ function shaMatches(metadata: { sha256: string }, expected: string) {
   const bytes = Uint8Array.from(expected.match(/../g)!, part => parseInt(part, 16));
   return metadata.sha256 === btoa(String.fromCharCode(...bytes));
 }
-function matches(op: Operation, row: { contentType?: string | null; sha256: string; size: number }) {
+export function archiveUploadMetadataMatches(op: Operation, row: { contentType?: string | null; sha256: string; size: number }) {
   return row.contentType === op.contentType && row.size === op.size && shaMatches(row, op.sha256Hex);
 }
 function reservation(op: Operation) {
@@ -74,7 +74,7 @@ async function rememberCandidate(ctx: MutationCtx, op: Operation, storageId: Id<
 }
 export async function confirmArchiveUploadCandidate(ctx: MutationCtx, a: Checkpoint & { storageId: Id<'_storage'> }) {
   const op = await checked(ctx, a); assert(['UPLOADING', 'UPLOADED'].includes(op.state), 'NOT_UPLOADING');
-  const metadata = await ctx.db.system.get(a.storageId); assert(metadata && matches(op, metadata), 'METADATA_MISMATCH');
+  const metadata = await ctx.db.system.get(a.storageId); assert(metadata && archiveUploadMetadataMatches(op, metadata), 'METADATA_MISMATCH');
   const candidateId = await rememberCandidate(ctx, op, a.storageId, 'ACKNOWLEDGED_UPLOAD');
   await ctx.db.patch(op._id, { state: 'UPLOADED', uploadAcknowledged: true, updatedAt: Date.now() });
   return candidateId;
@@ -84,7 +84,7 @@ export async function assertArchiveUploadPublishable(ctx: MutationCtx, a: Checkp
   const candidate = await ctx.db.query('archiveUploadCandidates').withIndex('operation_storage', q =>
     q.eq('operationId', op._id).eq('storageId', a.storageId)).unique();
   const metadata = await ctx.db.system.get(a.storageId);
-  assert(candidate?.state === 'STORED' && metadata && matches(op, metadata), 'CANDIDATE_NOT_VERIFIED');
+  assert(candidate?.state === 'STORED' && metadata && archiveUploadMetadataMatches(op, metadata), 'CANDIDATE_NOT_VERIFIED');
   return { op, candidate };
 }
 /** Must run in the SAME mutation as the producer's canonical pointer writes. Not an independent publication acknowledgement. */
@@ -169,7 +169,7 @@ export async function eraseRetiredArchiveUploadCandidate(ctx: MutationCtx, a: Ch
   const candidate = await ctx.db.get(a.candidateId); assert(candidate && candidate.operationId === op._id, 'CANDIDATE_CHANGED');
   if (candidate.state === 'DELETED') return false;
   const metadata = await ctx.db.system.get(candidate.storageId);
-  assert(!metadata || matches(op, metadata), 'METADATA_MISMATCH');
+  assert(!metadata || archiveUploadMetadataMatches(op, metadata), 'METADATA_MISMATCH');
   await assertIndexedArchiveStorageReferencesAbsent(ctx, candidate.storageId, op._id);
   await assertNestedArchiveStorageReferencesAbsent(ctx, candidate.storageId);
   await proveAdditionalReferencesAbsent(ctx, candidate.storageId);
@@ -201,7 +201,7 @@ export const recoveryRead = internalQuery({ args: { ...checkpoint, recoveryRevis
     .paginate({ cursor: op.recoveryCursor, numItems: PAGE, maximumRowsRead: PAGE * 2, maximumBytesRead: 64 * 1024 });
   const owned = page.page.filter(row => row.contentType === op.contentType);
   return { cursor: op.recoveryCursor, continueCursor: page.continueCursor, done: page.isDone, scanned: page.page.length,
-    storageIds: owned.filter(row => matches(op, row)).map(row => row._id), conflict: owned.some(row => !matches(op, row)) };
+    storageIds: owned.filter(row => archiveUploadMetadataMatches(op, row)).map(row => row._id), conflict: owned.some(row => !archiveUploadMetadataMatches(op, row)) };
 } });
 export const recoverySave = trackedInternalMutation({ args: { ...checkpoint, recoveryRevision: v.number(), expectedCursor: v.union(v.string(), v.null()),
   cursor: v.string(), done: v.boolean(), storageIds: v.array(v.id('_storage')), conflict: v.boolean() }, handler: async (ctx, a) => {
@@ -209,7 +209,7 @@ export const recoverySave = trackedInternalMutation({ args: { ...checkpoint, rec
   if (op.state === 'CLEANED' || op.recoveryRevision !== a.recoveryRevision || op.recoveryCursor !== a.expectedCursor || op.recoveryCutoff === undefined) return false;
   assert(a.storageIds.length <= PAGE, 'RECOVERY_PAGE_BUDGET');
   for (const storageId of a.storageIds) {
-    const metadata = await ctx.db.system.get(storageId); assert(metadata && matches(op, metadata), 'METADATA_MISMATCH');
+    const metadata = await ctx.db.system.get(storageId); assert(metadata && archiveUploadMetadataMatches(op, metadata), 'METADATA_MISMATCH');
     await rememberCandidate(ctx, op, storageId, 'METADATA_RECOVERY');
   }
   await ctx.db.patch(op._id, { recoveryCursor: a.done ? null : a.cursor, recoveryRevision: op.recoveryRevision + 1,

@@ -6,6 +6,7 @@ import { convexTest } from 'convex-test';
 import schema from '../schema';
 import { actionRef, mutationRef, queryRef } from './refs';
 import { createBundle, dataTables, decodeRow, encodeRow, snapshotTables, validateBundle, type BackupBundle, type BackupRow } from './backupHelpers';
+import { descriptor } from './backupLargeHelpers';
 import { canonicalJson } from './protocol';
 import { digest, toBase64, verifySignature } from './security';
 import { withEmbeddingRevision } from '../models/embeddingDataRevision';
@@ -14,9 +15,13 @@ import type { LocalPrivacyArchive } from './travelPrivacyArchives';
 import type { ColdBackupAttachment } from './coldBackup';
 
 const modules = {
+  '../federation/archiveUploadProvenance.ts': () => import('./archiveUploadProvenance'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
   '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
+  '../federation/travelPrivacyChunkCoordinator.ts': () => import('./travelPrivacyChunkCoordinator'),
+  '../federation/travelPrivacyChunkArchives.ts': () => import('./travelPrivacyChunkArchives'),
+  '../federation/travelPrivacyChunkRewrite.ts': () => import('./travelPrivacyChunkRewrite'),
 };
 const adminToken = 'archive-privacy-test-administrator';
 type Test = ReturnType<typeof convexTest<typeof schema.tables>>;
@@ -28,7 +33,8 @@ const currentJob = (t: Test, jobId: Id<'travelPrivacyJobs'>) => t.run(ctx => ctx
 async function step(t: Test, jobId: Id<'travelPrivacyJobs'>) {
   const job = (await currentJob(t, jobId))!;
   const args = { jobId, revision: job.revision };
-  if (job.phase.startsWith('ARCHIVE_')) await t.action(actionRef('travelPrivacyArchives/page'), args);
+  if (job.phase.startsWith('CHUNK_')) await t.action(actionRef('travelPrivacyChunkCoordinator/page'), args);
+  else if (job.phase.startsWith('ARCHIVE_')) await t.action(actionRef('travelPrivacyArchives/page'), args);
   else await t.mutation(mutationRef('travelPrivacy/page'), args);
 }
 async function until(t: Test, jobId: Id<'travelPrivacyJobs'>, check: (job: Doc<'travelPrivacyJobs'>) => boolean) {
@@ -210,7 +216,12 @@ test.each([false, true])('ordinary signed mixed bundle is physically cleared bef
     const candidates = await f.t.query(queryRef('travelPrivacy/historicalCandidates'), { adminToken, visitId: 'selected', paginationOpts: { cursor: null, numItems: 5 } });
     expect(candidates.page[0].history).toEqual(f.history);
   } else expect(await f.t.run(ctx => ctx.db.get(f.ledgerId!))).not.toBeNull();
-  expect((await currentJob(f.t, jobId))!.archiveCoverage).toEqual({ ordinaryBundles: 'COMPLETE', largeChunks: 'NOT_IMPLEMENTED', orphanObjects: 'NOT_VERIFIED' });
+  const completed = (await currentJob(f.t, jobId))!;
+  const scan = await f.t.run(ctx => ctx.db.get(completed.chunkScanId!));
+  expect(scan!.phase).toBe('READY_TO_REWRITE');
+  expect(scan!.objects).toBe(0);
+  expect(scan!.selectedRows).toBe(0);
+  expect(completed.archiveCoverage).toEqual({ ordinaryBundles: 'COMPLETE', largeChunks: 'COMPLETE', orphanObjects: 'NOT_VERIFIED' });
 });
 
 test('unsigned legacy bundle uses its published import mapping and checksum without inventing a source signature', async () => {
@@ -423,3 +434,78 @@ test.each(['upload-verification', 'before-publication', 'after-publication'] as 
     const remaining = await f.t.run(ctx => ctx.db.system.query('_storage').collect());
     expect(remaining.map(row => row._id)).toEqual([(await readLocal(f)).imported.localArchiveStorageId]);
   });
+
+async function addOldMemoryChunks(f: Awaited<ReturnType<typeof fixture>>, conflictingOwner = false) {
+  const records = await f.t.run(async ctx => {
+    const bindings = await ctx.db.query('residentModelBindings').collect();
+    const selected = (await ctx.db.get(f.memoryId))!, other = (await ctx.db.get(f.otherId))!;
+    return { bindings, selected: conflictingOwner ? { ...selected, agentGlobalId: 'foreign-owner' } : selected, other };
+  });
+  const chunks = [{ index: 0, table: 'residentModelBindings', rows: records.bindings.map(encodeRow) },
+    { index: 1, table: 'memories', rows: [records.selected, records.other].map(encodeRow) }];
+  const stored = [] as { chunk: typeof chunks[number]; storageId: Id<'_storage'>; summary: Awaited<ReturnType<typeof descriptor>> }[];
+  for (const chunk of chunks) stored.push({ chunk, summary: await descriptor(chunk),
+    storageId: await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify(chunk)]))) });
+  const backupId = await f.t.run(async ctx => {
+    const id = await ctx.db.insert('backupLargeJobs', { kind: 'import', state: 'COMPLETE', phase: 'COMPLETE',
+      tableIndex: 0, cursor: null, chunkCount: 0, processedChunks: 0, recordCount: 3, bytes: stored.reduce((sum, s) => sum+s.summary.bytes,0),
+      createdAt: 1, updatedAt: 1, source: {}, metadata: { oldChunkCount: 2 } });
+    for (const s of stored) await ctx.db.insert('backupLargeChunks', { jobId: id, ...s.summary, storageId: s.storageId });
+    return id;
+  });
+  return { backupId, stored, records };
+}
+
+test('formal sensitive start clears OLD chunk and ordinary bundle before native purge', async () => {
+  const f = await fixture({ cold: false }), old = await addOldMemoryChunks(f);
+  const { jobId, report } = await preview(f);
+  expect(report.state).toBe('READY');
+  expect(report.archiveCoverage!.largeChunks).toBe('READY');
+  await f.t.mutation(mutationRef('travelPrivacy/start'), { adminToken, jobId });
+  expect((await currentJob(f.t, jobId))!.phase).toBe('CHUNK_REWRITE');
+  for (let n = 0; n < 200; n++) {
+    const job = (await currentJob(f.t, jobId))!;
+    if (job.phase !== 'CHUNK_REWRITE') break;
+    const latest = await f.t.run(ctx => ctx.db.system.query('_storage').order('desc').first());
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(Math.max(Date.now(), Math.ceil(latest?._creationTime ?? 0) + 10));
+    try { await step(f.t, jobId); } finally { clock.mockRestore(); }
+    // Emulate only Blob.type omitted by convex-test 0.0.60. SHA/size and actual stored bytes remain authoritative.
+    const repaired = await f.t.run(async ctx => {
+      let changed = false;
+      const operations = await ctx.db.query('archiveUploadOperations').collect();
+      for (const object of await ctx.db.system.query('_storage').collect()) {
+        const operation = operations.find(op => op.state === 'UPLOADING' && op.size === object.size &&
+          Buffer.from(op.sha256Hex, 'hex').toString('base64') === object.sha256);
+        if (operation && !object.contentType) { await ctx.db.patch(object._id as never, { contentType: operation.contentType } as never); changed = true; }
+      }
+      return changed;
+    });
+    if (repaired) await f.t.mutation(mutationRef('travelPrivacy/retry'), { adminToken, jobId });
+    else if ((await currentJob(f.t, jobId))!.archiveError) throw new Error((await currentJob(f.t, jobId))!.archiveError);
+  }
+  const afterChunks = (await currentJob(f.t, jobId))!;
+  expect(afterChunks.phase).toBe('ARCHIVE_REWRITE');
+  expect(await f.t.run(ctx => ctx.db.get(f.memoryId))).not.toBeNull();
+  expect(await f.t.run(ctx => ctx.db.system.get(old.stored[1].storageId))).toBeNull();
+  expect(await storageText(f.t, f.storageId)).not.toBeNull();
+  const rewritten = await f.t.run(ctx => ctx.db.query('backupLargeChunks').withIndex('job_index', q => q.eq('jobId',old.backupId).eq('index',1)).unique());
+  const json = JSON.parse((await storageText(f.t, rewritten!.storageId))!);
+  expect(json.rows).toEqual([encodeRow(old.records.other)]);
+  await until(f.t, jobId, j => j.state === 'COMPLETE');
+  expect(await f.t.run(ctx => ctx.db.get(f.memoryId))).toBeNull();
+  expect(await f.t.run(ctx => ctx.db.get(f.otherId))).not.toBeNull();
+  expect(await storageText(f.t, f.storageId)).toBeNull();
+  expect((await currentJob(f.t, jobId))!.archiveCoverage).toEqual({ ordinaryBundles:'COMPLETE',largeChunks:'COMPLETE',orphanObjects:'NOT_VERIFIED' });
+});
+
+test('chunk ownership blocker prevents ordinary cleanup, tombstones and native deletion through formal preview', async () => {
+  const f = await fixture({ cold: false }), old = await addOldMemoryChunks(f, true);
+  const { jobId, report } = await preview(f);
+  expect(report.state).toBe('BLOCKED');
+  expect(report.blockers).toContain('CHUNK_ARCHIVE_BLOCKED');
+  await expect(f.t.mutation(mutationRef('travelPrivacy/start'), { adminToken,jobId })).rejects.toThrow('TRAVEL_PRIVACY_PREFLIGHT_BLOCKED');
+  expect(await f.t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).toEqual([]);
+  expect(await f.t.run(ctx => ctx.db.get(f.memoryId))).not.toBeNull();
+  expect(await storageText(f.t, old.stored[1].storageId)).not.toBeNull();
+  expect(await storageText(f.t, f.storageId)).not.toBeNull();
+});

@@ -906,4 +906,8 @@ export const dataMessages: Record<string, string> = {
   'History & relationships': '历史与关系',
   'Measurements estimate stored record bytes; they are not provider billing totals. Backups require an explicit archive export and download.':
     '测量值是存储记录字节数的估算，并非服务商账单总量。备份需要显式导出并下载归档。',
+  'Large chunk backup files': '大型分块备份文件',
+  'Large chunk archives are not yet covered.': '大型分块归档尚未覆盖。',
+  'Unreferenced storage objects have not been verified; this result does not certify removal of every local copy.':
+    '无引用的存储对象尚未验证，因此此结果不能证明所有本地副本均已移除。',
 };

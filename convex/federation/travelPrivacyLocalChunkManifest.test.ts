@@ -270,3 +270,17 @@ test.each([false, true])('readers recheck publication revision after reading sto
     expect(changed).toBe(true);
   }
 });
+
+
+test('selective private rollback identity is locally authenticated and never portable', async () => {
+  const f = await fixture(true);
+  const chunk = { index: f.local.chunks.length, table: 'federationIdentity', rows: [encodeRow({
+    _id: 'rollback-identity', _creationTime: 1, privateKeyEncrypted: 'encrypted-private-checkpoint',
+  })] };
+  const d = { ...await descriptor(chunk), role: 'OLD' as const, encoding: 'RAW' as const };
+  const local = await createLocalChunkManifest({ ...f.local, chunks: [...f.local.chunks, d] });
+  expect((await validateLocalChunk(chunk, d))[0]).toHaveProperty('privateKeyEncrypted');
+  await expect(validateLocalChunkManifest(local, { expectedDigest: await digest(local) }, { portable: true }))
+    .rejects.toThrow('LOCAL_ARCHIVE_PRIVATE_ROLLBACK_NOT_PORTABLE');
+  expect((await portableLocalChunkManifest(local)).chunks.some(c => c.role === 'OLD')).toBe(false);
+});

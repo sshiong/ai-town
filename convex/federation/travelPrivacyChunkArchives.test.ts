@@ -3,8 +3,9 @@ import { convexTest } from 'convex-test';
 import schema from '../schema';
 import { actionRef, mutationRef, queryRef } from './refs';
 import { encodeRow, type BackupRow } from './backupHelpers';
-import { descriptor, type LargeChunk } from './backupLargeHelpers';
-import { toBase64 } from './security';
+import { descriptor, largeTables, type LargeChunk, type LargeManifest } from './backupLargeHelpers';
+import { digest, toBase64 } from './security';
+import { createLocalChunkManifest } from './travelPrivacyLocalChunkManifest';
 import { canonicalJson } from './protocol';
 import type { Id } from '../_generated/dataModel';
 import { withEmbeddingRevision, dataRevision, privacyRevisionKey } from '../models/embeddingDataRevision';
@@ -332,4 +333,71 @@ test.each(['deleted-chunk', 'changed-producer'])('partial indexing checkpoints p
   const objects = await f.t.run(ctx => ctx.db.query('travelPrivacyChunkObjects').withIndex('scan', q => q.eq('scanId', scan._id)).collect());
   expect(objects.some(o => o.blockers.includes('SOURCE_CHANGED'))).toBe(true);
   expect(await f.t.action(async ctx => !!await ctx.storage.get(archived.chunks[1].storageId))).toBe(true);
+});
+
+async function sanitizedArchive(f: Fixture) {
+  const keys = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as CryptoKeyPair;
+  const publicKey = toBase64(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey)));
+  const source = { _id: 'synthetic-identity', _creationTime: 1, townId: 'source-town', publicKey, townName: 'Fixture',
+    fingerprint: `sha256:${await digest(publicKey)}`, deploymentInstanceId: 'fixture-instance', deploymentEpoch: 1,
+    endpoint: 'https://fixture.invalid/federation/v1', enabled: false, allowIncomingPairRequests: false,
+    allowUnencryptedHttp: false, allowPublicHttp: false, maxVisitors: 1, maxVisitDurationMs: 300_000, mode: 'ACTIVE', createdAt: 1 };
+  const chunks = largeTables.map((table, index) => ({ index, table, rows:
+    (table === 'federationIdentity' ? [source] : table === 'residentModelBindings' ? [{ ...binding(f.worldId), _creationTime: 1, chatProfileId: 'synthetic-profile', createdAt: 1, updatedAt: 1 }] : table === 'memories'
+      ? [{ _id: 'retained-visit-memory', _creationTime: 1, worldId: f.worldId, playerId: 'p:0', agentGlobalId: 'selected-owner',
+        description: 'synthetic-private-memory', importance: 5, lastAccess: 1, data: { type: 'travel', eventId: 'event',
+          visitId: 'second-visit', hostTownId: 'fixture-host', participants: [], occurredAt: 1 } }] : []).map(encodeRow) }));
+  const summaries = await Promise.all(chunks.map(descriptor));
+  const original: LargeManifest = { format: 'ai-town-chunks', version: 1, schemaVersion: 1, scope: 'town',
+    exportId: 'synthetic-export', source, exportedAt: 1, chunks: summaries };
+  const signature = toBase64(new Uint8Array(await crypto.subtle.sign('Ed25519', keys.privateKey,
+    new TextEncoder().encode(canonicalJson(original)))));
+  const jobId = await f.t.run(ctx => ctx.db.insert('backupLargeJobs', { kind: 'export', state: 'COMPLETE', phase: 'COMPLETE',
+    tableIndex: 0, cursor: null, chunkCount: chunks.length, processedChunks: chunks.length,
+    recordCount: 2, bytes: summaries.reduce((n, d) => n + d.bytes, 0), createdAt: 1, updatedAt: 1, source }));
+  const manifest = await createLocalChunkManifest({ archiveId: jobId, derivedAt: 2, clearedVisits: ['first-visit'],
+    chunks: summaries.map(d => ({ ...d, role: 'EXPORT', encoding: 'RAW' })),
+    sourceEvidence: { manifest: original, digest: await digest(original), publicKey, signature,
+      manifestStorageId: 'historical-source-storage-no-longer-present' } });
+  const manifestStorageId = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify(manifest)])));
+  await f.t.run(ctx => ctx.db.patch(jobId, { archivePrivacyState: 'LOCAL_SANITIZED', manifestStorageId,
+    metadata: { archiveLocalManifestDigest: '' } }));
+  await f.t.run(async ctx => ctx.db.patch(jobId, { metadata: { archiveLocalManifestDigest: await digest(manifest) } }));
+  for (const [index, chunk] of chunks.entries()) {
+    const storageId = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify(chunk)])));
+    await f.t.run(ctx => ctx.db.insert('backupLargeChunks', { jobId, ...summaries[index], storageId }));
+  }
+  return { jobId, manifest, manifestStorageId };
+}
+
+test('second visit inspection validates the pinned derivative while retaining original signed source evidence', async () => {
+  const f = await fixture(), archived = await sanitizedArchive(f);
+  await f.t.run(ctx => ctx.db.patch(f.jobId, { visitId: 'second-visit' }));
+  const scan = await inspect(f);
+  expect(scan.phase).toBe('READY_TO_REWRITE');
+  const rows = await selected(f, scan._id);
+  expect(rows.map(row => row.evidence.sourceId)).toEqual(['retained-visit-memory']);
+  const objects = await f.t.run(ctx => ctx.db.query('travelPrivacyChunkObjects').withIndex('scan', q => q.eq('scanId', scan._id)).collect());
+  expect(objects.every(o => o.sourceManifestDigest === archived.manifest.sourceEvidence.digest)).toBe(false);
+  expect(objects.every(o => o.sourceManifestStorageId === archived.manifestStorageId)).toBe(true);
+  expect(objects.every(o => o.sourceSignature === archived.manifest.sourceEvidence.signature)).toBe(true);
+});
+
+test('second visit inspection blocks tampered local manifest authentication', async () => {
+  const f = await fixture(), archived = await sanitizedArchive(f);
+  await f.t.run(ctx => ctx.db.patch(archived.jobId, { metadata: { archiveLocalManifestDigest: 'A'.repeat(43) + '=' } }));
+  const scan = await inspect(f);
+  expect(scan.phase).toBe('BLOCKED');
+  const objects = await f.t.run(ctx => ctx.db.query('travelPrivacyChunkObjects').withIndex('scan', q => q.eq('scanId', scan._id)).collect());
+  expect(objects.every(o => o.blockers.includes('LOCAL_ARCHIVE_DIGEST_MISMATCH'))).toBe(true);
+});
+
+test('inspection retry reuses the newest matching parent revision scan', async () => {
+  const f = await fixture();
+  const first = await f.t.mutation(mutationRef('travelPrivacyChunkArchives/startInspection'), { jobId: f.jobId });
+  await f.t.run(ctx => ctx.db.patch(f.jobId, { revision: 1 }));
+  const second = await f.t.mutation(mutationRef('travelPrivacyChunkArchives/startInspection'), { jobId: f.jobId });
+  const retry = await f.t.mutation(mutationRef('travelPrivacyChunkArchives/startInspection'), { jobId: f.jobId });
+  expect(second).not.toBe(first);
+  expect(retry).toBe(second);
 });

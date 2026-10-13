@@ -15,6 +15,9 @@ const modules = {
   '../federation/backup.ts': () => import('./backup'),
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
   '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
+  '../federation/travelPrivacyChunkCoordinator.ts': () => import('./travelPrivacyChunkCoordinator'),
+  '../federation/travelPrivacyChunkArchives.ts': () => import('./travelPrivacyChunkArchives'),
+  '../federation/travelPrivacyChunkRewrite.ts': () => import('./travelPrivacyChunkRewrite'),
   '../agent/embeddingsCache.ts': () => import('../agent/embeddingsCache'),
   '../_generated/server.ts': () => import('../_generated/server'),
 };

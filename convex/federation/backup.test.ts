@@ -2,13 +2,15 @@ import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import { packColdFiles } from './coldBackup';
-import { makeFunctionReference } from 'convex/server';
+import { getFunctionName, makeFunctionReference } from 'convex/server';
 import schema from '../schema';
 import { Id } from '../_generated/dataModel';
 import { convexToJson, type Value } from 'convex/values';
 import { createIdentityKeys, digest, sign } from './security';
 import { BackupBundle, decodeRow, encodeRow, validateBundle } from './backupHelpers';
 import { embeddingFingerprint } from '../models/compatibility';
+import { memorySourceDigest } from '../models/embeddingDataRevision';
+import { pipelineFingerprint } from '../models/ollamaEvidence';
 import { applyBackupData, importBackup } from './backup';
 import { seedMemoryBackupEvidence, assertMemoryBackupEvidence, useLegacyMemoryBackupDigests } from './memoryBackupTestHelpers';
 
@@ -34,7 +36,11 @@ const modules = {
   '../federation/coldHistory.ts': () => import('./coldHistory'),
   '../federation/coldHistoryFiles.ts': () => import('./coldHistoryFiles'),
   '../federation/backup.ts': () => import('./backup'),
+  '../federation/archiveUploadProvenance.ts': () => import('./archiveUploadProvenance'),
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
+  '../federation/travelPrivacyChunkCoordinator.ts': () => import('./travelPrivacyChunkCoordinator'),
+  '../federation/travelPrivacyChunkArchives.ts': () => import('./travelPrivacyChunkArchives'),
+  '../federation/travelPrivacyChunkRewrite.ts': () => import('./travelPrivacyChunkRewrite'),
   '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
   '../federation/admin.ts': () => import('./admin'),
   '../federation/backupExportAudit.ts': () => import('./backupExportAudit'),
@@ -1617,7 +1623,15 @@ test.each(['cold-upload', 'cold-verification', 'publication-unknown'] as const)(
     })._handler;
     const ctx = {
       runQuery: async () => { queries++; return queries === 1 ? {} : false; },
-      runMutation: async () => { publications++; throw new Error('PUBLICATION_ACKNOWLEDGEMENT_LOST'); },
+      runMutation: async (ref: any) => {
+        const name = getFunctionName(ref);
+        if (name.endsWith(':reserveOrdinaryUpload')) return { operationId: 'operation', revision: 2,
+          state: 'UPLOADING', contentType: 'application/vnd.ai-town.archive-upload+json; operation=test', uploadNeeded: true };
+        if (name.endsWith(':confirmOrdinaryUpload')) return;
+        if (name.endsWith(':retireOrdinaryUpload')) return { operationId: 'operation', revision: 3, candidateId: 'candidate' };
+        if (name.endsWith(':eraseOrdinaryUpload')) throw new Error('BACKUP_UPLOAD_REFERENCE_COVERAGE_UNKNOWN');
+        publications++; throw new Error('PUBLICATION_ACKNOWLEDGEMENT_LOST');
+      },
       storage: {
         store: async (blob: Blob) => {
           if (++stores === 2 && failure === 'cold-upload') throw new Error('COLD_UPLOAD_FAILED');
@@ -1641,8 +1655,8 @@ test.each(['cold-upload', 'cold-verification', 'publication-unknown'] as const)(
       expect(JSON.parse(await objects.get('test-storage-1')!.text())).toEqual(bundle);
     } else {
       expect(publications).toBe(0);
-      expect(deleted).toContain('test-storage-1');
-      expect(objects.size).toBe(0);
+      expect(deleted).not.toContain('test-storage-1');
+      expect(objects.size).toBe(1);
     }
   },
 );
@@ -1764,4 +1778,257 @@ test('vector snapshot export options do not leak extra fields into export audit 
   const audits = await t.run(ctx => ctx.db.query('backupExportAudits').collect());
   expect(audits.map(row => row.scope).sort()).toEqual(['resident', 'town']);
   expect(audits.every(row => row.operator === 'Snapshot administrator' && row.reason === 'Verified vector snapshot')).toBe(true);
+});
+
+async function ordinaryVectorBundle(withCold = false) {
+  const src = await town();
+  if (withCold) {
+    const owner = await nativeColdOwner(src.t, src.worldId);
+    await src.t.action(action('federation/coldHistory:archive'), owner);
+  }
+  const bundle: BackupBundle = await src.t.action(action('federation/backup:exportTown'), { adminToken, includeVectors: true });
+  const memory = decodeRow(bundle.sections.memories[0]);
+  const profile = { provider: 'ollama' as const, url: 'http://fixture.example:11434', model: 'fixture:v1', dimensions: 2,
+    preprocessingRevision: 'newline-to-space-v1', queryPrefix: 'Q: ', documentPrefix: 'D: ', normalization: 'none' };
+  const certificate = { profileFingerprint: embeddingFingerprint(profile), artifactDigest: 'a'.repeat(64),
+    metadataDigest: 'b'.repeat(64), serviceVersion: 'fixture-v1', providerId: 'fixture-provider', providerUrl: profile.url,
+    pipelineFingerprint: pipelineFingerprint(profile, 'fixture-v1', 'b'.repeat(64)), state: 'REVOKED', checkedAt: 0,
+    verifiedAt: 1, dimensions: 2, querySample: [1, 0], documentSample: [1, 0] };
+  const generationEvidence = { version: 1, profile, certificate };
+  const oldVector = (await src.t.run(ctx => ctx.db.query('modelMemoryVectors').first()))!;
+  const vector = { ...oldVector, memoryId: memory._id, worldId: memory.worldId, playerId: memory.playerId,
+    agentGlobalId: memory.agentGlobalId, sourceDigest: await memorySourceDigest(memory as never),
+    generationEvidence, generationEvidenceId: await digest(generationEvidence) };
+  bundle.sections.modelMemoryVectors = [encodeRow(vector)];
+  bundle.manifest.sections.modelMemoryVectors = { digest: await digest(bundle.sections.modelMemoryVectors), count: 1,
+    bytes: new TextEncoder().encode(JSON.stringify(bundle.sections.modelMemoryVectors)).length };
+  const sourceIdentity = (await src.t.run(ctx => ctx.db.query('federationIdentity').unique()))!;
+  bundle.signature = await sign(bundle.manifest, sourceIdentity.privateKeyEncrypted);
+  await validateBundle(bundle);
+  return { src, bundle };
+}
+
+type OrdinaryFault = 'upload-ack' | 'confirm-ack' | 'publish-ack' | 'publish-before-commit' | 'cold-upload' | 'late-rollback' | 'reserve-ack' | 'wrong-bytes';
+function ordinaryImportHarness(t: ReturnType<typeof convexTest>, fault?: OrdinaryFault, afterConfirm?: () => Promise<void>) {
+  let armed = !!fault, stores = 0;
+  const storedIds: Id<'_storage'>[] = [];
+  const handler = (importBackup as unknown as { _handler: (ctx: ActionCtx, args: any) => Promise<any> })._handler;
+  return {
+    storedIds, stores: () => stores,
+    nextFault: (next: OrdinaryFault) => { fault = next; armed = true; },
+    invoke: (args: Record<string, any>) => t.action(async ctx => {
+      const proxy = { ...ctx,
+        runMutation: async (ref: any, value: any) => {
+          const name = getFunctionName(ref);
+          if (armed && name.endsWith(':applyImport') && fault === 'publish-before-commit') {
+            armed = false; throw new Error('PUBLICATION_RESPONSE_UNKNOWN');
+          }
+          if (armed && name.endsWith(':applyImport') && fault === 'late-rollback') {
+            armed = false;
+            return t.run(dbCtx => applyBackupData({ ...dbCtx, scheduler: { ...dbCtx.scheduler,
+              runAfter: async () => { throw new Error('LATE_IMPORT_ROLLBACK'); } } }, value));
+          }
+          const result = await ctx.runMutation(ref, value);
+          if (name.endsWith(':confirmOrdinaryUpload') && afterConfirm) { const hook = afterConfirm; afterConfirm = undefined; await hook(); }
+          if (armed && ((name.endsWith(':reserveOrdinaryUpload') && fault === 'reserve-ack') ||
+            (name.endsWith(':confirmOrdinaryUpload') && fault === 'confirm-ack') ||
+            (name.endsWith(':applyImport') && fault === 'publish-ack'))) {
+            armed = false; throw new Error('RESPONSE_ACK_LOST');
+          }
+          return result;
+        },
+        runAction: async (ref: any, value: any) => {
+          if (getFunctionName(ref).endsWith(':recoverPage')) {
+            const last = await t.run(dbCtx => dbCtx.db.system.query('_storage').order('desc').first());
+            const now = jest.spyOn(Date, 'now').mockReturnValue(Math.max(Date.now(), Math.ceil(last?._creationTime ?? 0) + 1));
+            try { return await ctx.runAction(ref, value); } finally { now.mockRestore(); }
+          }
+          return ctx.runAction(ref, value);
+        },
+        storage: { ...ctx.storage,
+          store: async (blob: Blob) => {
+            stores++;
+            if (armed && fault === 'cold-upload' && stores === 2) { armed = false; throw new Error('COLD_UPLOAD_FAILED'); }
+            const actual = armed && fault === 'wrong-bytes' ? new Blob(['wrong bytes'], { type: blob.type }) : blob;
+            if (fault === 'wrong-bytes') armed = false;
+            const id = await ctx.storage.store(actual);
+            // convex-test omits Blob.type; retain its actual-byte hash and size and fill that metadata gap only.
+            await t.run(dbCtx => dbCtx.db.patch(id as never, { contentType: blob.type } as never));
+            storedIds.push(id);
+            if (armed && fault === 'upload-ack') { armed = false; throw new Error('UPLOAD_ACK_LOST'); }
+            return id;
+          },
+        },
+      } as ActionCtx;
+      return handler(proxy, args);
+    }),
+  };
+}
+
+test.each(['upload-ack', 'confirm-ack', 'publish-ack', 'publish-before-commit'] as const)(
+  'ordinary import recovers %s with one exact candidate and one canonical publication', async fault => {
+    const { bundle } = await ordinaryVectorBundle();
+    const target = convexTest(schema, modules), harness = ordinaryImportHarness(target, fault);
+    const args = { adminToken, bundleJson: JSON.stringify(bundle), mode: 'clone', targetEndpoint: 'https://ordinary-copy.example',
+      uploadAttemptKey: `ordinary-${fault}` };
+    await expect(harness.invoke(args)).rejects.toThrow(fault === 'upload-ack' ? 'UPLOAD_ACK_LOST'
+      : fault === 'publish-before-commit' ? 'PUBLICATION_RESPONSE_UNKNOWN' : 'RESPONSE_ACK_LOST');
+    const firstOperation = (await target.run(ctx => ctx.db.query('archiveUploadOperations').unique()))!;
+    expect(firstOperation.producerKind).toBe('ORDINARY_BUNDLE');
+    expect(await target.run(async ctx => !!await ctx.storage.get(harness.storedIds[0]))).toBe(true);
+    if (fault === 'upload-ack') {
+      expect(firstOperation.state).toBe('UPLOADING');
+      expect(await target.run(ctx => ctx.db.query('archiveUploadCandidates').collect())).toHaveLength(0);
+    }
+    const result = await harness.invoke(args);
+    expect(harness.stores()).toBe(1);
+    const published = (await target.run(ctx => ctx.db.query('archiveUploadOperations').unique()))!;
+    const imported = (await target.run(ctx => ctx.db.query('backupImports').unique()))!;
+    expect(published.state).toBe('PUBLISHED');
+    expect(published.publishedStorageId).toBe(harness.storedIds[0]);
+    expect(imported.manifest.vectorArchiveStorageId).toBe(harness.storedIds[0]);
+    expect(imported.manifest.vectorSourceTrusted).toBe(false);
+    expect(result.importId).toBe(imported._id);
+    expect(imported.runtimeSnapshot.archiveUploadResult).toEqual(result);
+    // Existing vector/ordinary privacy readers strip exactly these two local pointer/trust fields.
+    expect(await digest(Object.fromEntries(Object.entries(imported.manifest).filter(([key]) =>
+      !['vectorSourceTrusted', 'vectorArchiveStorageId'].includes(key))))).toBe(await digest(bundle.manifest));
+    const stored = await target.run(async ctx => await (await ctx.storage.get(harness.storedIds[0]))!.text());
+    expect(stored).toBe(JSON.stringify(bundle));
+    expect(await harness.invoke(args)).toEqual(result);
+    expect(harness.stores()).toBe(1);
+    expect(await target.run(ctx => ctx.db.query('backupImports').collect())).toHaveLength(1);
+    expect(await target.run(ctx => ctx.db.query('archiveUploadCandidates').collect())).toHaveLength(1);
+  },
+);
+
+test('ordinary publication rolls back candidate state with all import writes and retries the same verified bytes', async () => {
+  const { bundle } = await ordinaryVectorBundle();
+  const target = convexTest(schema, modules), harness = ordinaryImportHarness(target, 'late-rollback');
+  const args = { adminToken, bundle, mode: 'clone', targetEndpoint: 'https://ordinary-rollback.example', uploadAttemptKey: 'rollback-attempt' };
+  await expect(harness.invoke(args)).rejects.toThrow('LATE_IMPORT_ROLLBACK');
+  expect(await target.run(ctx => ctx.db.query('backupImports').collect())).toHaveLength(0);
+  expect(await target.run(ctx => ctx.db.query('worlds').collect())).toHaveLength(0);
+  expect((await target.run(ctx => ctx.db.query('archiveUploadOperations').unique()))!.state).toBe('UPLOADED');
+  expect((await target.run(ctx => ctx.db.query('archiveUploadCandidates').unique()))!.state).toBe('STORED');
+  await harness.invoke(args);
+  expect(harness.stores()).toBe(1);
+  expect((await target.run(ctx => ctx.db.query('archiveUploadOperations').unique()))!.state).toBe('PUBLISHED');
+});
+
+test('ordinary preparation cleanup deletes only its exact retired candidate when reference absence is proven', async () => {
+  const { bundle } = await ordinaryVectorBundle(true);
+  const target = convexTest(schema, modules), harness = ordinaryImportHarness(target, 'cold-upload');
+  const unrelated = await target.run(ctx => ctx.storage.store(new Blob(['unrelated'], { type: 'application/json' })));
+  await expect(harness.invoke({ adminToken, bundle, mode: 'clone', targetEndpoint: 'https://ordinary-cleanup.example', uploadAttemptKey: 'cleanup-attempt' }))
+    .rejects.toThrow('COLD_UPLOAD_FAILED');
+  const op = (await target.run(ctx => ctx.db.query('archiveUploadOperations').unique()))!;
+  expect(op.state).toBe('RETIRED'); // A candidate deletion never claims a later full recovery window.
+  expect(op.producerTerminalAt).toBeDefined();
+  expect((await target.run(ctx => ctx.db.query('archiveUploadCandidates').unique()))!.state).toBe('DELETED');
+  expect(await target.run(async ctx => !!await ctx.storage.get(harness.storedIds[0]))).toBe(false);
+  expect(await target.run(async ctx => !!await ctx.storage.get(unrelated))).toBe(true);
+});
+
+test('ordinary published replay refuses changed canonical pointers and changed exact bundle bytes', async () => {
+  const { bundle } = await ordinaryVectorBundle();
+  const target = convexTest(schema, modules), harness = ordinaryImportHarness(target);
+  const args = { adminToken, bundle, mode: 'clone', targetEndpoint: 'https://ordinary-fence.example', uploadAttemptKey: 'fenced-attempt' };
+  await harness.invoke(args);
+  const changed = { ...bundle, signature: undefined };
+  await expect(harness.invoke({ ...args, bundle: changed })).rejects.toThrow('OPERATION_CHANGED');
+  const imported = (await target.run(ctx => ctx.db.query('backupImports').unique()))!;
+  await target.run(ctx => ctx.db.patch(imported._id, { manifest: { ...imported.manifest, vectorArchiveStorageId: undefined } }));
+  await expect(harness.invoke(args)).rejects.toThrow('BACKUP_UPLOAD_PUBLICATION_CHANGED');
+  expect(harness.stores()).toBe(1);
+  await target.run(async ctx => {
+    await ctx.db.patch(imported._id, { manifest: imported.manifest });
+    await ctx.storage.delete(harness.storedIds[0]);
+  });
+  await expect(harness.invoke(args)).rejects.toThrow('BACKUP_UPLOAD_PUBLICATION_CHANGED');
+});
+
+test('ordinary lost reservation ACK never starts a second upload under the already committed lease', async () => {
+  const { bundle } = await ordinaryVectorBundle();
+  const target = convexTest(schema, modules), harness = ordinaryImportHarness(target, 'reserve-ack');
+  const args = { adminToken, bundle, mode: 'clone', targetEndpoint: 'https://ordinary-reservation.example', uploadAttemptKey: 'reserve-lost' };
+  await expect(harness.invoke(args)).rejects.toThrow('RESPONSE_ACK_LOST');
+  await expect(harness.invoke(args)).rejects.toThrow('BACKUP_UPLOAD_ACKNOWLEDGEMENT_UNKNOWN');
+  expect(harness.stores()).toBe(0);
+  const op = (await target.run(ctx => ctx.db.query('archiveUploadOperations').unique()))!;
+  expect(op.state).toBe('UPLOADING');
+  expect(op.producerTerminalAt).toBeUndefined();
+  expect(await target.run(ctx => ctx.db.query('backupImports').collect())).toHaveLength(0);
+});
+
+test('ordinary metadata recovery cannot manufacture terminal proof for an unknown original invocation', async () => {
+  const { bundle } = await ordinaryVectorBundle(true);
+  const target = convexTest(schema, modules), harness = ordinaryImportHarness(target, 'upload-ack');
+  const args = { adminToken, bundle, mode: 'clone', targetEndpoint: 'https://ordinary-unknown.example', uploadAttemptKey: 'unknown-upload' };
+  await expect(harness.invoke(args)).rejects.toThrow('UPLOAD_ACK_LOST');
+  harness.nextFault('cold-upload');
+  await expect(harness.invoke(args)).rejects.toThrow('COLD_UPLOAD_FAILED');
+  const op = (await target.run(ctx => ctx.db.query('archiveUploadOperations').unique()))!;
+  const candidate = (await target.run(ctx => ctx.db.query('archiveUploadCandidates').unique()))!;
+  expect(op.state).toBe('UPLOADING');
+  expect(op.uploadAcknowledged).toBe(false);
+  expect(op.producerTerminalAt).toBeUndefined();
+  expect(candidate.discoveredBy).toBe('METADATA_RECOVERY');
+  expect(candidate.state).toBe('STORED');
+  expect(await target.run(async ctx => !!await ctx.storage.get(candidate.storageId))).toBe(true);
+});
+
+test('ordinary exact-byte metadata mismatch cannot be acknowledged, published or deleted', async () => {
+  const { bundle } = await ordinaryVectorBundle();
+  const target = convexTest(schema, modules), harness = ordinaryImportHarness(target, 'wrong-bytes');
+  const args = { adminToken, bundle, mode: 'clone', targetEndpoint: 'https://ordinary-conflict.example', uploadAttemptKey: 'wrong-byte-attempt' };
+  await expect(harness.invoke(args)).rejects.toThrow('ARCHIVE_UPLOAD_METADATA_MISMATCH');
+  await expect(harness.invoke(args)).rejects.toThrow('BACKUP_UPLOAD_NOT_RESUMABLE');
+  const op = (await target.run(ctx => ctx.db.query('archiveUploadOperations').unique()))!;
+  expect(op.recoveryConflict).toBe(true);
+  expect(await target.run(ctx => ctx.db.query('archiveUploadCandidates').collect())).toHaveLength(0);
+  expect(await target.run(ctx => ctx.db.query('backupImports').collect())).toHaveLength(0);
+  expect(await target.run(async ctx => !!await ctx.storage.get(harness.storedIds[0]))).toBe(true);
+  expect(harness.stores()).toBe(1);
+});
+
+test('ordinary cleanup preserves a candidate referenced inside an opaque stored manifest', async () => {
+  const { bundle } = await ordinaryVectorBundle(true);
+  const target = convexTest(schema, modules);
+  let opaqueId: Id<'_storage'>;
+  const harness = ordinaryImportHarness(target, 'cold-upload', async () => {
+    opaqueId = await target.run(async ctx => {
+      const candidate = (await ctx.db.query('archiveUploadCandidates').unique())!;
+      const root = await ctx.storage.store(new Blob([JSON.stringify({ nested: { OLD: [candidate.storageId] } })]));
+      await ctx.db.insert('backupImports', { sourceTownId: 'existing', mode: 'clone', exportedAt: 0,
+        importedAt: 0, mapping: {}, runtimeSnapshot: {}, manifest: { vectorArchiveStorageId: root } });
+      return root;
+    });
+  });
+  await expect(harness.invoke({ adminToken, bundle, mode: 'clone', targetEndpoint: 'https://ordinary-reference.example', uploadAttemptKey: 'opaque-reference' }))
+    .rejects.toThrow('COLD_UPLOAD_FAILED');
+  const op = (await target.run(ctx => ctx.db.query('archiveUploadOperations').unique()))!;
+  const candidate = (await target.run(ctx => ctx.db.query('archiveUploadCandidates').unique()))!;
+  expect(op.state).toBe('RETIRED');
+  expect(candidate.state).toBe('STORED');
+  expect(await target.run(async ctx => !!await ctx.storage.get(candidate.storageId))).toBe(true);
+  expect(await target.run(async ctx => JSON.parse(await (await ctx.storage.get(opaqueId))!.text()).nested.OLD)).toEqual([candidate.storageId]);
+});
+
+test('ordinary lost publication ACK reuses its vector bundle and published cold attachments together', async () => {
+  const { bundle } = await ordinaryVectorBundle(true);
+  const target = convexTest(schema, modules), harness = ordinaryImportHarness(target, 'publish-ack');
+  const args = { adminToken, bundleJson: JSON.stringify(bundle), mode: 'clone', targetEndpoint: 'https://ordinary-cold-replay.example',
+    uploadAttemptKey: 'cold-publication-replay' };
+  await expect(harness.invoke(args)).rejects.toThrow('RESPONSE_ACK_LOST');
+  expect(harness.stores()).toBe(2);
+  const result = await harness.invoke(args);
+  expect(result.coldFilesRestored).toBe(1);
+  expect(harness.stores()).toBe(2);
+  const imported = (await target.run(ctx => ctx.db.query('backupImports').unique()))!;
+  const cold = (await target.run(ctx => ctx.db.query('coldHistoryArchives').unique()))!;
+  expect(imported.manifest.vectorArchiveStorageId).toBe(harness.storedIds[0]);
+  expect(cold.storageId).toBe(harness.storedIds[1]);
+  expect(await target.run(async ctx => !!await ctx.storage.get(cold.storageId!))).toBe(true);
+  expect((await target.run(ctx => ctx.db.query('archiveUploadCandidates').unique()))!.state).toBe('PUBLISHED');
 });
