@@ -419,3 +419,10 @@ ArchivePanel 现接受 RAW 派生文件并独立显示原来源/当前签署者�
 根代理独立冻结后：后端隐私/引用/读侧等九套 222 项通过（162.68 秒），含 40k descriptor 测试；正式大包及 Audit 完整两套 67 项通过（255.636 秒）；选择性正式两条 clone 清理通过（21.983 秒）；UI 文件加载/处理器/加密/语言四套 44 项通过（4.775 秒）。Convex 类型检查和生产构建通过。一次 formal large 测试因 emulator 每次缺 contentType 都走 public retry 完整续证，2000 页 budget 在 MANIFESTS 持续推进时耗尽；只对该 fixture 明确增加至 5000 页后完成，默认预算和 COMPLETE/实际删除断言保留，失败日志增加无正文 checkpoint 诊断。
 
 隔离 K exact 0e61f70+临时入口的真实 SOURCE/OLD 两对象清理已通过，旧 storage.get/_storage 为空，另一访次原生与两份归档完整摘要不变、原签名验证与来源文件保留。非 fixture 表/存储严格保持，明确例外为四个单调 revision 与自然更新 federationClock。初期 URL 尾斜杠请求错误在 seed 前修复；时钟自然变化触发保护后沿原 receipt 继续。合成数据 teardown 首次单事务、随后计划生成都触发实机系统操作上限，事务回滚未宣称清理完成；现在通过分组摘要与分页 exact-ID 清理继续，正式恢复验证仍待完成。临时入口不进入本提交。
+
+
+K 真实分块验收的环境收尾已完成：沿同一已验证 prefix/MAC receipt，不重新 seed，生成不可变签名计划固定 283 个存在的非锚点对象，每页最多 25 个精确 ID，最后删除七个锚点与正常 wrapper 产生的两个精确访次审计。offset CAS、分组摘要、锚点摘要、外部 JSON 引用、所有非测试业务表/存储基线逐页核对；最终回执丢失可由完整 ID 缺失+原基线确认。实际 receipt 为 CLEANED/offset283/done，非测试业务与存储完整。
+
+不得扩大此结论：期间后台 hourly 存储维护实际运行，诊断只有 federationClock、storageCleanupJobs、storageUsageScans、storageUsageSnapshots 四张运行状态表变更；维护任务 COMPLETE 且 deletedRows/compactedActions/compactedEvents 均为零。收尾明示这四张表以及四个单调 revision 的例外，不回退它们、不冒称全库字节不变。最初 teardown 与计划的超限事务都已回滚；随后共享空表摘要/单次 snapshot、每25行单个分组摘要降低系统调用。完整 system scheduler 历史扫描依然遇到实际资源边界，停止了仅核查 runner（offset0未删除），schedulerHistoryAudit 标为 NOT_VERIFIED_RESOURCE_BOUND。收尾以实际终态 privacy job/rewrites、不可变精确计划、每页全部外部业务/存储基线保护；不宣称完整调度历史核验通过。
+
+临时模块已移除并用 pristine exact 0e61f70 重部署 K；独立调用四个临时 query 均确认函数不存在、身份 ACTIVE、合成访次为空。其后正式 7ba2fee 成功部署 J/K（不包含临时模块）。I/J 环境因 Docker OOM 退出导致后续复验 fetch failed，保留卷重启后正在恢复；已停止 F/G/H 历史测试容器释放内存，没有删卷或重置身份。新分页 preflight/RAW恢复本轮已有冻结测试证据，但不是新版本实机大规模删除证据；40k/2GiB实际payload、完整负状态 sidecar、SELECTIVE派生恢复、真实浏览器与全方案残项依然开放。
