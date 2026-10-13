@@ -21,6 +21,7 @@ import { residentPolicyTables } from './federation/residentPolicySchema';
 import { travelPrivacyChunkTables } from './federation/travelPrivacyChunkSchema';
 import { archiveUploadTables } from './federation/archiveUploadProvenanceSchema';
 import { travelPrivacyChunkRewriteTables } from './federation/travelPrivacyChunkRewriteSchema';
+import { travelPrivacyChunkReferenceProofTables } from './federation/travelPrivacyChunkReferenceProofSchema';
 
 export default defineSchema({
   ...messageTranslationTables,
@@ -58,4 +59,5 @@ export default defineSchema({
   ...travelPrivacyChunkTables,
   ...archiveUploadTables,
   ...travelPrivacyChunkRewriteTables,
+  ...travelPrivacyChunkReferenceProofTables,
 });
