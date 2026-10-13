@@ -7,12 +7,12 @@ import { v } from 'convex/values';
 import { makeFunctionReference } from 'convex/server';
 import {
   action,
-  internalMutation,
+  trackedInternalMutation as internalMutation,
   internalQuery,
-  mutation,
+  trackedMutation as mutation,
   query,
   DatabaseReader,
-} from '../_generated/server';
+} from '../maintenanceFunctions';
 import { Doc, Id, TableNames } from '../_generated/dataModel';
 import { requireAdmin, sign } from './security';
 import { assertArchiveCanStart } from './maintenanceLock';

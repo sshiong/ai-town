@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { action, mutation, query, internalMutation, internalQuery } from '../_generated/server';
+import { action, trackedMutation as mutation, query, trackedInternalMutation as internalMutation, internalQuery } from '../maintenanceFunctions';
 import type { ActionCtx, MutationCtx, QueryCtx } from '../_generated/server';
 import type { Doc, Id } from '../_generated/dataModel';
 import { archiveFor, source, type Payload } from './coldHistory';

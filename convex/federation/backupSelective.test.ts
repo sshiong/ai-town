@@ -6,6 +6,7 @@ import { makeFunctionReference, getFunctionName } from 'convex/server';
 import schema from '../schema';
 import { Id } from '../_generated/dataModel';
 import { createIdentityKeys } from './security';
+import { archiveReferenceRevisionKey, dataRevision } from '../models/embeddingDataRevision';
 import { BackupRow, decodeRow, encodeRow, validateBundle } from './backupHelpers';
 import { LargeChunk, descriptor, validateManifest } from './backupLargeHelpers';
 import {
@@ -182,6 +183,30 @@ function records(
     .filter((e): e is Extract<ArchiveEnvelope, { kind: 'record' }> => e.kind === 'record')
     .map((e) => ({ ...decodeRow(e.record), role: e.role }));
 }
+test('registered selective export writers invalidate reference generations under their own maintenance lock', async () => {
+  const f = await fixture(1);
+  const revision = () => f.t.run(ctx => dataRevision(ctx.db, archiveReferenceRevisionKey));
+  const beforeStart = await revision();
+  const { jobId } = await f.t.mutation(m('startExport'), {
+    adminToken, scope: 'agent-one', agentGlobalIds: [f.globals[0]],
+    categories: ['travel'], operator: 'test-admin', reason: 'Reference epoch coverage',
+  });
+  const typedJobId = jobId as Id<'backupLargeJobs'>;
+  expect(await revision()).toBeGreaterThan(beforeStart);
+  let checkedChunkPublication = false;
+  for (let n = 0; n < 100; n++) {
+    const before = await revision();
+    const prior = await f.t.run(ctx => ctx.db.get(typedJobId));
+    await f.t.action(a('advanceExport'), { adminToken, jobId });
+    const next = await f.t.run(ctx => ctx.db.get(typedJobId));
+    expect(await revision()).toBeGreaterThan(before);
+    if (next!.chunkCount > prior!.chunkCount) checkedChunkPublication = true;
+    if (next!.state === 'FAILED') throw new Error(next!.error);
+    if (next!.state === 'COMPLETE') break;
+  }
+  expect(checkedChunkPublication).toBe(true);
+  expect((await f.t.run(ctx => ctx.db.get(typedJobId)))!.state).toBe('COMPLETE');
+});
 test('resident pagination exports all 530 rows, real bindings and personality with no other private memories', async () => {
   const f = await fixture(530);
   const archive = await exportArchive(f);

@@ -389,3 +389,6 @@ SENSITIVE 预检在普通归档检查后继续分块检查，归属、来源签�
 分页引用证明模块已完成独立冻结验证：在全部替换与清单发布后固定 writer revision 和 archiveStorageReferences epoch，按引用来源表逐行、逐 32 个 storage leaf 分页检查；继续解码 OLD 字符串记录，读取实际注册归档与有有效上传所有权标记的候选文件，验证大小和 SHA-256。只对固定来源证据路径以及有完整旧发布/终态证明的替换作历史分类；未知引用、缺失 canonical 文件、上传标记矛盾、晚到引用和版本变化均阻止证明。journal 不持久化正文或向量。
 
 根代理冻结四份技术文件，引用证明、上传 provenance 和清理 coordinator 三套共 39 项全部通过（18.841 秒）；Convex 类型检查与生产构建通过。此模块尚未接入 eraseOriginal，不授权实际删除，也没有解除当前规模保护。单文件扫描仍按页重新读取/解析，最大 10MiB（分块 900KB、普通 5MiB），未证明 40,000 物理分块/2GiB 文件吞吐与内存。下一步接入需要同事务验证 proof，并且只允许经审计的移除引用写入推进 epoch；不得用通用刷新掩盖外部变化。
+
+
+独立审阅发现 coldHistoryChunks 和 backupSelective 的实际注册写入入口绕过 withEmbeddingRevision：前者写冷历史 archive/chunks，后者写选择性导出的 backupLargeJobs/chunks/rows。现改用 trackedMutation/trackedInternalMutation，在保留各自维护锁流程的同时，每次引用来源写入递增 archiveStorageReferences。新增实际 start/capture/importPart/cancel 及选择性 start/advance 发布测试，不只调用版本 helper。根代理仅冻结这四份技术文件，冷分块、引用版本、选择性备份四套 34 项通过（48.537 秒），Convex 类型检查通过。新分页删除接入与嵌套物理归档递归扫描仍在独立开发，本检查点不宣告完整分页引用覆盖。
