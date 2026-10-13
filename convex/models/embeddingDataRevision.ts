@@ -4,6 +4,15 @@ import type { Doc } from '../_generated/dataModel';
 
 export const sourceKey = 'memories';
 export const privacyRevisionKey = 'travelPrivacySources';
+// Independent from memory ownership: every source of an archive storage reference invalidates a paged proof.
+export const archiveReferenceRevisionKey = 'archiveStorageReferences';
+export const archiveReferenceTables = [
+  'backupImports', 'backupLargeJobs', 'backupLargeChunks', 'backupLargeRows', 'backupSelectiveHistory',
+  'coldHistoryArchives', 'coldHistoryChunks', 'coldArchiveMirrorJobs', 'music',
+  'travelPrivacyArchiveObjects', 'travelPrivacyChunkObjects', 'travelPrivacyChunkRows',
+  'travelPrivacyChunkReplacements', 'travelPrivacyChunkManifestRewrites',
+  'archiveUploadOperations', 'archiveUploadCandidates',
+] as const;
 const privacySourceTables = ['coldHistoryArchives', 'coldHistoryChunks', 'homeTravelTranscripts', 'memorySourceCorrections', 'federationTurns', 'federationTranscriptJobs', 'backupImports', 'backupLargeJobs', 'backupLargeChunks', 'backupLargeGlobalMappings', 'backupLargeRows', 'backupSelectiveHistory', 'residentModelBindings'] as const;
 export const vectorKey = (spaceId: string) => `vectors:${spaceId}`;
 export async function dataRevision(db: DatabaseReader, key: string) {
@@ -30,16 +39,22 @@ export function withEmbeddingRevision(ctx: MutationCtx): MutationCtx {
       if (!['insert', 'patch', 'replace', 'delete'].includes(String(property)))
         return typeof value === 'function' ? value.bind(target) : value;
       return async (...args: any[]) => {
+        const archiveTable = property === 'insert' ? args[0] : archiveReferenceTables.find(name => db.normalizeId(name, args[0]));
+        const write = async () => {
+          const result = await value.apply(target, args);
+          if ((archiveReferenceTables as readonly string[]).includes(archiveTable)) await bump(db, archiveReferenceRevisionKey);
+          return result;
+        };
         const privacyTable = property === 'insert' ? args[0] : privacySourceTables.find(name => db.normalizeId(name, args[0]));
         if ((privacySourceTables as readonly string[]).includes(privacyTable)) {
-          const result = await value.apply(target, args);
+          const result = await write();
           await bump(db, privacyRevisionKey);
           return result;
         }
         const table = property === 'insert' ? args[0]
           : db.normalizeId('memories', args[0]) ? 'memories'
           : db.normalizeId('modelMemoryVectors', args[0]) ? 'modelMemoryVectors' : undefined;
-        if (table !== 'memories' && table !== 'modelMemoryVectors') return value.apply(target, args);
+        if (table !== 'memories' && table !== 'modelMemoryVectors') return write();
         const prior = property === 'insert' ? null : await (db.get as any)(args[0]);
         if (property !== 'delete') {
           if (table === 'memories') {
@@ -50,7 +65,7 @@ export function withEmbeddingRevision(ctx: MutationCtx): MutationCtx {
             if (next.data?.type === 'reflection') for (const id of next.data.relatedMemoryIds) await assertMemoryNotRedacted(db, id);
           } else await assertMemoryNotRedacted(db, args[1]?.memoryId ?? prior?.memoryId);
         }
-        const result = await value.apply(target, args);
+        const result = await write();
         if (table === 'memories') {
           if (property === 'patch' && Object.prototype.hasOwnProperty.call(args[1], 'data') &&
               JSON.stringify(args[1].data) !== JSON.stringify(prior?.data)) await bump(db, privacyRevisionKey);
