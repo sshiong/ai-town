@@ -25,6 +25,7 @@ export const travelPrivacyChunkRewriteTables = {
     key: v.optional(v.string()),
     revision: v.number(),
     sourceRevision: v.number(),
+    referenceProofId: v.optional(v.id('travelPrivacyChunkReferenceProofs')),
     phase: v.union(
       v.literal('PREPARING'),
       v.literal('IMPORT_FENCE'),

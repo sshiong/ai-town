@@ -397,3 +397,12 @@ SENSITIVE 预检在普通归档检查后继续分块检查，归属、来源签�
 普通导入界面现为一次已验证导入生成稳定 uploadAttemptKey，并在 RPC 前冻结原请求于组件内存。若提交成功但回执丢失，身份/世界响应式更新导致预检消失，仍可发送相同请求和 key；重试不重复安全导出。文件/模式/端点/源停止授权/恢复操作者或原因改变、撤回确认或显式开始另一次导入，清除旧尝试；语言切换保留。快照不保存 adminToken，不写 browser storage。
 
 当前后端幂等仅覆盖含实际向量行的普通 bundle，因此界面只向这种导入提供同次重试；无向量明确显示检查导入历史与目标数据的提示，不冒称可安全自动恢复。根代理独立冻结 UI 四文件，实际 DataPanel 事件处理器 harness 与 uiPolicy 两套 30 项通过，语言四项另行通过，生产构建通过。此 harness 无 DOM，不等于真实浏览器交互验收；刷新/关闭面板会丢失内存尝试，无向量导入的后端幂等仍未补齐。
+
+
+分页引用证明已接入正式分块 DELETE：writer 持久绑定 proof，每次 action 只驱动一个引用扫描页，最终删除事务先验证精确 epoch/revision/target absence，再重验 alias、producer、上传所有权、ACK、SHA/size/contentType 与替换 descriptor。只有候选 PUBLISHED→DELETED 及经证实的旧上传退休/terminal/candidate 移除可以按精确写入次数携带 proof；新增引用或其它写入不允许通用刷新。正式 public retry 原子清除绑定，重新扫描新 proof，旧 proof 不改变。两候选共用 proof、旧动作重放、晚引用阻止实际删除、旧上传退休 epoch+4、替换 metadata 变化拒绝均有测试。
+
+独立审查补齐明确 archive table 语义的递归物理根：RAW/encodeRow/sections/dataSections/OLD metadata 内指向存储的 backupImports、backupLargeJobs/chunks 和冷历史 archive/chunks，继续按共享 32 项 checkpoint 入队与去重，实际 A→B→T 引用阻止删除；缺失、非法 ID、binary、未知 format 均拒绝。任意聊天文本和 audio ID 仍不冒作 JSON archive。self-edge 测试只证明真实保存 checkpoint 的去重，不冒称生成了不可变字节文件自然循环。
+
+根代理第一次冻结 11 套综合测试得到 222 通过/1 失败，失败来自 ordinary+OLD 正式联调未注册新增 proof 模块；补齐所有同类测试注册后，在更正冻结树 11 套 222 项通过（26.342 秒），唯一未重复项为 40k 描述符测试。该项在前一冻结 writer 全套已通过（writer 套件 161.392 秒），三份 writer 文件逐字节未变，保留该证据而不重复昂贵容量测试。另同更正冻结树正式 large clone、selective explicit/legacy 和普通+OLD 清理四项通过（32.982 秒，其余定向排除），Convex 类型检查及生产构建通过。
+
+当前保留 PREPARING 的 128 行/分块与 8MB 保护，分页最终删除已接通不等于大规模 preflight 完成；40k/2GiB 仍只有描述符预算证据。真实 K 分块删除/清理、派生格式正式恢复、完整浏览器和全方案验收仍未关闭。

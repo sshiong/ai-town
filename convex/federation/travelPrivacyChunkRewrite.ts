@@ -17,7 +17,7 @@ import {
   type LargeChunk,
 } from './backupLargeHelpers';
 import { digest } from './security';
-import { mutationRef, queryRef } from './refs';
+import { actionRef, mutationRef, queryRef } from './refs';
 import {
   describeArchiveUpload,
   reserveArchiveUpload,
@@ -25,12 +25,18 @@ import {
   confirmArchiveUploadCandidate,
   markArchiveUploadPublished,
   archiveHasStrongStorageReference,
+  archiveUploadMetadataMatches,
+  archiveUploadSha256Hex,
   retireArchiveUpload,
   confirmArchiveUploadProducerTerminal,
 } from './archiveUploadProvenance';
 import { privatePayloadSummary } from './travelPrivacyGuard';
 import { sanitizeTravelAuditSummary } from './travelAuditWriter';
-import { dataRevision, privacyRevisionKey } from '../models/embeddingDataRevision';
+import {
+  dataRevision,
+  privacyRevisionKey,
+  archiveReferenceRevisionKey,
+} from '../models/embeddingDataRevision';
 import {
   createLocalChunkManifest,
   validateLocalChunkManifest,
@@ -38,6 +44,8 @@ import {
   type LocalChunkDescriptor,
   validateLocalChunk,
 } from './travelPrivacyLocalChunkManifest';
+
+import { assertPagedReferenceProofAbsent } from './travelPrivacyChunkReferenceProof';
 
 type Session = Doc<'travelPrivacyChunkRewrites'>;
 type Candidate = Doc<'travelPrivacyChunkReplacements'>;
@@ -1111,83 +1119,6 @@ async function supersededUpload(
   return parent?.phase === 'DONE' ? op : null;
 }
 
-/** A bounded, complete snapshot is required. UNKNOWN coverage never authorizes deletion. */
-async function deletionSnapshot(ctx: DB, session: Session, candidate: Candidate) {
-  const tables = [
-    'backupImports',
-    'backupLargeJobs',
-    'backupLargeRows',
-    'backupSelectiveHistory',
-    'coldHistoryArchives',
-    'coldHistoryChunks',
-    'coldArchiveMirrorJobs',
-    'music',
-    'travelPrivacyArchiveObjects',
-    'travelPrivacyChunkObjects',
-    'travelPrivacyChunkRows',
-    'travelPrivacyChunkReplacements',
-    'travelPrivacyChunkManifestRewrites',
-    'archiveUploadOperations',
-    'archiveUploadCandidates',
-  ] as const;
-  const evidence: unknown[] = [];
-  let bytes = 0;
-  for (const table of tables) {
-    const rows = await ctx.db.query(table).take(129);
-    if (rows.length > 128) fail('REFERENCE_COVERAGE_UNKNOWN');
-    evidence.push({ table, rows });
-    for (const original of rows) {
-      bytes += new TextEncoder().encode(JSON.stringify(original)).length;
-      if (bytes > 512 * 1024) fail('REFERENCE_COVERAGE_UNKNOWN');
-      let row: unknown = original;
-      // These two owned journal pointers deliberately retain the historical erasure evidence.
-      if (
-        table === 'travelPrivacyChunkObjects' &&
-        (original as Doc<'travelPrivacyChunkObjects'>).scanId === session.scanId
-      )
-        row = { ...original, originalStorageId: undefined };
-      if (
-        table === 'travelPrivacyChunkReplacements' &&
-        (original as Candidate).rewriteId === session._id
-      )
-        row = { ...original, originalStorageId: undefined };
-      if (table === 'travelPrivacyChunkReplacements') {
-        const previous = original as Candidate;
-        if (
-          previous.replacementStorageId === candidate.originalStorageId &&
-          previous.state === 'DELETED' &&
-          (await ctx.db.get(previous.rewriteId))?.phase === 'DONE'
-        )
-          row = { ...previous, replacementStorageId: undefined };
-      }
-      if (table === 'archiveUploadOperations') {
-        const op = original as Doc<'archiveUploadOperations'>;
-        if (await supersededUpload(ctx, candidate.originalStorageId, op._id))
-          row = { ...op, publishedStorageId: undefined };
-      }
-      if (table === 'archiveUploadCandidates') {
-        const upload = original as Doc<'archiveUploadCandidates'>;
-        if (
-          upload.storageId === candidate.originalStorageId &&
-          (await supersededUpload(ctx, candidate.originalStorageId, upload.operationId))
-        )
-          row = { ...upload, storageId: undefined };
-      }
-      if (archiveHasStrongStorageReference(row, candidate.originalStorageId))
-        fail('STRONG_REFERENCE');
-    }
-  }
-  const chunks = await ctx.db.query('backupLargeChunks').take(129);
-  if (
-    chunks.length > 128 ||
-    chunks.some((chunk) => chunk.storageId === candidate.originalStorageId)
-  )
-    fail('STRONG_REFERENCE_OR_COVERAGE_UNKNOWN');
-  evidence.push({ table: 'backupLargeChunks', rows: chunks });
-  const archiveObjects = await physicalArchiveReferences(ctx);
-  evidence.push({ table: '_storage.archiveReferences', rows: archiveObjects });
-  return { digest: await digest(evidence), chunks, archiveObjects };
-}
 export const preflightData = internalQuery({
   args: checkpoint,
   handler: async (ctx, a) => {
@@ -1207,6 +1138,26 @@ export const preflightData = internalQuery({
     };
   },
 });
+export const bindReferenceProof = internalMutation({
+  args: { ...checkpoint, proofId: v.id('travelPrivacyChunkReferenceProofs') },
+  handler: async (ctx, a) => {
+    const current = await checked(ctx, a);
+    if (!current || current.session.phase !== 'DELETE') return false;
+    const proof = await ctx.db.get(a.proofId);
+    if (
+      !proof ||
+      proof.rewriteId !== a.rewriteId ||
+      proof.rewriteRevision !== a.revision ||
+      proof.referenceRevision !== (await dataRevision(ctx.db, archiveReferenceRevisionKey))
+    )
+      fail('REFERENCE_CHECKPOINT_CHANGED');
+    // Binding does not advance the writer checkpoint pinned by start().
+    if (current.session.referenceProofId && current.session.referenceProofId !== a.proofId)
+      fail('REFERENCE_CHECKPOINT_CHANGED');
+    await ctx.db.patch(a.rewriteId, { referenceProofId: a.proofId });
+    return true;
+  },
+});
 export const deletionData = internalQuery({
   args: checkpoint,
   handler: async (ctx, a) => {
@@ -1216,19 +1167,26 @@ export const deletionData = internalQuery({
       .query('travelPrivacyChunkReplacements')
       .withIndex('rewrite_state', (q) => q.eq('rewriteId', a.rewriteId).eq('state', 'PUBLISHED'))
       .first();
-    return candidate
-      ? { candidate, snapshot: await deletionSnapshot(ctx, current.session, candidate) }
-      : null;
+    return candidate ? { candidate } : null;
   },
 });
 export const eraseOriginal = internalMutation({
-  args: { ...objectArgs, referenceDigest: v.string() },
+  args: { ...objectArgs, proofId: v.id('travelPrivacyChunkReferenceProofs') },
   handler: async (ctx, a) => {
     const current = await checked(ctx, a);
     if (!current || current.session.phase !== 'DELETE') return false;
     const candidate = await candidateChecked(ctx, current.session, a.candidateId);
     if (candidate.state !== 'PUBLISHED' || candidate.aliases.some((x) => !x.published))
       fail('NOT_PUBLISHED');
+    if (current.session.referenceProofId !== a.proofId) fail('REFERENCE_CHECKPOINT_CHANGED');
+    // Validate the pinned epoch before the first reference-source write in this transaction.
+    const proof = await assertPagedReferenceProofAbsent(
+      ctx,
+      a.proofId,
+      a.rewriteId,
+      candidate.originalStorageId,
+    );
+    let referenceWrites = 1; // This candidate's PUBLISHED -> DELETED transition.
     for (const alias of candidate.aliases) {
       const chunk = await ctx.db.get(alias.chunkId);
       if (
@@ -1247,15 +1205,20 @@ export const eraseOriginal = internalMutation({
       if (!producer || producer.state !== 'PUBLISHED') fail('MANIFEST_NOT_PUBLISHED');
       await producerChecked(ctx, producer);
     }
-    if ((await deletionSnapshot(ctx, current.session, candidate)).digest !== a.referenceDigest)
-      fail('REFERENCE_CHECKPOINT_CHANGED');
     const replacement = await ctx.db.system.get(candidate.replacementStorageId!);
     const operation = await ctx.db.get(candidate.operationId!);
     if (
       !replacement ||
       !operation ||
       operation.state !== 'PUBLISHED' ||
-      operation.publishedStorageId !== candidate.replacementStorageId
+      operation.publishedStorageId !== candidate.replacementStorageId ||
+      operation.producerKind !== 'CHUNK_PRIVACY_REPLACEMENT' ||
+      operation.ownerKey !==
+        (await archiveUploadSha256Hex(new TextEncoder().encode(a.rewriteId))) ||
+      operation.operationKey !==
+        (await archiveUploadSha256Hex(new TextEncoder().encode(candidate._id))) ||
+      !operation.uploadAcknowledged ||
+      !archiveUploadMetadataMatches(operation, replacement)
     )
       fail('REPLACEMENT_MISSING');
     const formerUploads = await ctx.db
@@ -1264,7 +1227,19 @@ export const eraseOriginal = internalMutation({
       .take(129);
     if (formerUploads.length > 128) fail('REFERENCE_COVERAGE_UNKNOWN');
     for (const upload of formerUploads) {
+      if (upload.state === 'DELETED') continue;
+      if (upload.state !== 'PUBLISHED') fail('UPLOAD_REFERENCE_CHANGED');
       const op = await supersededUpload(ctx, candidate.originalStorageId, upload.operationId);
+      const retirement = await ctx.db
+        .query('travelPrivacyChunkReferenceRetirements')
+        .withIndex('operation', (q) =>
+          q
+            .eq('proofId', proof._id)
+            .eq('operationId', upload.operationId)
+            .eq('storageId', candidate.originalStorageId),
+        )
+        .first();
+      if (!retirement) fail('UPLOAD_REFERENCE_CHANGED');
       if (!op) fail('UPLOAD_REFERENCE_CHANGED');
       const retired =
         op.state === 'RETIRED'
@@ -1274,6 +1249,8 @@ export const eraseOriginal = internalMutation({
               revision: op.revision,
               reasonCode: 'PRIVACY_SUPERSEDED',
             });
+      referenceWrites +=
+        (op.state === 'PUBLISHED' ? 1 : 0) + (op.producerTerminalAt === undefined ? 1 : 0) + 1;
       await confirmArchiveUploadProducerTerminal(ctx, retired, async (_ctx, terminal) => {
         // A successful ACK plus a published single-start lease proves its only store invocation returned.
         if (
@@ -1289,6 +1266,14 @@ export const eraseOriginal = internalMutation({
     if (await ctx.db.system.get(candidate.originalStorageId)) fail('DELETE_NOT_CONFIRMED');
     await ctx.db.patch(candidate._id, { state: 'DELETED', deletedAt: Date.now() });
     await advance(ctx, current.session, { deleted: current.session.deleted + 1 });
+    const referenceRevision = await dataRevision(ctx.db, archiveReferenceRevisionKey);
+    if (referenceRevision !== proof.referenceRevision + referenceWrites)
+      fail('REFERENCE_WRITE_SET_CHANGED');
+    // Only the audited monotone transitions above can carry this proof to the next deletion.
+    await ctx.db.patch(proof._id, {
+      referenceRevision,
+      rewriteRevision: current.session.revision + 1,
+    });
     return true;
   },
 });
@@ -1580,31 +1565,38 @@ export const page = internalAction({
           await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/finishPage'), a);
           return;
         }
-        let bytes = 0;
-        // Immutable physical chunks plus a CAS of their complete DB snapshot cover nested OLD references.
-        for (const reference of deletion.snapshot.chunks) {
-          bytes += reference.bytes;
-          if (bytes > 8 * 1024 * 1024) fail('REFERENCE_COVERAGE_UNKNOWN');
-          const chunk = await readChunk(ctx, reference.storageId, expectedDescriptor(reference));
-          if (
-            archiveHasStrongStorageReference(
-              chunk.rows.map((encoded) => {
-                const row = decodeRow(encoded);
-                return row.kind === 'record' ? { ...row, record: decodeRow(row.record) } : row;
-              }),
-              deletion.candidate.originalStorageId,
-            )
-          )
-            fail('NESTED_STORAGE_REFERENCE');
+        let proofId = session.referenceProofId;
+        if (!proofId) {
+          proofId = await ctx.runMutation(mutationRef('travelPrivacyChunkReferenceProof/start'), a);
+          await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/bindReferenceProof'), {
+            ...a,
+            proofId,
+          });
+          return;
         }
-        for (const metadata of deletion.snapshot.archiveObjects) {
-          bytes += metadata.size;
-          if (bytes > 8 * 1024 * 1024) fail('REFERENCE_COVERAGE_UNKNOWN');
-          const blob = await ctx.storage.get(metadata._id);
-          if (!blob || blob.size !== metadata.size) fail('REFERENCED_ARCHIVE_MISSING');
-          const raw = decodedArchiveReferences(JSON.parse(await blob.text()));
-          if (archiveHasStrongStorageReference(raw, deletion.candidate.originalStorageId))
-            fail('NESTED_STORAGE_REFERENCE');
+        const proof = await ctx.runQuery(queryRef('travelPrivacyChunkReferenceProof/status'), {
+          proofId,
+        });
+        if (proof.phase === 'TARGETS' || proof.phase === 'ROWS') {
+          await ctx.runMutation(
+            mutationRef(
+              'travelPrivacyChunkReferenceProof/' +
+                (proof.phase === 'TARGETS' ? 'targetPage' : 'rowPage'),
+            ),
+            { proofId },
+          );
+          return;
+        }
+        if (proof.phase === 'BLOBS') {
+          if (
+            !(await ctx.runAction(actionRef('travelPrivacyChunkReferenceProof/blobPage'), {
+              proofId,
+            }))
+          )
+            await ctx.runMutation(mutationRef('travelPrivacyChunkReferenceProof/finish'), {
+              proofId,
+            });
+          return;
         }
         const replacement = await readChunk(
           ctx,
@@ -1615,16 +1607,18 @@ export const page = internalAction({
         await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/eraseOriginal'), {
           ...a,
           candidateId: deletion.candidate._id,
-          referenceDigest: deletion.snapshot.digest,
+          proofId,
         });
       }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : '';
       const code = /^CHUNK_REWRITE_[A-Z_]+$/.test(message)
         ? message.slice('CHUNK_REWRITE_'.length)
-        : /^LOCAL_ARCHIVE_[A-Z_]+$/.test(message)
+        : /^(REFERENCE_[A-Z_]+|STRONG_REFERENCE)$/.test(message)
           ? message
-          : 'VALIDATION_FAILED';
+          : /^LOCAL_ARCHIVE_[A-Z_]+$/.test(message)
+            ? message
+            : 'VALIDATION_FAILED';
       await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/recordError'), {
         ...a,
         revision,

@@ -37,6 +37,7 @@ export const referenceSourceTables = [
 type DB = QueryCtx | MutationCtx;
 type Proof = Doc<'travelPrivacyChunkReferenceProofs'>;
 type Leaf = { storageId: Id<'_storage'>; path: string };
+type PhysicalLeaf = Leaf & { maxBytes: number };
 function requireProof(ok: unknown, code: string): asserts ok { if (!ok) throw new Error(code); }
 /** Decodes string-transport records recursively. Unknown field names remain conservative references. */
 export function storageLeaves(value: unknown, normalize: (id: string) => Id<'_storage'> | null, path = '', result: Leaf[] = [], depth = 0): Leaf[] {
@@ -56,6 +57,56 @@ export function storageLeaves(value: unknown, normalize: (id: string) => Id<'_st
     for (const child of value) storageLeaves(child, normalize, `${path}[]`, result, depth + 1);
   } else if (value && typeof value === 'object') {
     for (const [key, child] of Object.entries(value)) storageLeaves(child, normalize, path ? `${path}.${key}` : key, result, depth + 1);
+  }
+  return result;
+}
+/** Only records with explicit archive table semantics declare physical roots.
+ * Literal IDs in messages, audio references and arbitrary metadata remain edges only.
+ * String-transport records and legacy object records have identical ownership semantics.
+ */
+export function nestedArchiveRoots(value: unknown, table?: string, path = '', result: PhysicalLeaf[] = [], depth = 0): PhysicalLeaf[] {
+  requireProof(depth <= 100, 'REFERENCE_NESTING_UNKNOWN');
+  if (table && !['backupImports', 'backupLargeJobs', 'backupLargeChunks', 'coldHistoryArchives', 'coldHistoryChunks'].includes(table)) table = undefined;
+  if (typeof value === 'string' && /^\s*[\[{]/.test(value)) {
+    let decoded: unknown;
+    try { decoded = JSON.parse(value); } catch { requireProof(!table, 'REFERENCE_FORMAT_UNKNOWN'); return result; }
+    return nestedArchiveRoots(decoded, table, path, result, depth + 1);
+  }
+  if (Array.isArray(value)) {
+    for (const child of value) nestedArchiveRoots(child, table, `${path}[]`, result, depth + 1);
+    return result;
+  }
+  if (!value || typeof value !== 'object') {
+    requireProof(!table, 'REFERENCE_FORMAT_UNKNOWN'); return result;
+  }
+  const row = value as Record<string, unknown>;
+  if (table) {
+    const fields = table === 'backupImports' ? ['localArchiveStorageId', 'manifest.vectorArchiveStorageId'] :
+      table === 'backupLargeJobs' ? ['manifestStorageId'] :
+      ['backupLargeChunks', 'coldHistoryArchives', 'coldHistoryChunks'].includes(table) ? ['storageId'] : [];
+    for (const field of fields) {
+      const id = field.split('.').reduce<unknown>((parent, key) => parent && typeof parent === 'object' ? (parent as Record<string, unknown>)[key] : undefined, row);
+      if (id === undefined) {
+        requireProof(!['backupLargeChunks', 'coldHistoryChunks'].includes(table), 'REFERENCE_POINTER_UNKNOWN'); continue;
+      }
+      requireProof(typeof id === 'string' && id.length > 0 && id.length <= 256, 'REFERENCE_POINTER_UNKNOWN');
+      const maxBytes = ['backupLargeChunks', 'coldHistoryChunks'].includes(table) ? 900_000 : table === 'backupImports' ? 5 * 1024 * 1024 : MAX_OBJECT_BYTES;
+      result.push({ storageId: id as Id<'_storage'>, path: path ? `${path}.${field}` : field, maxBytes });
+    }
+  }
+  const recordTable = typeof row.table === 'string' ? row.table : undefined;
+  for (const [key, child] of Object.entries(row)) {
+    const childPath = path ? `${path}.${key}` : key;
+    if ((key === 'sections' || key === 'dataSections') && child && typeof child === 'object' && !Array.isArray(child)) {
+      for (const [section, records] of Object.entries(child)) {
+        if (Array.isArray(records)) nestedArchiveRoots(records, section, `${childPath}.${section}`, result, depth + 1);
+        else nestedArchiveRoots(records, undefined, `${childPath}.${section}`, result, depth + 1);
+      }
+    } else {
+      const envelopeMetadata = key === 'metadata' && child && typeof child === 'object' && 'envelope' in child;
+      const childTable = !envelopeMetadata && recordTable && (key === 'rows' || key === 'record' || key === 'payload' || key === 'metadata') ? recordTable : undefined;
+      nestedArchiveRoots(child, childTable, childPath, result, depth + 1);
+    }
   }
   return result;
 }
@@ -151,6 +202,7 @@ export const rowPage = internalMutation({ args, handler: async (ctx, a) => {
   let objects = p.objects;
   if (row) {
     const leaves = storageLeaves(row, id => ctx.db.system.normalizeId('_storage', id));
+    const roots = nestedArchiveRoots(row);
     if (table === 'archiveUploadCandidates' && p.leafOffset === 0 && row.state !== 'DELETED') {
       const leaf = { storageId: row.storageId, path: 'storageId' };
       if (!await historical(ctx, p, table, row, leaf)) {
@@ -176,8 +228,17 @@ export const rowPage = internalMutation({ args, handler: async (ctx, a) => {
         }
       }
     }
-    if (p.leafOffset + batch.length < leaves.length) {
-      await ctx.db.patch(p._id, { leafOffset: p.leafOffset + batch.length, objects }); return 'ROWS';
+    // Roots discovered inside OLD metadata/encoded journal records share the leaf
+    // checkpoint, so a row with many nested roots never enqueues them all at once.
+    const rootOffset = Math.max(0, p.leafOffset - leaves.length);
+    const rootBatch = roots.slice(rootOffset, rootOffset + LEAF_PAGE - batch.length);
+    for (const root of rootBatch) {
+      const id = ctx.db.system.normalizeId('_storage', root.storageId);
+      requireProof(id, 'REFERENCE_POINTER_UNKNOWN');
+      objects += await enqueue(ctx, p, id, root.maxBytes);
+    }
+    if (p.leafOffset + batch.length + rootBatch.length < leaves.length + roots.length) {
+      await ctx.db.patch(p._id, { leafOffset: p.leafOffset + batch.length + rootBatch.length, objects }); return 'ROWS';
     }
   }
   const nextTable = page.isDone ? p.tableIndex + 1 : p.tableIndex;
@@ -204,23 +265,38 @@ export const blobPage = internalAction({ args, handler: async (ctx, a): Promise<
   requireProof(toBase64(hashBytes) === object.sha256 || hex === object.sha256.toLowerCase(), 'REFERENCE_OBJECT_CHANGED');
   let raw: unknown;
   try { raw = JSON.parse(new TextDecoder().decode(bytes)); } catch { throw new Error('REFERENCE_FORMAT_UNKNOWN'); }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const declared = (raw as { format?: unknown; manifest?: { format?: unknown } }).format ??
+      (raw as { manifest?: { format?: unknown } }).manifest?.format;
+    requireProof(declared === undefined || ['ai-town-backup', 'ai-town-chunks', 'ai-town-selective-archive',
+      'ai-town-local-sanitized-backup', 'ai-town-local-sanitized-chunks', 'ai-town-cold-history',
+      'ai-town-cold-history-chunk', 'ai-town-cold-history-part', 'ai-town-cold-history-manifest',
+      'ai-town-cold-history-file'].includes(declared as string), 'REFERENCE_FORMAT_UNKNOWN');
+  }
   // normalizeId is a DB operation; return candidate strings only after server-side normalization.
-  const leaves = storageLeaves(raw, id => id.length <= 256 && /^[A-Za-z0-9_;:-]+$/.test(id) ? id as Id<'_storage'> : null);
+  const leaves: (Leaf & { maxBytes?: number })[] = [
+    ...storageLeaves(raw, id => id.length <= 256 && /^[A-Za-z0-9_;:-]+$/.test(id) ? id as Id<'_storage'> : null),
+    ...nestedArchiveRoots(raw),
+  ];
   // The normalizer above accepts strings, so use a query to normalize and classify only this bounded slice.
-  const normalized: { storageId: Id<'_storage'>; historical: boolean }[] = await ctx.runQuery(queryRef('travelPrivacyChunkReferenceProof/normalizeBlobLeaves'), {
-    ...a, values: leaves.slice(object.leafOffset, object.leafOffset + LEAF_PAGE).map(leaf => ({ storageId: leaf.storageId, historical: archiveStorageReferenceKind(leaf.path) === 'HISTORICAL_EVIDENCE' })),
+  const normalized: { storageId: Id<'_storage'>; historical: boolean; maxBytes?: number }[] = await ctx.runQuery(queryRef('travelPrivacyChunkReferenceProof/normalizeBlobLeaves'), {
+    ...a, values: leaves.slice(object.leafOffset, object.leafOffset + LEAF_PAGE).map(leaf => ({ storageId: leaf.storageId, historical: archiveStorageReferenceKind(leaf.path) === 'HISTORICAL_EVIDENCE', ...(leaf.maxBytes === undefined ? {} : { maxBytes: leaf.maxBytes }) })),
   });
   // Offset counts all syntactically possible IDs, including normalized nonmatches; no target is skipped.
   await ctx.runMutation(mutationRef('travelPrivacyChunkReferenceProof/saveBlobStrings'), { ...a, objectId: object._id,
     offset: object.leafOffset, total: leaves.length, scanned: Math.min(LEAF_PAGE, leaves.length - object.leafOffset), sha256: object.sha256, leaves: normalized });
   return true;
 } });
-export const normalizeBlobLeaves = internalQuery({ args: { ...args, values: v.array(v.object({ storageId: v.string(), historical: v.boolean() })) }, handler: async (ctx, a) => {
+export const normalizeBlobLeaves = internalQuery({ args: { ...args, values: v.array(v.object({ storageId: v.string(), historical: v.boolean(), maxBytes: v.optional(v.number()) })) }, handler: async (ctx, a) => {
   await checked(ctx, a.proofId); requireProof(a.values.length <= LEAF_PAGE, 'REFERENCE_PAGE_BUDGET');
-  return a.values.flatMap(value => { const id = ctx.db.system.normalizeId('_storage', value.storageId); return id ? [{ storageId: id, historical: value.historical }] : []; });
+  return a.values.flatMap(value => {
+    const id = ctx.db.system.normalizeId('_storage', value.storageId);
+    requireProof(value.maxBytes === undefined || id, 'REFERENCE_POINTER_UNKNOWN');
+    return id ? [{ storageId: id, historical: value.historical, ...(value.maxBytes === undefined ? {} : { maxBytes: value.maxBytes }) }] : [];
+  });
 } });
 export const saveBlobStrings = internalMutation({ args: { ...args, objectId: v.id('travelPrivacyChunkReferenceObjects'), offset: v.number(), total: v.number(), scanned: v.number(), sha256: v.string(),
-  leaves: v.array(v.object({ storageId: v.id('_storage'), historical: v.boolean() })) }, handler: async (ctx, a) => {
+  leaves: v.array(v.object({ storageId: v.id('_storage'), historical: v.boolean(), maxBytes: v.optional(v.number()) })) }, handler: async (ctx, a) => {
   const p = await checked(ctx, a.proofId), object = await ctx.db.get(a.objectId);
   requireProof(p.phase === 'BLOBS' && object?.proofId === p._id, 'REFERENCE_PHASE');
   if (object.state === 'VERIFIED' || object.leafOffset > a.offset) return false;
@@ -229,12 +305,17 @@ export const saveBlobStrings = internalMutation({ args: { ...args, objectId: v.i
     (a.scanned === LEAF_PAGE || a.offset + a.scanned === a.total), 'REFERENCE_PAGE_CHANGED');
   const meta = await ctx.db.system.get(object.storageId);
   requireProof(meta && meta.sha256 === object.sha256 && meta.size === object.size && a.sha256 === meta.sha256, 'REFERENCE_OBJECT_CHANGED');
+  let objects = p.objects;
   for (const leaf of a.leaves) {
     await edge(ctx, p, { storageId: leaf.storageId, path: '' }, '_storage', object.storageId, leaf.historical ? 'HISTORICAL' : 'STRONG');
+    if (leaf.maxBytes !== undefined) {
+      requireProof([900_000, 5 * 1024 * 1024, MAX_OBJECT_BYTES].includes(leaf.maxBytes), 'REFERENCE_PAGE_CHANGED');
+      objects += await enqueue(ctx, p, leaf.storageId, leaf.maxBytes);
+    }
   }
   const done = a.offset + a.scanned === a.total;
   await ctx.db.patch(object._id, { leafOffset: a.offset + a.scanned, state: done ? 'VERIFIED' : 'PENDING' });
-  await ctx.db.patch(p._id, { bytes: p.bytes + (done ? object.size : 0) });
+  await ctx.db.patch(p._id, { objects, bytes: p.bytes + (done ? object.size : 0) });
   return true;
 } });
 export const finish = internalMutation({ args, handler: async (ctx, a) => {

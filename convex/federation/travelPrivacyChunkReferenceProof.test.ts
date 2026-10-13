@@ -7,7 +7,7 @@ import { encodeRow, type BackupRow } from './backupHelpers';
 import { descriptor } from './backupLargeHelpers';
 import { digest } from './security';
 import { archiveUploadSha256Hex, reserveArchiveUpload, describeArchiveUpload } from './archiveUploadProvenance';
-import { assertPagedReferenceProofAbsent, storageLeaves } from './travelPrivacyChunkReferenceProof';
+import { assertPagedReferenceProofAbsent, storageLeaves, nestedArchiveRoots } from './travelPrivacyChunkReferenceProof';
 import { archiveReferenceRevisionKey, dataRevision, withEmbeddingRevision } from '../models/embeddingDataRevision';
 const modules = { '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/travelPrivacyChunkReferenceProof.ts': () => import('./travelPrivacyChunkReferenceProof'),
@@ -383,4 +383,62 @@ test('registered pending candidate with unknown physical ownership fails closed'
   const f = await fixture(); const storage = await pendingUpload(f, '{"safe":true}');
   await f.t.run(ctx => (ctx.db.patch as any)(storage, { contentType: 'application/json' }));
   await expect(rows(f)).rejects.toThrow('REFERENCE_UPLOAD_UNKNOWN');
+});
+test.each(['raw', 'encoded', 'sections', 'dataSections'])('scans legacy nested physical archive roots through %s records', async encoding => {
+  const f = await fixture();
+  const nested = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify({ retainedAlias: f.storageId })])));
+  const row = { storageId: nested };
+  const body = encoding === 'raw' ? { table: 'coldHistoryArchives', rows: [row] } :
+    encoding === 'encoded' ? { table: 'coldHistoryArchives', rows: [encodeRow(row)] } :
+    encoding === 'sections' ? { sections: { coldHistoryChunks: [encodeRow(row)] } } :
+    { dataSections: { backupImports: [encodeRow({ localArchiveStorageId: nested })] } };
+  const root = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify(body)])));
+  await f.t.run(ctx => ctx.db.patch(f.backupId, { manifestStorageId: root }));
+  await finish(f);
+  await expect(absent(f)).rejects.toThrow('STRONG_REFERENCE');
+  expect((await f.t.run(ctx => ctx.db.query('travelPrivacyChunkReferenceObjects').collect())).find(o => o.storageId === nested)?.state).toBe('VERIFIED');
+});
+test('nested safe archive chains deduplicate repeated physical roots and page beyond 32 roots', async () => {
+  const f = await fixture();
+  const nested = await f.t.action(ctx => ctx.storage.store(new Blob(['{"safe":true}'])));
+  const root = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify({ sections: {
+    coldHistoryChunks: Array.from({ length: 70 }, () => encodeRow({ storageId: nested })),
+  } })])));
+  await f.t.run(ctx => ctx.db.patch(f.backupId, { manifestStorageId: root }));
+  await finish(f); await expect(absent(f)).resolves.toMatchObject({ phase: 'READY' });
+  const objects = await f.t.run(ctx => ctx.db.query('travelPrivacyChunkReferenceObjects').collect());
+  expect(objects.filter(o => o.storageId === nested)).toHaveLength(1);
+  expect(objects.find(o => o.storageId === root)!.leafOffset).toBeGreaterThan(128);
+});
+test.each(['missing', 'binary', 'unknown-format', 'invalid-owner'])('nested declared archive root %s fails closed', async failure => {
+  const f = await fixture();
+  const nested = await f.t.action(ctx => ctx.storage.store(new Blob([failure === 'binary' ? 'binary-data' :
+    failure === 'unknown-format' ? '{"format":"unsupported-archive"}' : '{"safe":true}'])));
+  if (failure === 'missing') await f.t.run(ctx => ctx.storage.delete(nested));
+  const root = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify({ table: 'coldHistoryChunks',
+    rows: [encodeRow({ storageId: failure === 'invalid-owner' ? 'not-a-storage-id' : nested })],
+  })])));
+  await f.t.run(ctx => ctx.db.patch(f.backupId, { manifestStorageId: root }));
+  await expect(finish(f)).rejects.toThrow(failure === 'missing' ? 'REFERENCE_OBJECT_UNKNOWN' :
+    failure === 'invalid-owner' ? 'REFERENCE_POINTER_UNKNOWN' : 'REFERENCE_FORMAT_UNKNOWN');
+  await expect(absent(f)).rejects.toThrow('REFERENCE_TARGET_NOT_PROVEN');
+});
+test('OLD row metadata follows explicit archive table ownership without dereferencing arbitrary literals', async () => {
+  const f = await fixture();
+  const nested = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify({ alias: f.storageId })])));
+  await f.t.run(ctx => ctx.db.insert('backupLargeRows', { jobId: f.backupId, role: 'OLD', table: 'coldHistoryChunks',
+    sourceId: 'old-cold', chunkIndex: 2, rowIndex: 0, state: 'SNAPSHOT', references: [], metadata: { storageId: nested } }));
+  await finish(f); await expect(absent(f)).rejects.toThrow('STRONG_REFERENCE');
+  expect(nestedArchiveRoots({ table: 'messages', rows: [{ text: nested }] })).toEqual([]);
+});
+test('a cyclic physical root observation reuses its checkpoint and finishes without re-enqueueing', async () => {
+  const f = await fixture(); await rows(f);
+  const object = await f.t.query(queryRef('travelPrivacyChunkReferenceProof/blobData'), { proofId: f.proofId });
+  await f.t.mutation(mutationRef('travelPrivacyChunkReferenceProof/saveBlobStrings'), {
+    proofId: f.proofId, objectId: object._id, offset: 0, total: 1, scanned: 1, sha256: object.sha256,
+    leaves: [{ storageId: object.storageId, historical: false, maxBytes: 900_000 }],
+  });
+  await expect(f.t.query(queryRef('travelPrivacyChunkReferenceProof/blobData'), { proofId: f.proofId })).resolves.toBeNull();
+  await f.t.mutation(mutationRef('travelPrivacyChunkReferenceProof/finish'), { proofId: f.proofId });
+  expect(await f.t.run(ctx => ctx.db.query('travelPrivacyChunkReferenceObjects').collect())).toHaveLength(1);
 });

@@ -2,18 +2,26 @@ import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import schema from '../schema';
+import type { Doc } from '../_generated/dataModel';
 import { actionRef, mutationRef, queryRef } from './refs';
 import { encodeRow, decodeRow, type BackupRow } from './backupHelpers';
 import { descriptor, largeTables, type LargeManifest } from './backupLargeHelpers';
 import { digest, toBase64, verifySignature } from './security';
 import { rewriteChunkRows, loadManifestDescriptors } from './travelPrivacyChunkRewrite';
 import { canonicalJson } from './protocol';
-import { dataRevision, privacyRevisionKey } from '../models/embeddingDataRevision';
+import {
+  dataRevision,
+  privacyRevisionKey,
+  archiveReferenceRevisionKey,
+  withEmbeddingRevision,
+} from '../models/embeddingDataRevision';
 import { describeArchiveUpload } from './archiveUploadProvenance';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/travelPrivacyChunkRewrite.ts': () => import('./travelPrivacyChunkRewrite'),
+  '../federation/travelPrivacyChunkReferenceProof.ts': () =>
+    import('./travelPrivacyChunkReferenceProof'),
   '../federation/archiveUploadProvenance.ts': () => import('./archiveUploadProvenance'),
 };
 beforeAll(() =>
@@ -164,7 +172,9 @@ async function fixture(
   });
   return { t, ...ids, rewriteId, storageId, chunk, d };
 }
-async function status(f: Awaited<ReturnType<typeof fixture>>) {
+async function status(
+  f: Awaited<ReturnType<typeof fixture>>,
+): Promise<Doc<'travelPrivacyChunkRewrites'> | null> {
   return f.t.query(queryRef('travelPrivacyChunkRewrite/status'), { rewriteId: f.rewriteId });
 }
 async function step(f: Awaited<ReturnType<typeof fixture>>) {
@@ -186,28 +196,31 @@ async function step(f: Awaited<ReturnType<typeof fixture>>) {
     }
   };
   await invoke();
-  const repaired = await f.t.run(async (ctx) => {
-    const operations = await ctx.db.query('archiveUploadOperations').collect();
-    let changed = false;
-    for (const object of await ctx.db.system.query('_storage').collect()) {
-      const op = operations.find(
-        (op) =>
-          op.state === 'UPLOADING' &&
-          op.size === object.size &&
-          Buffer.from(op.sha256Hex, 'hex').toString('base64') === object.sha256,
-      );
-      if (op && !object.contentType) {
-        await ctx.db.patch(object._id as never, { contentType: op.contentType } as never);
-        changed = true;
+  for (let retry = 0; retry < 100; retry++) {
+    const repaired = await f.t.run(async (ctx) => {
+      const operations = await ctx.db.query('archiveUploadOperations').collect();
+      let changed = false;
+      for (const object of await ctx.db.system.query('_storage').collect()) {
+        const op = operations.find(
+          (op) =>
+            op.state === 'UPLOADING' &&
+            op.size === object.size &&
+            Buffer.from(op.sha256Hex, 'hex').toString('base64') === object.sha256,
+        );
+        if (op && !object.contentType) {
+          await ctx.db.patch(object._id as never, { contentType: op.contentType } as never);
+          changed = true;
+        }
       }
-    }
-    return changed;
-  });
-  if (repaired) await invoke();
+      return changed;
+    });
+    if (!repaired) break;
+    await invoke();
+  }
   return (await status(f))!;
 }
 async function until(f: Awaited<ReturnType<typeof fixture>>, phase: string) {
-  for (let n = 0; n < 100; n++) {
+  for (let n = 0; n < 2000; n++) {
     const s = await status(f);
     if (s!.phase === phase) return s!;
     const next = await step(f);
@@ -316,8 +329,8 @@ test('new nested metadata reference prevents deletion after publication', async 
       metadata: { ...backup.metadata, unexpected: { storageAlias: f.storageId } },
     });
   });
-  const s = await step(f);
-  expect(s.errorCode).toBe('STRONG_REFERENCE');
+  for (let i = 0; i < 1000 && !(await status(f))!.errorCode; i++) await step(f);
+  expect((await status(f))!.errorCode).toBe('STRONG_REFERENCE');
   expect(await f.t.run((ctx) => ctx.db.system.get(f.storageId))).not.toBeNull();
 });
 
@@ -409,7 +422,11 @@ test('a second cleanup retires superseded upload ownership and deletes its actua
   f.rewriteId = await f.t.mutation(mutationRef('travelPrivacyChunkRewrite/startRewrite'), {
     scanId,
   });
+  const proof = await readyReferenceProof(f);
   await until(f, 'DONE');
+  expect((await f.t.run((ctx) => ctx.db.get(proof._id)))!.referenceRevision).toBe(
+    proof.referenceRevision + 4,
+  );
   expect(await f.t.run((ctx) => ctx.db.system.get(old.storageId))).toBeNull();
   expect((await f.t.run((ctx) => ctx.db.get(f.chunkId)))!.count).toBe(0);
   const uploads = await f.t.run((ctx) => ctx.db.query('archiveUploadOperations').collect());
@@ -640,7 +657,8 @@ test('a nested encoded reference inside another physical archive prevents deleti
       manifestStorageId: storageId,
     }),
   );
-  expect((await step(f)).errorCode).toBe('NESTED_STORAGE_REFERENCE');
+  for (let i = 0; i < 1000 && !(await status(f))!.errorCode; i++) await step(f);
+  expect((await status(f))!.errorCode).toBe('STRONG_REFERENCE');
   expect(await f.t.run((ctx) => ctx.db.system.get(f.storageId))).not.toBeNull();
 });
 
@@ -841,3 +859,161 @@ test('descriptor reads fail CAS when canonical producer changes after descriptor
   await f.t.run((ctx) => ctx.db.patch(f.backupId, { recordCount: 500 }));
   await expect(readDescriptors(f)).rejects.toThrow('PRODUCER_CHANGED');
 });
+
+async function readyReferenceProof(f: Awaited<ReturnType<typeof fixture>>) {
+  await until(f, 'DELETE');
+  for (let i = 0; i < 2000; i++) {
+    const s = (await status(f))!;
+    if (s.referenceProofId) {
+      const proof = await f.t.run((ctx) => ctx.db.get(s.referenceProofId!));
+      if (proof?.phase === 'READY') return proof;
+    }
+    const next = await step(f);
+    if (next.errorCode) throw new Error(next.errorCode);
+  }
+  throw new Error('Reference proof page limit');
+}
+
+test('actual DELETE transaction reuses one proof across two candidates and stale retries do not advance it', async () => {
+  const f = await fixture();
+  const secondChunk = { ...f.chunk, index: 1 };
+  const d = await descriptor(secondChunk);
+  const secondOriginal = await f.t.action((ctx) =>
+    ctx.storage.store(new Blob([JSON.stringify(secondChunk)])),
+  );
+  await f.t.run(async (ctx) => {
+    const chunkId = await ctx.db.insert('backupLargeChunks', {
+      jobId: f.backupId,
+      ...d,
+      storageId: secondOriginal,
+    });
+    const { _id, _creationTime, ...plan } = (await ctx.db.get(f.planId))!;
+    const planId = await ctx.db.insert('travelPrivacyChunkObjects', {
+      ...plan,
+      chunkId,
+      originalStorageId: secondOriginal,
+      originalDigest: d.digest,
+      descriptor: d,
+      aliases: [{ table: 'backupLargeChunks', id: chunkId }],
+    });
+    for (const row of await ctx.db
+      .query('travelPrivacyChunkRows')
+      .withIndex('object', (q) => q.eq('objectId', f.planId))
+      .collect()) {
+      const { _id, _creationTime, ...fields } = row;
+      await ctx.db.insert('travelPrivacyChunkRows', { ...fields, objectId: planId });
+    }
+    for (const row of await ctx.db.query('backupLargeRows').collect()) {
+      const { _id, _creationTime, ...fields } = row;
+      await ctx.db.insert('backupLargeRows', { ...fields, chunkIndex: 1 });
+    }
+  });
+  const proof = await readyReferenceProof(f);
+  expect(proof.targets).toBe(2);
+  const candidates = await f.t.run((ctx) =>
+    ctx.db
+      .query('travelPrivacyChunkReplacements')
+      .withIndex('rewrite_state', (q) => q.eq('rewriteId', f.rewriteId).eq('state', 'PUBLISHED'))
+      .collect(),
+  );
+  const initial = (await status(f))!;
+  const args = {
+    rewriteId: f.rewriteId,
+    revision: initial.revision,
+    candidateId: candidates[0]._id,
+    proofId: proof._id,
+  };
+  expect(await f.t.mutation(mutationRef('travelPrivacyChunkRewrite/eraseOriginal'), args)).toBe(
+    true,
+  );
+  const firstProof = (await f.t.run((ctx) => ctx.db.get(proof._id)))!;
+  expect(firstProof.referenceRevision).toBe(proof.referenceRevision + 1);
+  expect(firstProof.rewriteRevision).toBe(initial.revision + 1);
+  expect(await f.t.mutation(mutationRef('travelPrivacyChunkRewrite/eraseOriginal'), args)).toBe(
+    false,
+  );
+  expect(await f.t.run((ctx) => ctx.db.get(proof._id))).toEqual(firstProof);
+  expect(
+    await f.t.mutation(mutationRef('travelPrivacyChunkRewrite/eraseOriginal'), {
+      ...args,
+      revision: initial.revision + 1,
+      candidateId: candidates[1]._id,
+    }),
+  ).toBe(true);
+  const secondProof = (await f.t.run((ctx) => ctx.db.get(proof._id)))!;
+  expect(secondProof.referenceRevision).toBe(proof.referenceRevision + 2);
+  expect(secondProof.rewriteRevision).toBe(initial.revision + 2);
+  expect(await f.t.run((ctx) => dataRevision(ctx.db, archiveReferenceRevisionKey))).toBe(
+    secondProof.referenceRevision,
+  );
+  expect(await f.t.run((ctx) => ctx.db.system.get(f.storageId))).toBeNull();
+  expect(await f.t.run((ctx) => ctx.db.system.get(secondOriginal))).toBeNull();
+  expect(
+    await f.t.run((ctx) => ctx.db.query('travelPrivacyChunkReferenceProofs').collect()),
+  ).toHaveLength(1);
+  await until(f, 'DONE');
+});
+
+test('actual erase rejects a late tracked reference after READY without deleting original or refreshing proof', async () => {
+  const f = await fixture();
+  const proof = await readyReferenceProof(f);
+  await f.t.run((ctx) =>
+    withEmbeddingRevision(ctx).db.insert('music', { type: 'background', storageId: f.storageId }),
+  );
+  const deletion: { candidate: Doc<'travelPrivacyChunkReplacements'> } = await f.t.query(
+    queryRef('travelPrivacyChunkRewrite/deletionData'),
+    {
+      rewriteId: f.rewriteId,
+      revision: (await status(f))!.revision,
+    },
+  );
+  const candidate = deletion.candidate;
+  await expect(
+    f.t.mutation(mutationRef('travelPrivacyChunkRewrite/eraseOriginal'), {
+      rewriteId: f.rewriteId,
+      revision: (await status(f))!.revision,
+      candidateId: candidate._id,
+      proofId: proof._id,
+    }),
+  ).rejects.toThrow('REFERENCE_EPOCH_CHANGED');
+  expect(await f.t.run((ctx) => ctx.db.system.get(f.storageId))).not.toBeNull();
+  expect(await f.t.run((ctx) => ctx.db.get(proof._id))).toEqual(proof);
+  expect((await status(f))!.deleted).toBe(0);
+  expect((await f.t.run((ctx) => ctx.db.get(candidate._id)))!.state).toBe('PUBLISHED');
+});
+
+test.each(['sha256', 'size', 'contentType'] as const)(
+  'actual erase rechecks replacement %s metadata after the completed proof',
+  async (field) => {
+    const f = await fixture();
+    const proof = await readyReferenceProof(f);
+    const candidate = (await f.t.run((ctx) =>
+      ctx.db
+        .query('travelPrivacyChunkReplacements')
+        .withIndex('rewrite_state', (q) => q.eq('rewriteId', f.rewriteId).eq('state', 'PUBLISHED'))
+        .first(),
+    ))!;
+    const metadata = (await f.t.run((ctx) => ctx.db.system.get(candidate.replacementStorageId!)))!;
+    await f.t.run((ctx) =>
+      (ctx.db.patch as any)(candidate.replacementStorageId, {
+        [field]:
+          field === 'size'
+            ? metadata.size + 1
+            : field === 'sha256'
+              ? '0'.repeat(64)
+              : 'application/json',
+      }),
+    );
+    await expect(
+      f.t.mutation(mutationRef('travelPrivacyChunkRewrite/eraseOriginal'), {
+        rewriteId: f.rewriteId,
+        revision: (await status(f))!.revision,
+        candidateId: candidate._id,
+        proofId: proof._id,
+      }),
+    ).rejects.toThrow('REPLACEMENT_MISSING');
+    expect(await f.t.run((ctx) => ctx.db.system.get(f.storageId))).not.toBeNull();
+    expect(await f.t.run((ctx) => ctx.db.get(proof._id))).toEqual(proof);
+    expect((await status(f))!.deleted).toBe(0);
+  },
+);

@@ -14,6 +14,7 @@ const modules = {
   '../federation/travelPrivacyArchives.ts': () => import('./travelPrivacyArchives'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/travelPrivacyChunkRewrite.ts': () => import('./travelPrivacyChunkRewrite'),
+  '../federation/travelPrivacyChunkReferenceProof.ts': () => import('./travelPrivacyChunkReferenceProof'),
   '../federation/archiveUploadProvenance.ts': () => import('./archiveUploadProvenance'),
 };
 beforeAll(() =>
@@ -207,7 +208,7 @@ async function step(f: Awaited<ReturnType<typeof fixture>>) {
   return (await status(f))!;
 }
 async function until(f: Awaited<ReturnType<typeof fixture>>, phase: string) {
-  for (let n = 0; n < 100; n++) {
+  for (let n = 0; n < 1000; n++) {
     const s = await status(f);
     if (s!.phase === phase) return s!;
     const next = await step(f);
@@ -315,7 +316,11 @@ test('retry fences an already planned DELETE invocation before object erasure', 
   const f = await fixture();
   await wireParent(f);
   await until(f, 'DELETE');
+  await step(f); // Bind a proof before the retry so the production recovery path must discard it.
   const before = (await status(f))!;
+  const oldProofId = before.referenceProofId!;
+  expect(oldProofId).toBeDefined();
+  const oldProof = await f.t.run(ctx => ctx.db.get(oldProofId));
   const planned = await f.t.query(queryRef('travelPrivacyChunkRewrite/deletionData'), {
     rewriteId: f.rewriteId,
     revision: before.revision,
@@ -329,11 +334,18 @@ test('retry fences an already planned DELETE invocation before object erasure', 
     rewriteId: f.rewriteId,
     revision: before.revision,
     candidateId: planned.candidate._id,
-    referenceDigest: planned.snapshot.digest,
+    proofId: oldProofId,
   });
   expect(erased).toBe(false);
   expect(await f.t.run((ctx) => ctx.db.system.get(f.storageId))).not.toBeNull();
   expect((await f.t.run((ctx) => ctx.db.get(planned.candidate._id as Id<'travelPrivacyChunkReplacements'>)))!.state).toBe('PUBLISHED');
+  expect((await status(f))!.referenceProofId).toBeUndefined();
+  await until(f, 'DONE');
+  const recovered = (await status(f))!;
+  expect(recovered.referenceProofId).not.toBe(oldProofId);
+  expect(await f.t.run(ctx => ctx.db.get(oldProofId))).toEqual(oldProof);
+  expect(await f.t.run(ctx => ctx.db.system.get(f.storageId))).toBeNull();
+  expect((await f.t.run(ctx => ctx.db.get(planned.candidate._id as Id<'travelPrivacyChunkReplacements'>)))!.state).toBe('DELETED');
 });
 
 test('duplicate actors with one checkpoint allocate only one physical candidate', async () => {

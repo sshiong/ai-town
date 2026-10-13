@@ -18,6 +18,7 @@ const modules = {
   '../federation/travelPrivacyChunkCoordinator.ts': () => import('./travelPrivacyChunkCoordinator'),
   '../federation/travelPrivacyChunkArchives.ts': () => import('./travelPrivacyChunkArchives'),
   '../federation/travelPrivacyChunkRewrite.ts': () => import('./travelPrivacyChunkRewrite'),
+  '../federation/travelPrivacyChunkReferenceProof.ts': () => import('./travelPrivacyChunkReferenceProof'),
   '../agent/embeddingsCache.ts': () => import('../agent/embeddingsCache'),
   '../_generated/server.ts': () => import('../_generated/server'),
 };

@@ -373,6 +373,8 @@ export const retry = mutation({
     });
     if (rewrite && (rewrite.phase !== 'DONE' || job.phase === 'CHUNK_REWRITE')) await ctx.db.patch(rewrite._id, {
       revision: rewrite.revision + 1, expectedParentRevision: next.revision,
+      // A retry fences the old scan; a fresh proof must cover the new writer checkpoint.
+      referenceProofId: undefined,
       sourceRevision: rewrite.phase === 'DONE' ? rewrite.sourceRevision : await dataRevision(ctx.db, privacyRevisionKey), errorCode: undefined,
     });
     if (job.phase === 'CHUNK_CHECK') {
