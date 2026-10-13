@@ -1,3 +1,5 @@
+import { selectiveImportPayload } from './selectiveImportPayload';
+import type { LocalArchiveProof, LocalSanitizedChunkManifest } from '../../../convex/federation/travelPrivacyLocalChunkManifest';
 import { useLocale } from '../../i18n';
 import { useEffect, useRef, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
@@ -47,7 +49,8 @@ type Job = {
     sourceTownId: string;
   };
 };
-type SignedManifest = { manifest: SelectiveManifest; signature: string };
+type SignedManifest = { manifest: SelectiveManifest; signature: string; localProof?: LocalArchiveProof };
+type PortableManifest = { manifest: SelectiveManifest | LocalSanitizedChunkManifest; signature: string; localProof?: LocalArchiveProof };
 type Profile = { sourceId: string; name: string; model: string };
 type ExternalEdge = {
   sourceId: string;
@@ -101,6 +104,9 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
   const [manifestFile, setManifestFile] = useState<File>();
   const [signed, setSigned] = useState<SignedManifest>();
   const [files, setFiles] = useState<File[]>([]);
+  const [privacyFiles, setPrivacyFiles] = useState<File[]>([]);
+  const [portable, setPortable] = useState<PortableManifest>();
+  const [trustedFingerprint, setTrustedFingerprint] = useState('');
   const [inspected, setInspected] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [sourceWorlds, setSourceWorlds] = useState<string[]>([]);
@@ -146,6 +152,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
   const mappingReady =
     inspected &&
     transfer &&
+    (!signed?.localProof || !!trustedFingerprint.trim()) &&
     owners.every(
       (o) =>
         o.operation === 'skip' ||
@@ -183,21 +190,29 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
     setJobId(undefined);
     const value = JSON.parse(
       await readBackupText(manifestFile, 5_000_000, 'manifest', password),
-    ) as SignedManifest;
+    ) as PortableManifest;
+    const derived = value?.manifest?.format === 'ai-town-local-sanitized-chunks' ? value.manifest : undefined;
+    const source = derived?.sourceEvidence?.manifest;
+    const current = derived && source?.format === 'ai-town-selective-archive'
+      ? { ...source, chunks: derived.chunks } : value?.manifest;
     if (
       !value?.manifest ||
-      value.manifest.format !== 'ai-town-selective-archive' ||
-      ![1, 2].includes(value.manifest.version) ||
-      !Array.isArray(value.manifest.selection?.owners) ||
-      !Array.isArray(value.manifest.chunks) ||
+      current?.format !== 'ai-town-selective-archive' ||
+      ![1, 2].includes(current.version) ||
+      !Array.isArray(current.selection?.owners) ||
+      !Array.isArray(current.chunks) ||
+      (derived && (!value.localProof || value.signature !== '')) ||
       typeof value.signature !== 'string'
     )
       throw new Error(
         t('Choose a signed selective manifest. Full-town backups use the other import panel.'),
       );
-    setSigned(value);
+    setPortable(value);
+    setTrustedFingerprint('');
+    setPrivacyFiles([]);
+    setSigned({ ...value, manifest: current as SelectiveManifest });
     setOwners(
-      value.manifest.selection.owners.map((o) => ({
+      (current as SelectiveManifest).selection.owners.map((o) => ({
         sourceAgentGlobalId: o.agentGlobalId,
         operation: 'skip',
       })),
@@ -285,7 +300,7 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
     if (!signed || !mappingReady) throw new Error(t('Complete the explicit mappings first.'));
     const result = await convex.action(action('createImport'), {
       adminToken,
-      ...signed,
+      ...selectiveImportPayload(portable ?? signed, trustedFingerprint),
       mode,
       owners,
       profiles: profileMappings,
@@ -309,6 +324,13 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
         setProgress(t('Uploading file {index} / {count}', { index: i + 1, count: files.length }));
         const chunk = await readBackupText(file, 900_000, 'chunk', password);
         await convex.action(action('stageChunk'), { adminToken, jobId, chunk });
+      }
+      for (const file of privacyFiles) {
+        if (stop.current) break;
+        const chunk = await readBackupText(file, 900_000, 'chunk', password);
+        const page = JSON.parse(chunk) as LargeChunk;
+        await convex.action(makeFunctionReference<'action'>('federation/backupPrivacyChunks:stageChunk'),
+          { adminToken, jobId, pageNumber: page.index, chunk });
       }
     } finally {
       setPassword('');
@@ -370,6 +392,17 @@ export default function SelectiveImportPanel({ adminToken }: { adminToken: strin
       </AdminButton>
       {signed && (
         <>
+          {signed.localProof && <>
+            <p className="admin-muted">{t('This is a locally sanitized selective archive. The original source signature authenticates evidence only; the local proof authenticates the current files.')}</p>
+            <Field label={t('Trusted local signer fingerprint')}>
+              <input disabled={!editable} value={trustedFingerprint} onChange={e => setTrustedFingerprint(e.target.value)} placeholder="sha256:…" />
+            </Field>
+            <p className="admin-muted">{t('Enter the fingerprint verified through the local identity or a trusted channel. It is not filled from the uploaded archive.')}</p>
+            <Field label={t('Privacy evidence chunk files')}>
+              <input type="file" multiple accept=".json" disabled={!!task.pending} onChange={e => setPrivacyFiles(Array.from(e.target.files ?? []))} />
+            </Field>
+            <p>{t('Upload all privacy evidence chunks before preflight.')}</p>
+          </>}
           <p>
             {t('Source: ')}
             {signed.manifest.source.townName} · {signed.manifest.source.townId}

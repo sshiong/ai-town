@@ -11,6 +11,7 @@ export const archiveReferenceTables = [
   'coldHistoryArchives', 'coldHistoryChunks', 'coldArchiveMirrorJobs', 'music',
   'travelPrivacyArchiveObjects', 'travelPrivacyChunkObjects', 'travelPrivacyChunkRows',
   'travelPrivacyChunkReplacements', 'travelPrivacyChunkManifestRewrites',
+  'backupPrivacyChunks', 'backupPrivacyRows', 'travelPrivacyChunkEvidencePages',
   'archiveUploadOperations', 'archiveUploadCandidates',
 ] as const;
 const privacySourceTables = ['coldHistoryArchives', 'coldHistoryChunks', 'homeTravelTranscripts', 'memorySourceCorrections', 'federationTurns', 'federationTranscriptJobs', 'backupImports', 'backupLargeJobs', 'backupLargeChunks', 'backupLargeGlobalMappings', 'backupLargeRows', 'backupSelectiveHistory', 'residentModelBindings'] as const;

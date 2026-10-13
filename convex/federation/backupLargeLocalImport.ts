@@ -49,6 +49,8 @@ export async function largeImportAuthenticationMetadata(
     archiveSourceEvidence: { digest: plan.local.sourceEvidence.digest, signature: plan.local.sourceEvidence.signature,
       publicKey: plan.local.sourceEvidence.publicKey },
     derivativeClearedVisitsCount: plan.local.clearedVisits.length,
+    derivativePrivacyChunkCount: plan.local.privacyChunks?.length ?? 0,
+    uploadedPrivacyChunks: 0,
     derivativeDerivedAt: plan.local.derivedAt,
   } : {};
 }

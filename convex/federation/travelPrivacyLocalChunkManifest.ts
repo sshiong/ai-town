@@ -15,7 +15,9 @@ export type LocalSourceEvidence = {
   digest: string; signature: string; publicKey: string;
 };
 export type LocalSanitizedChunkManifest = {
-  format: 'ai-town-local-sanitized-chunks'; version: 1; schemaVersion: 1;
+  format: 'ai-town-local-sanitized-chunks'; version: 1 | 2; schemaVersion: 1;
+  privacyChunks?: ChunkDescriptor[];
+  privacyCount?: number; privacyChainDigest?: string;
   sourceSignatureValid: false; archiveId: string; derivedAt: number;
   chunks: LocalChunkDescriptor[]; clearedVisits: string[]; sourceEvidence: LocalSourceEvidence;
 };
@@ -80,14 +82,30 @@ export function assertLocalSourceManifestMetadata(value: unknown): asserts value
 
 async function validateStructure(value: unknown, portable = false): Promise<LocalSanitizedChunkManifest> {
   keys(value, ['format', 'version', 'schemaVersion', 'sourceSignatureValid', 'archiveId', 'derivedAt',
-    'chunks', 'clearedVisits', 'sourceEvidence']);
+    'chunks', 'clearedVisits', 'sourceEvidence', 'privacyChunks', 'privacyCount', 'privacyChainDigest']);
   const manifest = value as LocalSanitizedChunkManifest;
-  if (manifest.format !== 'ai-town-local-sanitized-chunks' || manifest.version !== 1 || manifest.schemaVersion !== 1 ||
+  if (manifest.format !== 'ai-town-local-sanitized-chunks' || ![1, 2].includes(manifest.version) || manifest.schemaVersion !== 1 ||
     manifest.sourceSignatureValid !== false || !identifier(manifest.archiveId) || !Number.isFinite(manifest.derivedAt) ||
     !Array.isArray(manifest.chunks) || manifest.chunks.length > (portable ? MAX_CHUNKS : 2 * MAX_CHUNKS) || size(manifest) > (portable ? 5_000_000 : 10_000_000) ||
     !Array.isArray(manifest.clearedVisits) || !manifest.clearedVisits.length ||
     manifest.clearedVisits.some(visit => !identifier(visit)) ||
     new Set(manifest.clearedVisits).size !== manifest.clearedVisits.length) fail('MANIFEST_INVALID');
+  if (manifest.version === 2) {
+    if (!Array.isArray(manifest.privacyChunks) || !manifest.privacyChunks.length || manifest.privacyChunks.length > MAX_CHUNKS ||
+      !Number.isSafeInteger(manifest.privacyCount) || manifest.privacyCount! < 1) fail('PRIVACY_EVIDENCE_INVALID');
+    let count = 0, bytes = 0, chain = await digest([]);
+    for (const [index, chunk] of manifest.privacyChunks!.entries()) {
+      keys(chunk, ['index', 'table', 'count', 'bytes', 'digest']);
+      if (chunk.index !== index || chunk.table !== 'travelPrivacyTombstones' || !Number.isSafeInteger(chunk.count) ||
+        chunk.count < 1 || chunk.count > 100 || !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 1 ||
+        chunk.bytes > MAX_CHUNK_BYTES || !checksum(chunk.digest)) fail('PRIVACY_DESCRIPTOR_INVALID');
+      count += chunk.count; bytes += chunk.bytes;
+      chain = await digest([chain, index, chunk.digest]);
+    }
+    if (count !== manifest.privacyCount || chain !== manifest.privacyChainDigest || bytes > MAX_ARCHIVE_BYTES)
+      fail('PRIVACY_EVIDENCE_INCOMPLETE');
+  } else if (manifest.privacyChunks !== undefined || manifest.privacyCount !== undefined || manifest.privacyChainDigest !== undefined)
+    fail('PRIVACY_EVIDENCE_INVALID');
   keys(manifest.sourceEvidence, ['manifest', 'manifestStorageId', 'digest', 'signature', 'publicKey']);
   const evidence = manifest.sourceEvidence;
   if (!checksum(evidence.digest) || typeof evidence.signature !== 'string' || typeof evidence.publicKey !== 'string' ||
@@ -100,7 +118,7 @@ async function validateStructure(value: unknown, portable = false): Promise<Loca
     else await validateSelectiveManifest(evidence.manifest, evidence.signature);
   } else if (evidence.signature !== '' || evidence.publicKey !== '' || manifest.chunks.some(chunk => chunk.role !== 'OLD'))
     fail('SOURCE_EVIDENCE_MISSING');
-  let totalBytes = 0, previousIndex = -1;
+  let totalBytes = (manifest.privacyChunks ?? []).reduce((sum, chunk) => sum + chunk.bytes, 0), previousIndex = -1;
   for (const chunk of manifest.chunks) {
     keys(chunk, ['index', 'table', 'count', 'bytes', 'digest', 'role', 'encoding']);
     if (!Number.isSafeInteger(chunk.index) || chunk.index <= previousIndex || chunk.index >= 2 * MAX_CHUNKS ||
@@ -133,7 +151,7 @@ async function validateStructure(value: unknown, portable = false): Promise<Loca
 export async function createLocalChunkManifest(
   input: Omit<LocalSanitizedChunkManifest, 'format' | 'version' | 'schemaVersion' | 'sourceSignatureValid'>,
 ): Promise<LocalSanitizedChunkManifest> {
-  return validateStructure({ ...input, format: 'ai-town-local-sanitized-chunks', version: 1,
+  return validateStructure({ ...input, format: 'ai-town-local-sanitized-chunks', version: input.privacyChunks ? 2 : 1,
     schemaVersion: 1, sourceSignatureValid: false });
 }
 

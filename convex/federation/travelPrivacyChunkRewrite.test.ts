@@ -257,7 +257,10 @@ test('rewrites OLD chunk, preserves unrelated bytes, shifts staged rows, publish
     'LOCAL_SANITIZED',
   );
   const operations = await f.t.run((ctx) => ctx.db.query('archiveUploadOperations').collect());
-  expect(operations).toHaveLength(2);
+  expect(operations).toHaveLength(3);
+  expect(operations.filter(op => op.publication?.table === 'backupPrivacyChunks')).toHaveLength(1);
+  expect(local.version).toBe(2);
+  expect(local.privacyChunks).toHaveLength(1);
   expect(operations.every((op) => op.state === 'PUBLISHED')).toBe(true);
 });
 
@@ -1147,3 +1150,62 @@ test.each(['sha256', 'size', 'contentType'] as const)(
     expect((await status(f))!.deleted).toBe(0);
   },
 );
+
+test('a privacy sidecar with an unknown upload acknowledgement stays fenced and never starts a second store', async () => {
+  const f = await manifestOnlyFixture(1, 100);
+  await buildDescriptors(f);
+  await f.t.mutation(mutationRef('travelPrivacyChunkRewrite/buildEvidencePage'), {
+    rewriteId: f.rewriteId, revision: (await status(f))!.revision, manifestId: f.manifestId,
+  });
+  const page = await f.t.run(ctx => ctx.db.query('travelPrivacyChunkEvidencePages')
+    .withIndex('manifest_page', q => q.eq('manifestId', f.manifestId)).first());
+  expect(page).toBeTruthy();
+  const chunk = { index: page!.pageNumber, table: 'travelPrivacyTombstones', rows: page!.rows.map(encodeRow) };
+  const blob = new Blob([JSON.stringify(chunk)]);
+  const lease = await f.t.mutation(mutationRef('travelPrivacyChunkRewrite/reserveEvidence'), {
+    rewriteId: f.rewriteId, revision: (await status(f))!.revision, manifestId: f.manifestId,
+    evidenceId: page!._id, descriptor: await descriptor(chunk), ...(await describeArchiveUpload(blob)),
+  });
+  expect(lease).toBeTruthy();
+  const before = await f.t.run(ctx => ctx.db.system.query('_storage').collect());
+  await step(f);
+  expect((await status(f))!.errorCode).toBe('UPLOAD_COVERAGE_UNKNOWN');
+  expect((await status(f))!.phase).toBe('MANIFESTS');
+  expect(await f.t.run(ctx => ctx.db.query('backupPrivacyChunks').collect())).toEqual([]);
+  expect(await f.t.run(ctx => ctx.db.system.query('_storage').collect())).toEqual(before);
+});
+
+test('portable evidence includes only selected SOURCE identities for each producer and excludes parent OLD-only identities', async () => {
+  const f = await manifestOnlyFixture(1, 100);
+  await buildDescriptors(f);
+  const other = await f.t.run(async ctx => {
+    const parent = (await ctx.db.get(f.jobId))!;
+    const memory = async (description: string) => ctx.db.insert('memories', { worldId: parent.worldId,
+      playerId: 'p:0', agentGlobalId: 'owner', description, importance: 1, lastAccess: 1,
+      data: { type: 'reflection', relatedMemoryIds: [] } });
+    const first = await memory('source first'), second = await memory('source second'), oldOnly = await memory('private OLD only');
+    await ctx.db.patch(parent._id, { memoryIds: [first, second, oldOnly], memoryOwners: [first, second, oldOnly].map(memoryId =>
+      ({ memoryId, worldId: parent.worldId, playerId: 'p:0', ownerGlobalId: 'owner' })) });
+    const jobId = await ctx.db.insert('backupLargeJobs', { kind: 'export', state: 'COMPLETE', phase: 'COMPLETE',
+      tableIndex: 0, cursor: null, chunkCount: 1, processedChunks: 0, recordCount: 1, bytes: 100,
+      source: {}, createdAt: 1, updatedAt: 1, archivePrivacyState: 'REWRITING', archiveRevision: 1 });
+    const manifestId = await ctx.db.insert('travelPrivacyChunkManifestRewrites', { rewriteId: f.rewriteId, backupJobId: jobId,
+      expectedProducerDigest: await digest((await ctx.db.get(jobId))!), producerRevision: 1, state: 'BUILDING', cursor: null,
+      sourceManifestDigest: await digest({}), sourceSignature: '', sourcePublicKey: '', clearedVisits: ['selected-visit'] });
+    for (const [backupJobId, role, memoryId] of [[f.backupId, 'SOURCE', first], [jobId, 'EXPORT', second], [f.backupId, 'OLD', oldOnly]] as const)
+      await ctx.db.insert('travelPrivacyChunkRows', { scanId: f.scanId, objectId: f.planId, backupJobId, role, selected: true,
+        evidence: { sourceId: memoryId, table: 'memories', rowIndex: 0, worldId: parent.worldId, playerId: 'p:0',
+          relatedMemoryIds: [], evidenceMemoryIds: [], storageIds: [] } });
+    return { manifestId, first, second, oldOnly };
+  });
+  for (const manifestId of [f.manifestId, other.manifestId]) await f.t.mutation(mutationRef('travelPrivacyChunkRewrite/buildEvidencePage'), {
+    rewriteId: f.rewriteId, revision: (await status(f))!.revision, manifestId,
+  });
+  const pages = await f.t.run(ctx => ctx.db.query('travelPrivacyChunkEvidencePages').collect());
+  const first = pages.filter(page => page.manifestId === f.manifestId).flatMap(page => page.rows);
+  const second = pages.filter(page => page.manifestId === other.manifestId).flatMap(page => page.rows);
+  expect(first.filter(row => row.key.startsWith('memory:')).map(row => row.key)).toEqual([`memory:${other.first}`]);
+  expect(second.filter(row => row.key.startsWith('memory:')).map(row => row.key)).toEqual([`memory:${other.second}`]);
+  expect(JSON.stringify(pages)).not.toContain(`memory:${other.oldOnly}`);
+  expect(first.find(row => row.key === `memory:${other.first}`)).toMatchObject({ worldId: expect.any(String), ownerGlobalId: 'owner', playerId: 'p:0' });
+});

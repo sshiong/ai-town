@@ -32,6 +32,9 @@ export function inspectionEvidence(table: string, raw: unknown, rowIndex: number
       rowIndex, relatedMemoryIds: [], evidenceMemoryIds: [], storageIds: [] };
     row = decodeRow(row.record);
   }
+  if (table === 'archivedConversations' && (!Array.isArray(row.participants) ||
+    row.participants.length > MAX_EDGES || row.participants.some((participant: unknown) => !id(participant))))
+    throw new Error('CHUNK_CONVERSATION_PARTICIPANTS_INVALID');
   const owner = table === 'coldHistoryFiles' ? row.owner : row;
   const sourceId = id(row._id);
   if (!sourceId) throw new Error('CHUNK_ROW_ID_INVALID');
@@ -40,10 +43,11 @@ export function inspectionEvidence(table: string, raw: unknown, rowIndex: number
   const storageIds = ids([row.storageId, row.manifest?.vectorArchiveStorageId, row.localArchiveStorageId].filter(Boolean));
   const largeEdges = [related, evidence].some(a => Array.isArray(a) && (a.length > MAX_EDGES || a.some(x => !id(x))));
   const worldId = id(owner?.worldId), playerId = id(owner?.playerId ?? owner?.homePlayerId), ownerGlobalId = id(owner?.agentGlobalId ?? owner?.ownerGlobalId);
-  const conversationId = id(row.conversationId ?? row.data?.conversationId ?? (table === 'coldHistoryArchives' && row.kind === 'conversation' ? row.sourceId : undefined));
+  const conversationId = id(row.conversationId ?? row.data?.conversationId ?? (table === 'archivedConversations' ? row.id : undefined) ?? (table === 'coldHistoryArchives' && row.kind === 'conversation' ? row.sourceId : undefined));
   const transcriptId = id(row.transcriptId ?? row.data?.transcriptId ?? (table === 'coldHistoryArchives' && row.kind === 'travel' ? row.sourceId : undefined));
   return { sourceId, table, rowIndex, worldId, playerId, ownerGlobalId,
-    visitId: id(row.visitId ?? row.envelope?.visitId ?? row.data?.visitId), conversationId, transcriptId,
+    visitId: id(row.visitId ?? row.envelope?.visitId ?? row.data?.visitId), conversationId,
+    ...(table === 'archivedConversations' ? { conversationPlayerIds: ids(row.participants) } : {}), transcriptId,
     relation: table === 'federationPendingActions' && id(row.inputId) ? relation(row.inputId)
       : table === 'residentModelBindings' && worldId && playerId ? relation(worldId, playerId)
       : table === 'visitLedger' && id(row.visitId) ? relation(row.visitId)

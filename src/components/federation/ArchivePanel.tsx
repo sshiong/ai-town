@@ -1,6 +1,8 @@
 import { useLocale } from '../../i18n';
 import { useEffect, useRef, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
+import { makeFunctionReference } from 'convex/server';
+import type { LargeChunk } from '../../../convex/federation/backupLargeHelpers';
 import { api } from '../../../convex/_generated/api';
 import type { Id } from '../../../convex/_generated/dataModel';
 import {
@@ -20,6 +22,7 @@ import {
 } from './AdminShared';
 import {
   loadLargeArchiveManifest,
+  archivePrivacyPageNumber,
   confirmedLargeArchiveSigner,
   selectArchiveDirectory,
   supportsArchiveDirectory,
@@ -28,6 +31,26 @@ import {
 } from './archiveFiles';
 import { VectorExportOption } from './EmbeddingPanel';
 import ColdArchivePanel from './ColdArchivePanel';
+
+const getPrivacyChunk = makeFunctionReference<
+  'action',
+  {
+    adminToken: string;
+    jobId: Id<'backupLargeJobs'>;
+    pageNumber: number;
+  },
+  LargeChunk
+>('federation/backupPrivacyChunks:getChunk');
+const stagePrivacyChunk = makeFunctionReference<
+  'action',
+  {
+    adminToken: string;
+    jobId: Id<'backupLargeJobs'>;
+    pageNumber: number;
+    chunk: string;
+  },
+  void
+>('federation/backupPrivacyChunks:stageChunk');
 
 export default function ArchivePanel({ adminToken }: { adminToken: string }) {
   const { t } = useLocale();
@@ -46,6 +69,8 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
   const [sourceStopped, setSourceStopped] = useState(false);
   const [reviewed, setReviewed] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
+  const [privacyFiles, setPrivacyFiles] = useState<File[]>([]);
+  const [privacyPageNumber, setPrivacyPageNumber] = useState(0);
   const [progress, setProgress] = useState<string>();
   const [chunkIndex, setChunkIndex] = useState(0);
   const pauseRequested = useRef(false);
@@ -300,6 +325,17 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
               {t(' expected')}
               {job.kind === 'import' ? t(' · {count} uploaded', { count: job.uploadedChunks }) : ''}
             </dd>
+            {(job.privacyChunkCount > 0 || job.uploadedPrivacyChunks > 0) && (
+              <>
+                <dt>{t('Independent privacy evidence pages')}</dt>
+                <dd>
+                  {t('{count} privacy pages expected · {uploaded} uploaded', {
+                    count: job.privacyChunkCount,
+                    uploaded: job.uploadedPrivacyChunks,
+                  })}
+                </dd>
+              </>
+            )}
             <dt>{t('Records')}</dt>
             <dd>{job.recordCount}</dd>
           </dl>
@@ -311,7 +347,12 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
           <div className="admin-toolbar">
             <AdminButton
               disabled={
-                !!task.pending || ['COMPLETE', 'READY', 'FAILED', 'CANCELLED'].includes(job.state)
+                !!task.pending ||
+                ['COMPLETE', 'READY', 'FAILED', 'CANCELLED'].includes(job.state) ||
+                (job.kind === 'import' &&
+                  job.state === 'STAGING' &&
+                  (job.uploadedChunks !== job.chunkCount ||
+                    job.uploadedPrivacyChunks !== job.privacyChunkCount))
               }
               onClick={() =>
                 void task.run(
@@ -494,6 +535,29 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
                                 ),
                               );
                             }
+                            const loaded = await loadLargeArchiveManifest(header);
+                            const privacyChunks =
+                              loaded.archive.manifest.format === 'ai-town-local-sanitized-chunks'
+                                ? (loaded.archive.manifest.privacyChunks ?? [])
+                                : [];
+                            for (const descriptor of privacyChunks) {
+                              setProgress(
+                                t('Saving privacy page {index} / {count}', {
+                                  index: descriptor.index + 1,
+                                  count: privacyChunks.length,
+                                }),
+                              );
+                              const chunk = await convex.action(getPrivacyChunk, {
+                                adminToken,
+                                jobId: job.jobId,
+                                pageNumber: descriptor.index,
+                              });
+                              await writeArchiveText(
+                                directory,
+                                `privacy-${String(descriptor.index).padStart(6, '0')}.json`,
+                                await protectedPart(JSON.stringify(chunk), 'chunk', secret),
+                              );
+                            }
                           },
                           t('Manifest and every referenced chunk saved to the selected folder.'),
                         ),
@@ -552,6 +616,64 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
                   }
                 >
                   {t('Download selected chunk')}
+                </AdminButton>
+              </div>
+              <div className="admin-inline-form">
+                <Field
+                  label={t('Privacy page index')}
+                  hint={t(
+                    'Privacy pages use their own zero-based index and are separate from town data chunks.',
+                  )}
+                >
+                  <input
+                    type="number"
+                    min={0}
+                    value={privacyPageNumber}
+                    onChange={(event) => setPrivacyPageNumber(Number(event.target.value))}
+                  />
+                </Field>
+                <AdminButton
+                  disabled={
+                    !!task.pending ||
+                    !canDownload ||
+                    privacyPageNumber < 0 ||
+                    !Number.isSafeInteger(privacyPageNumber)
+                  }
+                  onClick={() =>
+                    void task.run(
+                      t('Downloading privacy evidence page'),
+                      async () => {
+                        const secret = takeExportPassphrase();
+                        const loaded = await loadLargeArchiveManifest(
+                          await convex.action(api.federation.backupLarge.getManifest, {
+                            adminToken,
+                            jobId: job.jobId,
+                          }),
+                        );
+                        if (
+                          loaded.archive.manifest.format !== 'ai-town-local-sanitized-chunks' ||
+                          !loaded.archive.manifest.privacyChunks?.[privacyPageNumber]
+                        )
+                          throw new Error(
+                            t('This archive has no privacy evidence page at the selected index.'),
+                          );
+                        const chunk = await convex.action(getPrivacyChunk, {
+                          adminToken,
+                          jobId: job.jobId,
+                          pageNumber: privacyPageNumber,
+                        });
+                        downloadJsonText(
+                          await protectedPart(JSON.stringify(chunk), 'chunk', secret),
+                          `privacy-${String(privacyPageNumber).padStart(6, '0')}.json`,
+                        );
+                      },
+                      t(
+                        'Privacy page downloaded. Keep every referenced privacy page with the manifest.',
+                      ),
+                    )
+                  }
+                >
+                  {t('Download selected privacy page')}
                 </AdminButton>
               </div>
             </>
@@ -679,35 +801,37 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
         )}
         {manifest?.archive.manifest.format === 'ai-town-local-sanitized-chunks' &&
           'localProof' in manifest.archive && (
-          <>
-            <p className="admin-warning">
-              {t(
-                'This is a locally sanitized RAW derivative. The original source signature proves only the embedded source evidence; it does not sign these current chunk bytes. This import restores cleared visit markers; complete memory and conversation deletion evidence is not yet portable.',
-              )}
-            </p>
-            <p className="admin-muted">
-              {t('Declared local signer town: ')}
-              <code>{manifest.archive.localProof.townId}</code>
-              {t(' · declared local signer fingerprint: ')}
-              <code>{manifest.declaredLocalSignerFingerprint}</code>
-            </p>
-            <Field
-              label={t('Trusted local signer fingerprint')}
-              hint={t(
-                'Verify the local signer fingerprint through a trusted channel, then type it here. The displayed archive declaration is unverified and is never copied into this confirmation automatically.',
-              )}
-            >
-              <input
-                value={expectedLocalProofFingerprint}
-                autoComplete="off"
-                maxLength={100}
-                disabled={!!task.pending}
-                onChange={(event) => setExpectedLocalProofFingerprint(event.target.value)}
-                placeholder="sha256:..."
-              />
-            </Field>
-          </>
-        )}
+            <>
+              <p className="admin-warning">
+                {t(
+                  manifest.archive.manifest.version === 2
+                    ? 'This is a v2 locally sanitized RAW derivative. The original signature proves only the embedded source evidence. The local proof authenticates the current manifest and independent privacy pages containing cleared visits and memory and conversation deletion identifiers. Upload every privacy page before server preflight.'
+                    : 'This is a v1 locally sanitized RAW derivative. The original source signature proves only the embedded source evidence; it does not sign these current chunk bytes. This import restores cleared visit markers; complete memory and conversation deletion evidence is not portable in v1.',
+                )}
+              </p>
+              <p className="admin-muted">
+                {t('Declared local signer town: ')}
+                <code>{manifest.archive.localProof.townId}</code>
+                {t(' · declared local signer fingerprint: ')}
+                <code>{manifest.declaredLocalSignerFingerprint}</code>
+              </p>
+              <Field
+                label={t('Trusted local signer fingerprint')}
+                hint={t(
+                  'Verify the local signer fingerprint through a trusted channel, then type it here. The displayed archive declaration is unverified and is never copied into this confirmation automatically.',
+                )}
+              >
+                <input
+                  value={expectedLocalProofFingerprint}
+                  autoComplete="off"
+                  maxLength={100}
+                  disabled={!!task.pending}
+                  onChange={(event) => setExpectedLocalProofFingerprint(event.target.value)}
+                  placeholder="sha256:..."
+                />
+              </Field>
+            </>
+          )}
         <div className="admin-toolbar">
           <AdminButton
             disabled={
@@ -811,6 +935,68 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
             }
           >
             {t('Stage selected chunks')}
+          </AdminButton>
+        </div>
+        <Field
+          label={t('Independent privacy evidence pages')}
+          hint={t(
+            'For v2 derivatives, select every plain or encrypted privacy page (up to 1 MiB each before encryption). Privacy pages have independent indices; uploading all town chunks alone does not complete server preflight.',
+          )}
+        >
+          <input
+            type="file"
+            accept=".json,application/json"
+            multiple
+            disabled={!!task.pending}
+            onChange={(event) => setPrivacyFiles(Array.from(event.target.files ?? []))}
+          />
+        </Field>
+        <div className="admin-toolbar">
+          <AdminButton
+            disabled={
+              !!task.pending ||
+              !privacyFiles.length ||
+              !jobId ||
+              job?.kind !== 'import' ||
+              job.state !== 'STAGING'
+            }
+            onClick={() =>
+              void task.run(
+                t('Staging privacy evidence pages'),
+                async () => {
+                  if (!jobId) return;
+                  const secret = importPassphrase;
+                  setImportPassphrase('');
+                  for (let index = 0; index < privacyFiles.length; index++) {
+                    setProgress(
+                      t('Staging {index} / {count}: {filename}', {
+                        index: index + 1,
+                        count: privacyFiles.length,
+                        filename: privacyFiles[index].name,
+                      }),
+                    );
+                    const chunk = await readBackupText(
+                      privacyFiles[index],
+                      1024 * 1024,
+                      'chunk',
+                      secret,
+                    );
+                    await convex.action(stagePrivacyChunk, {
+                      adminToken,
+                      jobId,
+                      pageNumber: archivePrivacyPageNumber(chunk),
+                      chunk,
+                    });
+                  }
+                  setPrivacyFiles([]);
+                },
+                t(
+                  'Selected privacy pages staged. Upload every referenced data chunk and privacy page before continuing server preflight.',
+                ),
+              )
+            }
+          >
+            {t('Stage selected privacy pages')}
           </AdminButton>
         </div>
       </details>

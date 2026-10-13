@@ -124,6 +124,8 @@ export async function assertIndexedArchiveStorageReferencesAbsent(ctx: MutationC
   assert(!await ctx.db.query('backupImports').withIndex('vectorArchiveStorage', q => q.eq('manifest.vectorArchiveStorageId', storageId)).first() &&
     !await ctx.db.query('backupImports').withIndex('localArchiveStorage', q => q.eq('localArchiveStorageId', storageId)).first() &&
     !await ctx.db.query('backupLargeChunks').withIndex('storage', q => q.eq('storageId', storageId)).first() &&
+    !await ctx.db.query('backupPrivacyChunks').withIndex('storage', q => q.eq('storageId', storageId)).first() &&
+    !await ctx.db.query('travelPrivacyChunkEvidencePages').withIndex('storage', q => q.eq('storageId', storageId)).first() &&
     !await ctx.db.query('backupLargeJobs').withIndex('manifestStorage', q => q.eq('manifestStorageId', storageId)).first() &&
     !await ctx.db.query('coldHistoryArchives').withIndex('storage', q => q.eq('storageId', storageId)).first() &&
     !await ctx.db.query('coldHistoryChunks').withIndex('storage', q => q.eq('storageId', storageId)).first() &&
@@ -149,7 +151,8 @@ export function archiveHasStrongStorageReference(value: unknown, storageId: stri
 export async function assertNestedArchiveStorageReferencesAbsent(ctx: MutationCtx, storageId: Id<'_storage'>) {
   const tables = ['backupImports', 'backupLargeJobs', 'backupLargeRows', 'coldHistoryArchives',
     'coldArchiveMirrorJobs', 'travelPrivacyArchiveObjects', 'travelPrivacyChunkObjects', 'travelPrivacyChunkRows',
-    'travelPrivacyChunkReplacements', 'travelPrivacyChunkManifestRewrites'] as const;
+    'travelPrivacyChunkReplacements', 'travelPrivacyChunkManifestRewrites',
+    'backupPrivacyRows', 'backupPrivacyChunks', 'travelPrivacyChunkEvidencePages'] as const;
   let bytes = 0;
   for (const table of tables) {
     const rows = await ctx.db.query(table).take(129);

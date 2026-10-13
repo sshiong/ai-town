@@ -1,3 +1,4 @@
+import type { LocalArchiveProof, LocalSanitizedChunkManifest } from '../../../convex/federation/travelPrivacyLocalChunkManifest';
 import { useLocale } from '../../i18n';
 import { useEffect, useRef, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
@@ -25,6 +26,7 @@ type Job = {
   selection: Selection;
   coldHistoryFiles?: SelectiveManifest['coldHistoryFiles'] | null;
   error?: string;
+  archivePrivacyState?: string | null;
 };
 const status = makeFunctionReference<'query', JobArgs, Job>('federation/backupSelective:status');
 const listJobs = makeFunctionReference<'query', { adminToken: string }, Job[]>(
@@ -38,7 +40,7 @@ const advance = makeFunctionReference<'action', JobArgs, Job>(
 const getManifest = makeFunctionReference<
   'action',
   JobArgs,
-  { manifest: SelectiveManifest; signature: string }
+  { manifest: SelectiveManifest | LocalSanitizedChunkManifest; signature: string; localProof?: LocalArchiveProof }
 >('federation/backupSelective:getManifest');
 const getChunk = makeFunctionReference<'action', JobArgs & { index: number }, string>(
   'federation/backupSelective:getChunk',
@@ -122,7 +124,7 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
       if (['COMPLETE', 'FAILED', 'CANCELLED'].includes(result.state)) break;
     }
   }
-  async function download(kind: 'manifest' | 'chunk' | 'folder') {
+  async function download(kind: 'manifest' | 'chunk' | 'folder' | 'privacy') {
     if (!jobId) return;
     let password = encrypted ? passphrase : '';
     setPassphrase('');
@@ -143,7 +145,7 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
         if (folder) await writeArchiveText(folder, name, output);
         else downloadJsonText(output, name);
       };
-      if (kind !== 'chunk') await write(JSON.stringify(manifest), 'manifest', 'manifest');
+      if (kind === 'manifest' || kind === 'folder') await write(JSON.stringify(manifest), 'manifest', 'manifest');
       if (kind === 'folder') {
         for (const c of manifest.manifest.chunks)
           await write(
@@ -151,6 +153,14 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
             `chunk-${c.index}`,
             'chunk',
           );
+        if (manifest.manifest.format === 'ai-town-local-sanitized-chunks')
+          for (const c of manifest.manifest.privacyChunks ?? [])
+            await write(JSON.stringify(await convex.action(makeFunctionReference<'action'>('federation/backupPrivacyChunks:getChunk'),
+              { adminToken, jobId, pageNumber: c.index })), `privacy-${c.index}`, 'chunk');
+      } else if (kind === 'privacy' && manifest.manifest.format === 'ai-town-local-sanitized-chunks') {
+        for (const c of manifest.manifest.privacyChunks ?? [])
+          await write(JSON.stringify(await convex.action(makeFunctionReference<'action'>('federation/backupPrivacyChunks:getChunk'),
+            { adminToken, jobId, pageNumber: c.index })), `privacy-${c.index}`, 'chunk');
       } else if (kind === 'chunk') {
         if (chunkIndex >= manifest.manifest.chunks.length)
           throw new Error(t('All chunks have been downloaded.'));
@@ -453,6 +463,10 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
             >
               {t('Download manifest')}
             </AdminButton>
+            {job.archivePrivacyState === 'LOCAL_SANITIZED' && <AdminButton disabled={!!task.pending || !downloadReady} onClick={() =>
+              void task.run(t('Downloading privacy evidence chunks'), () => download('privacy'), t('Privacy evidence chunks downloaded.'))}>
+              {t('Download privacy evidence chunks')}
+            </AdminButton>}
             <AdminButton
               disabled={!!task.pending || !downloadReady || chunkIndex >= job.chunkCount}
               onClick={() =>

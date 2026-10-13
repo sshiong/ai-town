@@ -1,3 +1,4 @@
+import { assertPrivacyChunksStaged, stagedPrivacyTombstone, restoreStagedPrivacyPage } from './backupPrivacyChunks';
 import { localArchiveExportSnapshot, readLocalArchiveManifest, validateLocalChunk, createLocalArchiveProof, assertArchiveExportUnchanged, type LocalSanitizedChunkManifest } from './travelPrivacyLocalChunkManifest';
 import { validateLargeImportManifest, largeImportAuthenticationMetadata, assertLargeDerivativeClearedVisits } from './backupLargeLocalImport';
 import { trackedMutation as mutation, trackedInternalMutation as internalMutation } from '../maintenanceFunctions';
@@ -92,6 +93,8 @@ function publicJob(job: Job) {
     processedChunks: job.processedChunks,
     recordCount: job.recordCount,
     bytes: job.bytes,
+    privacyChunkCount: (job.kind === 'export' ? job.metadata?.archivePrivacyChunkCount : job.metadata?.derivativePrivacyChunkCount) ?? 0,
+    uploadedPrivacyChunks: job.metadata?.uploadedPrivacyChunks ?? 0,
     error: job.error,
     exportAttribution: job.kind === 'export' ? job.metadata?.exportAttribution : undefined,
     canResume: job.state === 'FAILED',
@@ -731,7 +734,7 @@ export const saveImportChunk = internalMutation({
       return false;
     }
     const rows = await validateChunk(chunk, a.expected);
-    await assertBackupPrivacy(ctx.db, { [chunk.table]: rows }, job.source.townId);
+    await assertBackupPrivacy(ctx.db, { [chunk.table]: rows }, job.source.townId, key => stagedPrivacyTombstone(ctx.db, job._id, key));
     for (const [rowIndex, row] of rows.entries()) {
       if (chunk.table === 'coldHistoryFiles') await validateColdLargeRow(row);
       if (chunk.table === 'modelMemoryVectors') await validateGenerationEvidence(row);
@@ -863,6 +866,7 @@ export const beginValidation = internalMutation({
   handler: async (ctx, a) => {
     const job = await owned(ctx, a.jobId);
     if (job.phase !== 'STAGING') throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    assertPrivacyChunksStaged(job);
     if (job.metadata.uploadedChunks !== job.chunkCount) throw new Error('BACKUP_UPLOAD_INCOMPLETE');
     await ctx.db.patch(job._id, {
       state: 'VALIDATING',
@@ -893,7 +897,7 @@ export const validatePage = internalMutation({
       }
       const m = row.metadata;
       await assertBackupPrivacy(ctx.db, { [row.table]: [{ ...m, _id: row.sourceId }] }, job.source.townId,
-        sourcePrivacy ? async key => !!(await relatedRow(ctx, job._id, 'travelPrivacyTombstones', key)) : undefined);
+        async key => await stagedPrivacyTombstone(ctx.db, job._id, key) || !!(sourcePrivacy && await relatedRow(ctx, job._id, 'travelPrivacyTombstones', key)));
       await validateMemoryBackupRelations(row.table, { ...m, _id: row.sourceId }, async id => {
         const target = await sourceRow(ctx, job._id, id);
         return target ? { table: target.table, row: { ...target.metadata, _id: target.sourceId } } : null;
@@ -1232,7 +1236,7 @@ export const applyChunk = internalMutation({
       const sourcePrivacy = await ctx.db.query('backupLargeRows').withIndex('job_table', q =>
         q.eq('jobId', job._id).eq('role', 'SOURCE').eq('table', 'travelPrivacyTombstones')).first();
       await assertBackupPrivacy(ctx.db, { [chunk.table]: chunk.rows.map(decodeRow) }, job.source.townId,
-        sourcePrivacy ? async key => !!(await relatedRow(ctx, job._id, 'travelPrivacyTombstones', key)) : undefined);
+        async key => await stagedPrivacyTombstone(ctx.db, job._id, key) || !!(sourcePrivacy && await relatedRow(ctx, job._id, 'travelPrivacyTombstones', key)));
     }
     const skip =
       !rollback &&
@@ -1410,8 +1414,15 @@ export const restoreDerivedPrivacyPage = internalMutation({
     const job = await owned(ctx, a.jobId);
     const count = job.metadata?.derivativeClearedVisitsCount;
     if (job.phase !== 'DERIVED_PRIVACY' || job.processedChunks !== a.offset ||
-      !Number.isSafeInteger(count) || a.visits.length !== Math.min(20, count - a.offset) || !a.visits.length)
+      !Number.isSafeInteger(count) || (!job.metadata?.derivativePrivacyChunkCount &&
+        (a.visits.length !== Math.min(20, count - a.offset) || !a.visits.length)))
       throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    if (job.metadata?.derivativePrivacyChunkCount) {
+      const page = await restoreStagedPrivacyPage(ctx, job, row => mappingFor(ctx, job, 'SOURCE', row));
+      await ctx.db.patch(job._id, { cursor: page.isDone ? null : page.continueCursor,
+        phase: page.isDone ? 'FINALIZE' : job.phase, processedChunks: a.offset + a.visits.length, updatedAt: Date.now() });
+      return;
+    }
     // The signed local manifest's cleared visit set is portable negative state.
     // No absent row/reference is synthesized or exempted from ordinary graph validation.
     await restorePrivacyRows(ctx, a.visits.map(visitId => ({ key: `visit:${visitId}`, visitId,
@@ -1808,7 +1819,7 @@ async function advanceColdValidation(ctx:ActionCtx,job:Job) {
   const files=(rows.coldHistoryFiles ?? []).map(r=>({owner:r.owner,file:r.file,authorAliases:r.authorAliases}));
   if (files.length) {
     const bytes=new TextEncoder().encode(JSON.stringify(files)).length;
-    await validateColdAttachments({coldHistoryFiles:files,signature:job.signature,manifest:{coldHistoryFiles:{count:files.length,bytes,digest:await digest(files)}}} as BackupBundle,rows,
+    await validateColdAttachments({coldHistoryFiles:files,signature:job.signature || job.metadata?.archiveLocalProof?.signature,manifest:{coldHistoryFiles:{count:files.length,bytes,digest:await digest(files)}}} as BackupBundle,rows,
       files.some(f => f.file.version === 2));
   }
   await ctx.runMutation(writeRef('saveColdValidation'),{jobId:job._id,expectedCursor:job.cursor,cursor:data.continueCursor,done:data.isDone,sourceIds:data.rows});

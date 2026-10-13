@@ -5,7 +5,7 @@ export const chunkRole = v.union(v.literal('SOURCE'), v.literal('OLD'), v.litera
 export const chunkEvidence = v.object({
   sourceId: v.string(), table: v.string(), rowIndex: v.number(),
   worldId: v.optional(v.string()), playerId: v.optional(v.string()), ownerGlobalId: v.optional(v.string()),
-  visitId: v.optional(v.string()), conversationId: v.optional(v.string()), transcriptId: v.optional(v.string()),
+  visitId: v.optional(v.string()), conversationId: v.optional(v.string()), conversationPlayerIds: v.optional(v.array(v.string())), transcriptId: v.optional(v.string()),
   relation: v.optional(v.string()), memoryId: v.optional(v.string()), memoryType: v.optional(v.string()),
   relatedMemoryIds: v.array(v.string()), evidenceMemoryIds: v.array(v.string()),
   inputId: v.optional(v.string()), parentArchiveId: v.optional(v.string()), storageIds: v.array(v.string()),
@@ -45,5 +45,5 @@ export const travelPrivacyChunkTables = {
     .index('source', ['scanId', 'backupJobId', 'role', 'evidence.sourceId', 'evidence.table'])
     .index('relation', ['scanId', 'backupJobId', 'role', 'evidence.table', 'evidence.relation'])
     .index('owner', ['scanId', 'backupJobId', 'role', 'evidence.table', 'evidence.ownerGlobalId'])
-    .index('selected', ['scanId', 'selected']),
+    .index('selected', ['scanId', 'selected']).index('backup_selected', ['scanId', 'backupJobId', 'role', 'selected']),
 };

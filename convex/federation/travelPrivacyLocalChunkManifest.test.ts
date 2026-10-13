@@ -1,3 +1,4 @@
+import { makeFunctionReference } from 'convex/server';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import schema from '../schema';
@@ -161,7 +162,7 @@ async function readerFixture(selective: boolean) {
   const { _id: _sourceId, _creationTime: _sourceTime, ...sourceFields } = f.sourceEvidence.manifest!.source;
   await t.run(ctx => ctx.db.insert('federationIdentity', { ...sourceFields,
     ...keys, townId: 'reader-local-town', deploymentInstanceId: 'reader-local-instance' } as any));
-  const jobId = await t.run(ctx => ctx.db.insert('backupLargeJobs', {
+  const jobId = await t.run(async ctx => ctx.db.insert('backupLargeJobs', {
     kind: 'export', state: 'COMPLETE', phase: 'COMPLETE', tableIndex: 0, cursor: null,
     chunkCount: f.local.chunks.length, processedChunks: 0, recordCount: 2, bytes: 1, createdAt: 1, updatedAt: 1,
     source: f.sourceEvidence.manifest!.source, ...(selective ? { mode: 'selective-archive' } : {}),
@@ -316,4 +317,86 @@ test('imported portable derivative pins its original archive ID, digest and expl
     { ...job, metadata: { ...metadata, archiveLocalManifestDigest: undefined } },
   ]) await expect(assertLocalArchiveOwner(f.local, changed as Doc<'backupLargeJobs'>)).rejects.toThrow('LOCAL_ARCHIVE_ARCHIVE_ID_MISMATCH');
   await expect(assertLocalArchiveOwner({ ...f.local, derivedAt: 3 }, job)).rejects.toThrow('LOCAL_ARCHIVE_DIGEST_MISMATCH');
+});
+
+test('v2 physical privacy descriptors authenticate more than 500 identifier rows without embedding them in the manifest', async () => {
+  const { validatePrivacyChunk } = await import('./backupPrivacyChunks');
+  const f = await fixture();
+  const privacyChunks = [];
+  let chain = await digest([]);
+  const pages = [];
+  for (let pageNumber = 0; pageNumber < 6; pageNumber++) {
+    const chunk = { index: pageNumber, table: 'travelPrivacyTombstones', rows: Array.from({ length: 100 }, (_, n) =>
+      encodeRow({ key: pageNumber === 0 && n === 0 ? 'visit:cleared-visit' : `memory:erased-${pageNumber * 100 + n}`,
+        visitId: 'cleared-visit', worldId: 'original-world', ownerGlobalId: 'owner', playerId: 'p:0', createdAt: 2 })) };
+    const entry = await descriptor(chunk);
+    pages.push(chunk); privacyChunks.push(entry); chain = await digest([chain, pageNumber, entry.digest]);
+  }
+  const local = await createLocalChunkManifest({ ...f.local, privacyChunks, privacyCount: 600, privacyChainDigest: chain });
+  const proof = await createLocalArchiveProof(local, f.localSigner, f.localSigner.sign);
+  expect(local.version).toBe(2);
+  expect(JSON.stringify(local)).not.toContain('memory:erased-599');
+  expect(await validateLocalChunkManifest(local, { localProof: proof }, { portable: true })).toEqual(local);
+  expect((await validatePrivacyChunk(pages[5], privacyChunks[5])).length).toBe(100);
+  await expect(validatePrivacyChunk({ ...pages[5], rows: pages[5].rows.slice(1) }, privacyChunks[5])).rejects.toThrow('PRIVACY_CHUNK_INVALID');
+  await expect(validateLocalChunkManifest({ ...local, privacyChunks: privacyChunks.slice(1) }, { localProof: proof }, { portable: true })).rejects.toThrow('PRIVACY_DESCRIPTOR_INVALID');
+  await expect(validateLocalChunkManifest({ ...local, privacyCount: 599 }, { localProof: proof }, { portable: true })).rejects.toThrow('PRIVACY_EVIDENCE_INCOMPLETE');
+  await expect(validateLocalChunkManifest({ ...local, privacyChainDigest: await digest([]) }, { localProof: proof }, { portable: true })).rejects.toThrow('PRIVACY_EVIDENCE_INCOMPLETE');
+  const old = { ...await descriptor({ index: local.chunks.length, table: 'worlds', rows: [] }), role: 'OLD' as const, encoding: 'RAW' as const };
+  const mixed = await createLocalChunkManifest({ ...local, chunks: [...local.chunks, old] });
+  const portable = await portableLocalChunkManifest(mixed);
+  expect(portable.privacyChunks).toEqual(privacyChunks);
+  expect(portable.chunks.some(row => row.role === 'OLD')).toBe(false);
+});
+
+test('physical privacy pages stage with authenticated descriptors, reject missing pages, remap owners and block old memories/conversations', async () => {
+  const { assertPrivacyChunksStaged, restoreStagedPrivacyPage } = await import('./backupPrivacyChunks');
+  const { assertBackupPrivacy } = await import('./backupPrivacy');
+  const f = await fixture();
+  const t = convexTest(schema, { '../_generated/server.ts': () => import('../_generated/server'),
+    '../federation/backupPrivacyChunks.ts': () => import('./backupPrivacyChunks') });
+  process.env.FEDERATION_ADMIN_TOKEN = 'privacy-sidecar-test-admin-token';
+  const adminToken = process.env.FEDERATION_ADMIN_TOKEN;
+  const worlds = await t.run(async ctx => ({ source: await ctx.db.insert('worlds', { nextId: 0, players: [], agents: [], conversations: [] }),
+    target: await ctx.db.insert('worlds', { nextId: 0, players: [], agents: [], conversations: [] }) }));
+  const pages = [];
+  const privacyChunks = [];
+  let chain = await digest([]);
+  for (let pageNumber = 0; pageNumber < 6; pageNumber++) {
+    const rows = Array.from({ length: 100 }, (_, n) => ({ key: pageNumber === 0 && n === 0 ? 'visit:cleared-visit'
+      : pageNumber === 0 && n === 1 ? `conversation:${worlds.source}:c:1` : `memory:erased-${pageNumber * 100 + n}`,
+      visitId: 'cleared-visit', worldId: worlds.source, ownerGlobalId: 'original-owner', playerId: 'p:0', createdAt: 2 }));
+    const page = { index: pageNumber, table: 'travelPrivacyTombstones', rows: rows.map(encodeRow) }, d = await descriptor(page);
+    pages.push(page); privacyChunks.push(d); chain = await digest([chain, pageNumber, d.digest]);
+  }
+  const local = await createLocalChunkManifest({ ...f.local, privacyChunks, privacyCount: 600, privacyChainDigest: chain });
+  const proof = await createLocalArchiveProof(local, f.localSigner, f.localSigner.sign);
+  const manifestStorageId = await t.action(ctx => ctx.storage.store(new Blob([JSON.stringify(local)])));
+  const jobId = await t.run(async ctx => ctx.db.insert('backupLargeJobs', { kind: 'import', state: 'STAGING', phase: 'STAGING',
+    tableIndex: 0, cursor: null, chunkCount: local.chunks.length, processedChunks: 0, recordCount: 0, bytes: 0,
+    source: f.sourceEvidence.manifest!.source, manifestStorageId, createdAt: 2, updatedAt: 2,
+    metadata: { archiveImportedFromId: local.archiveId, archiveLocalManifestDigest: await digest(local), archiveLocalProof: proof,
+      archiveLocalProofFingerprint: `sha256:${await digest(proof.publicKey)}`, derivativePrivacyChunkCount: 6, uploadedPrivacyChunks: 0 } }));
+  const stage = makeFunctionReference<'action'>('federation/backupPrivacyChunks:stageChunk');
+  await expect(t.action(stage, { adminToken, jobId, pageNumber: 0, chunk: JSON.stringify({ ...pages[0], rows: pages[0].rows.slice(1) }) })).rejects.toThrow('PRIVACY_CHUNK_INVALID');
+  for (const page of pages.slice(0, 5)) await t.action(stage, { adminToken, jobId, pageNumber: page.index, chunk: JSON.stringify(page) });
+  await expect(t.run(async ctx => assertPrivacyChunksStaged((await ctx.db.get(jobId))!))).rejects.toThrow('CHUNKS_INCOMPLETE');
+  await t.action(stage, { adminToken, jobId, pageNumber: 5, chunk: JSON.stringify(pages[5]) });
+  await t.action(stage, { adminToken, jobId, pageNumber: 5, chunk: JSON.stringify(pages[5]) });
+  expect((await t.run(ctx => ctx.db.get(jobId)))!.metadata.uploadedPrivacyChunks).toBe(6);
+  let done = false, count = 0;
+  while (!done) {
+    const result = await t.run(async ctx => {
+      const job = (await ctx.db.get(jobId))!;
+      const page = await restoreStagedPrivacyPage(ctx, job, async () => ({ [worlds.source]: worlds.target, 'original-owner': 'target-owner' }));
+      await ctx.db.patch(jobId, { cursor: page.isDone ? null : page.continueCursor });
+      return { done: page.isDone, count: page.page.length };
+    });
+    done = result.done; count += result.count;
+  }
+  expect(count).toBe(600);
+  const grave = await t.run(ctx => ctx.db.query('travelPrivacyTombstones').withIndex('key', q => q.eq('key', 'memory:erased-599')).unique());
+  expect(grave).toMatchObject({ worldId: worlds.target, ownerGlobalId: 'target-owner', playerId: 'p:0' });
+  await expect(t.run(ctx => assertBackupPrivacy(ctx.db, { memories: [{ _id: 'old-reflection', data: { type: 'reflection', relatedMemoryIds: ['erased-599'] } }] }, 'source-town'))).rejects.toThrow('BACKUP_PRIVACY_REDACTED');
+  await expect(t.run(ctx => assertBackupPrivacy(ctx.db, { messages: [{ worldId: worlds.source, conversationId: 'c:1', text: 'old private conversation' }] }, 'source-town'))).rejects.toThrow('BACKUP_PRIVACY_REDACTED');
 });

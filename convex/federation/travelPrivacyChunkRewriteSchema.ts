@@ -18,6 +18,16 @@ const localDescriptor = v.object({
   encoding: v.union(v.literal('RAW'), v.literal('SELECTIVE')),
 });
 export const travelPrivacyChunkRewriteTables = {
+  backupPrivacyChunks: defineTable({ jobId: v.id('backupLargeJobs'), pageNumber: v.number(), descriptor,
+    storageId: v.id('_storage'), rewriteId: v.optional(v.id('travelPrivacyChunkRewrites')),
+  }).index('job_page', ['jobId', 'pageNumber']).index('storage', ['storageId']),
+  backupPrivacyRows: defineTable({ jobId: v.id('backupLargeJobs'), key: v.string(), row: v.any(),
+  }).index('job_key', ['jobId', 'key']),
+  travelPrivacyChunkEvidencePages: defineTable({ manifestId: v.id('travelPrivacyChunkManifestRewrites'), pageNumber: v.number(),
+    rows: v.array(v.any()), state: v.union(v.literal('PREPARED'), v.literal('UPLOADED'), v.literal('PUBLISHED')),
+    operationId: v.optional(v.id('archiveUploadOperations')), operationRevision: v.optional(v.number()),
+    storageId: v.optional(v.id('_storage')), descriptor: v.optional(descriptor),
+  }).index('manifest_page', ['manifestId', 'pageNumber']).index('operation', ['operationId']).index('storage', ['storageId']),
   travelPrivacyChunkRewrites: defineTable({
     scanId: v.id('travelPrivacyChunkScans'),
     privacyJobId: v.id('travelPrivacyJobs'),
@@ -127,6 +137,9 @@ export const travelPrivacyChunkRewriteTables = {
     sourcePublicKey: v.string(),
     clearedVisits: v.array(v.string()),
     localProof: v.optional(v.any()),
+    evidenceCursor: v.optional(v.union(v.string(), v.null())), evidenceStarted: v.optional(v.boolean()),
+    evidenceComplete: v.optional(v.boolean()), evidencePageCount: v.optional(v.number()),
+    evidenceCount: v.optional(v.number()), evidenceChainDigest: v.optional(v.string()),
   })
     .index('rewrite_job', ['rewriteId', 'backupJobId'])
     .index('operation', ['operationId'])

@@ -57,13 +57,30 @@ export async function loadLargeArchiveManifest(value: unknown): Promise<LoadedLa
   }
   if (format !== 'ai-town-local-sanitized-chunks') throw new Error('This import panel supports RAW town archives only.');
   const local = archiveRecord(header.manifest, ['format', 'version', 'schemaVersion', 'sourceSignatureValid', 'archiveId',
-    'derivedAt', 'chunks', 'clearedVisits', 'sourceEvidence']);
+    'derivedAt', 'chunks', 'clearedVisits', 'sourceEvidence', 'privacyChunks', 'privacyCount', 'privacyChainDigest']);
   if (header.sourceSignatureValid !== false || local.sourceSignatureValid !== false || header.signature !== '')
     throw new Error('A derived archive cannot claim that its current bytes have the original source signature.');
-  if (local.version !== 1 || local.schemaVersion !== 1 || typeof local.archiveId !== 'string' ||
+  if ((local.version !== 1 && local.version !== 2) || local.schemaVersion !== 1 || typeof local.archiveId !== 'string' ||
     typeof local.derivedAt !== 'number' || !Number.isFinite(local.derivedAt) || !Array.isArray(local.chunks) ||
     !Array.isArray(local.clearedVisits) || !local.clearedVisits.length ||
     local.clearedVisits.some(visit => typeof visit !== 'string' || !visit)) throw new Error(invalidMetadata);
+  if (local.version === 2) {
+    if (!Array.isArray(local.privacyChunks) || !local.privacyChunks.length ||
+      !Number.isSafeInteger(local.privacyCount) || Number(local.privacyCount) < 1 ||
+      typeof local.privacyChainDigest !== 'string' || !local.privacyChainDigest) throw new Error(invalidMetadata);
+    let count = 0;
+    for (const [index, chunk] of local.privacyChunks.entries()) {
+      const descriptor = archiveRecord(chunk, ['index', 'table', 'count', 'bytes', 'digest']);
+      if (descriptor.index !== index || descriptor.table !== 'travelPrivacyTombstones' ||
+        !Number.isSafeInteger(descriptor.count) || Number(descriptor.count) < 1 || Number(descriptor.count) > 100 ||
+        !Number.isSafeInteger(descriptor.bytes) || Number(descriptor.bytes) < 1 || Number(descriptor.bytes) > 1024 * 1024 ||
+        typeof descriptor.digest !== 'string' || !descriptor.digest) throw new Error(invalidMetadata);
+      count += Number(descriptor.count);
+    }
+    if (count !== local.privacyCount) throw new Error(invalidMetadata);
+  } else if (local.privacyChunks !== undefined || local.privacyCount !== undefined || local.privacyChainDigest !== undefined) {
+    throw new Error(invalidMetadata);
+  }
   for (const chunk of local.chunks) {
     const descriptor = archiveRecord(chunk, ['index', 'table', 'count', 'bytes', 'digest', 'role', 'encoding']);
     if (descriptor.role === 'OLD') throw new Error('Private rollback chunks cannot be imported as a portable town archive.');
@@ -156,4 +173,12 @@ export async function writeArchiveText(
 
 export function validRecoveryPassphrase(value: string) {
   return value.length >= 12 && new TextEncoder().encode(value).length <= 1024;
+}
+
+/** Independent privacy pages never share the main SOURCE/EXPORT chunk namespace. */
+export function archivePrivacyPageNumber(json: string) {
+  const chunk = archiveRecord(JSON.parse(json), ['index', 'table', 'rows']);
+  if (chunk.table !== 'travelPrivacyTombstones' || !Number.isSafeInteger(chunk.index) ||
+    Number(chunk.index) < 0 || !Array.isArray(chunk.rows)) throw new Error(invalidMetadata);
+  return Number(chunk.index);
 }

@@ -7,6 +7,7 @@ import {
   writeArchiveText,
   loadLargeArchiveManifest,
   confirmedLargeArchiveSigner,
+  archivePrivacyPageNumber,
 } from './archiveFiles';
 
 describe('archive file safety', () => {
@@ -137,5 +138,55 @@ describe('RAW manifest UI shape and signer confirmation', () => {
     await expect(loadLargeArchiveManifest({ ...header, localProof: undefined })).rejects.toThrow('metadata is invalid');
     header.manifest.sourceEvidence.manifest.format = 'ai-town-selective-archive';
     await expect(loadLargeArchiveManifest(header)).rejects.toThrow('RAW town archives only');
+  });
+});
+
+function v2DerivedManifest() {
+  const v1 = derivedManifest();
+  return { ...v1, manifest: { ...v1.manifest, version: 2,
+    privacyChunks: [{ index: 0, table: 'travelPrivacyTombstones', count: 2, bytes: 100, digest: 'unverified-privacy-digest' }],
+    privacyCount: 2, privacyChainDigest: 'unverified-privacy-chain' } };
+}
+
+describe('independent RAW v2 privacy pages', () => {
+  test('preserves the main indices and independent privacy index with manual local signer confirmation', async () => {
+    const header = v2DerivedManifest();
+    const loaded = await loadLargeArchiveManifest(header);
+    expect(loaded.archive).toBe(header);
+    expect(header.manifest.chunks.map(chunk => chunk.index)).toEqual([0]);
+    expect(header.manifest.privacyChunks.map(chunk => chunk.index)).toEqual([0]);
+    expect(confirmedLargeArchiveSigner(loaded, '')).toBe(false);
+    expect(confirmedLargeArchiveSigner(loaded, loaded.declaredLocalSignerFingerprint!)).toBe(true);
+  });
+  test.each(['missing pages', 'missing count', 'missing chain', 'empty pages', 'index', 'table', 'count', 'bytes', 'metadata'])
+    ('rejects malformed v2 privacy header: %s', async kind => {
+      const header = v2DerivedManifest();
+      const manifest: Record<string, unknown> = header.manifest;
+      if (kind === 'missing pages') delete manifest.privacyChunks;
+      if (kind === 'missing count') delete manifest.privacyCount;
+      if (kind === 'missing chain') delete manifest.privacyChainDigest;
+      if (kind === 'empty pages') manifest.privacyChunks = [];
+      if (kind === 'index') header.manifest.privacyChunks[0].index = 1;
+      if (kind === 'table') header.manifest.privacyChunks[0].table = 'worlds';
+      if (kind === 'count') header.manifest.privacyCount = 3;
+      if (kind === 'bytes') header.manifest.privacyChunks[0].bytes = 1024 * 1024 + 1;
+      if (kind === 'metadata') Object.assign(header.manifest.privacyChunks[0], { role: 'SOURCE' });
+      await expect(loadLargeArchiveManifest(header)).rejects.toThrow();
+    });
+  test('rejects privacy fields on legacy v1 archives', async () => {
+    const header = v2DerivedManifest(); header.manifest.version = 1;
+    await expect(loadLargeArchiveManifest(header)).rejects.toThrow('metadata is invalid');
+  });
+  test('routes privacy pages by their own index without inspecting filenames', () => {
+    expect(archivePrivacyPageNumber('{"index":3,"table":"travelPrivacyTombstones","rows":[]}')).toBe(3);
+  });
+  test.each([
+    '{"index":0,"table":"worlds","rows":[]}',
+    '{"index":-1,"table":"travelPrivacyTombstones","rows":[]}',
+    '{"index":0.5,"table":"travelPrivacyTombstones","rows":[]}',
+    '{"index":0,"table":"travelPrivacyTombstones","rows":[],"role":"OLD"}',
+    '{"index":0,"table":"travelPrivacyTombstones","rows":null}',
+  ])('rejects invalid independent page routing: %s', json => {
+    expect(() => archivePrivacyPageNumber(json)).toThrow();
   });
 });

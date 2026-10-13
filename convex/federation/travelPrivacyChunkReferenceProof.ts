@@ -70,7 +70,7 @@ export function storageLeaves(value: unknown, normalize: (id: string) => Id<'_st
  */
 export function nestedArchiveRoots(value: unknown, table?: string, path = '', result: PhysicalLeaf[] = [], depth = 0): PhysicalLeaf[] {
   requireProof(depth <= 100, 'REFERENCE_NESTING_UNKNOWN');
-  if (table && !['backupImports', 'backupLargeJobs', 'backupLargeChunks', 'coldHistoryArchives', 'coldHistoryChunks'].includes(table)) table = undefined;
+  if (table && !['backupImports', 'backupLargeJobs', 'backupLargeChunks', 'backupPrivacyChunks', 'coldHistoryArchives', 'coldHistoryChunks'].includes(table)) table = undefined;
   if (typeof value === 'string' && /^\s*[\[{]/.test(value)) {
     let decoded: unknown;
     try { decoded = JSON.parse(value); } catch { requireProof(!table, 'REFERENCE_FORMAT_UNKNOWN'); return result; }
@@ -87,14 +87,14 @@ export function nestedArchiveRoots(value: unknown, table?: string, path = '', re
   if (table) {
     const fields = table === 'backupImports' ? ['localArchiveStorageId', 'manifest.vectorArchiveStorageId'] :
       table === 'backupLargeJobs' ? ['manifestStorageId'] :
-      ['backupLargeChunks', 'coldHistoryArchives', 'coldHistoryChunks'].includes(table) ? ['storageId'] : [];
+      ['backupLargeChunks', 'backupPrivacyChunks', 'coldHistoryArchives', 'coldHistoryChunks'].includes(table) ? ['storageId'] : [];
     for (const field of fields) {
       const id = field.split('.').reduce<unknown>((parent, key) => parent && typeof parent === 'object' ? (parent as Record<string, unknown>)[key] : undefined, row);
       if (id === undefined) {
-        requireProof(!['backupLargeChunks', 'coldHistoryChunks'].includes(table), 'REFERENCE_POINTER_UNKNOWN'); continue;
+        requireProof(!['backupLargeChunks', 'backupPrivacyChunks', 'coldHistoryChunks'].includes(table), 'REFERENCE_POINTER_UNKNOWN'); continue;
       }
       requireProof(typeof id === 'string' && id.length > 0 && id.length <= 256, 'REFERENCE_POINTER_UNKNOWN');
-      const maxBytes = ['backupLargeChunks', 'coldHistoryChunks'].includes(table) ? 900_000 : table === 'backupImports' ? 5 * 1024 * 1024 : MAX_OBJECT_BYTES;
+      const maxBytes = ['backupLargeChunks', 'backupPrivacyChunks', 'coldHistoryChunks'].includes(table) ? 900_000 : table === 'backupImports' ? 5 * 1024 * 1024 : MAX_OBJECT_BYTES;
       result.push({ storageId: id as Id<'_storage'>, path: path ? `${path}.${field}` : field, maxBytes });
     }
   }
@@ -264,10 +264,10 @@ async function preflightRow(ctx: DB, p: Proof, table: string, row: any) {
   return row;
 }
 function physicalPointer(table: string, path: string) {
-  return (['backupImports', 'backupLargeJobs', 'backupLargeChunks', 'coldHistoryArchives', 'coldHistoryChunks'].includes(table) &&
+  return (['backupImports', 'backupLargeJobs', 'backupLargeChunks', 'backupPrivacyChunks', 'coldHistoryArchives', 'coldHistoryChunks'].includes(table) &&
     ['localArchiveStorageId', 'manifest.vectorArchiveStorageId', 'manifestStorageId', 'storageId'].includes(path)) ||
-    (['travelPrivacyArchiveObjects', 'travelPrivacyChunkObjects', 'travelPrivacyChunkReplacements', 'travelPrivacyChunkManifestRewrites'].includes(table) &&
-      ['originalStorageId', 'replacementStorageId', 'manifestStorageId', 'sourceManifestStorageId'].includes(path));
+    (['travelPrivacyArchiveObjects', 'travelPrivacyChunkObjects', 'travelPrivacyChunkReplacements', 'travelPrivacyChunkManifestRewrites', 'travelPrivacyChunkEvidencePages'].includes(table) &&
+      ['originalStorageId', 'replacementStorageId', 'manifestStorageId', 'sourceManifestStorageId', 'storageId'].includes(path));
 }
 function producerObjectLimit(kind: string) {
   if (['LARGE_CHUNK', 'SELECTIVE_CHUNK', 'CHUNK_PRIVACY_REPLACEMENT'].includes(kind)) return 900_000;
@@ -316,7 +316,7 @@ export const rowPage = internalMutation({ args, handler: async (ctx, a) => {
         // Their strings still create STRONG edges above; any canonical pointer is independently mandatory.
         const auditOriginal = ['travelPrivacyArchiveObjects', 'travelPrivacyChunkObjects', 'travelPrivacyChunkReplacements'].includes(table) && leaf.path === 'originalStorageId';
         if (!auditOriginal || await ctx.db.system.get(leaf.storageId)) {
-          const limit = ['backupLargeChunks', 'coldHistoryChunks', 'travelPrivacyChunkObjects', 'travelPrivacyChunkReplacements'].includes(table) ? 900_000 :
+          const limit = ['backupLargeChunks', 'backupPrivacyChunks', 'coldHistoryChunks', 'travelPrivacyChunkObjects', 'travelPrivacyChunkReplacements', 'travelPrivacyChunkEvidencePages'].includes(table) ? 900_000 :
             ['backupImports', 'travelPrivacyArchiveObjects'].includes(table) ? 5 * 1024 * 1024 : MAX_OBJECT_BYTES;
           objects += await enqueue(ctx, p, leaf.storageId, limit);
         }

@@ -33,6 +33,7 @@ import {
 } from './backupLargeHelpers';
 
 const modules = {
+  '../federation/backupPrivacyChunks.ts': () => import('./backupPrivacyChunks'),
   '../federation/archiveUploadProvenance.ts': () => import('./archiveUploadProvenance'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/backupLarge.ts': () => import('./backupLarge'),
@@ -528,17 +529,25 @@ test.each(['clone', 'restore', 'migrate'] as const)('real RAW export, sensitive 
   let checkpoint = 'source setup';
   try {
     const source = await town(0);
-    await source.t.run(async ctx => {
+    const deletedSourceIds = await source.t.run(async ctx => {
+      const erased: Id<'memories'>[] = [];
       for (const [visitId, description] of [['removed-visit', 'selected-private-travel-prose'],
         ['retained-visit', 'other-private-travel-prose']]) {
-        await ctx.db.insert('memories', { worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId,
+        const memoryId = await ctx.db.insert('memories', { worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId,
           description, importance: 8, lastAccess: 1, data: { type: 'travel', visitId, eventId: `${visitId}-event`,
             hostTownId: 'foreign', participants: [], occurredAt: 1 } });
+        if (visitId === 'removed-visit') {
+          erased.push(memoryId);
+          erased.push(await ctx.db.insert('memories', { worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId,
+            description: 'selected-private-reflection-prose', importance: 8, lastAccess: 1,
+            data: { type: 'reflection', relatedMemoryIds: [memoryId] } }));
+        }
         await ctx.db.insert('visitLedger', { visitId, worldId: source.worldId, homePlayerId: 'p:0',
           agentGlobalId: source.agentGlobalId, homeTownId: 'town:large', hostTownId: 'foreign',
           homeDeploymentEpoch: 1, hostDeploymentEpoch: 1, agentAuthorityEpoch: 1, visitLeaseVersion: 1,
           leaseExpiry: 1, state: 'COMPLETED', role: 'home', fencingToken: 'fixture-fence', profile: {}, createdAt: 1, updatedAt: 1 });
       }
+      return erased;
     });
     checkpoint = 'original export';
     const { jobId: exportJobId } = await source.t.mutation(mutation('startExport'), { adminToken });
@@ -571,6 +580,7 @@ test.each(['clone', 'restore', 'migrate'] as const)('real RAW export, sensitive 
     for (const entry of local.chunks) chunks.push(JSON.parse(await source.t.action(action('getChunk'), { adminToken,
       jobId: exportJobId, index: entry.index })));
     expect(JSON.stringify(chunks)).not.toContain('selected-private-travel-prose');
+    expect(JSON.stringify(chunks)).not.toContain('selected-private-reflection-prose');
     expect(JSON.stringify(chunks)).toContain('other-private-travel-prose');
     const target = mode === 'clone' ? convexTest(schema, modules) : source.t;
     checkpoint = 'formal derivative import creation';
@@ -580,6 +590,10 @@ test.each(['clone', 'restore', 'migrate'] as const)('real RAW export, sensitive 
       mode, sourceStopped: true, ...(mode === 'clone' ? { targetEndpoint: 'https://local-derived-copy.example' } : {}) });
     checkpoint = 'formal derivative staging';
     for (const chunk of chunks) await target.action(action('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(chunk) });
+    for (const page of local.privacyChunks ?? []) {
+      const chunk = await source.t.action(makeFunctionReference<'action'>('federation/backupPrivacyChunks:getChunk'), { adminToken, jobId: exportJobId, pageNumber: page.index });
+      await target.action(makeFunctionReference<'action'>('federation/backupPrivacyChunks:stageChunk'), { adminToken, jobId, pageNumber: page.index, chunk: JSON.stringify(chunk) });
+    }
     checkpoint = 'formal derivative preflight';
     await drive(target, jobId, 'import', 'READY');
     checkpoint = 'formal derivative apply';
@@ -591,6 +605,12 @@ test.each(['clone', 'restore', 'migrate'] as const)('real RAW export, sensitive 
     expect(await target.run(ctx => ctx.db.query('engines').filter(q => q.eq(q.field('running'), true)).collect())).toEqual([]);
     expect(await target.run(ctx => ctx.db.query('visitLedger').collect())).toEqual([]);
     expect(await target.run(ctx => ctx.db.query('travelPrivacyTombstones').withIndex('key', q => q.eq('key', 'visit:removed-visit')).unique())).toBeTruthy();
+    for (const id of deletedSourceIds) {
+      expect(await target.run(ctx => ctx.db.query('travelPrivacyTombstones').withIndex('key', q => q.eq('key', `memory:${id}`)).unique())).toBeTruthy();
+      await expect(target.run(ctx => assertBackupPrivacy(ctx.db, { memories: [{ _id: id, worldId: source.worldId,
+        data: { type: 'reflection', relatedMemoryIds: [] }, description: 'old private reflection attempt' }] }, originalManifest.source.townId)))
+        .rejects.toThrow('BACKUP_PRIVACY_REDACTED');
+    }
     const imported = (await target.run(ctx => ctx.db.query('backupImports').order('desc').first()))!;
     expect(imported.manifest.sourceSignatureValid).toBe(false);
     expect(imported.sourceTownId).toBe(originalManifest.source.townId);

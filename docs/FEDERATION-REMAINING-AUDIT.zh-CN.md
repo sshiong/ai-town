@@ -426,3 +426,16 @@ K 真实分块验收的环境收尾已完成：沿同一已验证 prefix/MAC rec
 不得扩大此结论：期间后台 hourly 存储维护实际运行，诊断只有 federationClock、storageCleanupJobs、storageUsageScans、storageUsageSnapshots 四张运行状态表变更；维护任务 COMPLETE 且 deletedRows/compactedActions/compactedEvents 均为零。收尾明示这四张表以及四个单调 revision 的例外，不回退它们、不冒称全库字节不变。最初 teardown 与计划的超限事务都已回滚；随后共享空表摘要/单次 snapshot、每25行单个分组摘要降低系统调用。完整 system scheduler 历史扫描依然遇到实际资源边界，停止了仅核查 runner（offset0未删除），schedulerHistoryAudit 标为 NOT_VERIFIED_RESOURCE_BOUND。收尾以实际终态 privacy job/rewrites、不可变精确计划、每页全部外部业务/存储基线保护；不宣称完整调度历史核验通过。
 
 临时模块已移除并用 pristine exact 0e61f70 重部署 K；独立调用四个临时 query 均确认函数不存在、身份 ACTIVE、合成访次为空。其后正式 7ba2fee 成功部署 J/K（不包含临时模块）。I/J 环境因 Docker OOM 退出导致后续复验 fetch failed，保留卷重启后正在恢复；已停止 F/G/H 历史测试容器释放内存，没有删卷或重置身份。新分页 preflight/RAW恢复本轮已有冻结测试证据，但不是新版本实机大规模删除证据；40k/2GiB实际payload、完整负状态 sidecar、SELECTIVE派生恢复、真实浏览器与全方案残项依然开放。
+
+
+## v2 分页删除证据与选择性派生恢复（2026-10-14）
+
+本地派生格式 v2 新增独立 `privacyChunks` 描述符、总记录数和页链摘要。本地签署证明认证当前清单及这些文件；原始来源签名仍只认证内嵌来源证据，不能冒作当前文件的签名。证据页仅存已删除的 visit/memory/conversation 标识与归属，物理页最多 100 行，和 SOURCE/OLD 原分块索引分开。生成器只从本份归档已选中的 SOURCE/EXPORT 行生成记忆与对话证据，不携带私有 OLD-only 标识或另一归档的记录。
+
+RAW 与 SELECTIVE 导入需明确确认可信本地签署指纹，上传全部数据及证据页后才可预检；完整性校验拒绝缺页、摘要/页链/数量/字节篡改。恢复分页合并负状态并保留旧标识，防止以后导入旧反思或对话重新带回已删除内容。选择性恢复对 conversation 按保留的参与者归属并裁剪跳过居民的编号；memory 保持严格单居民归属。普通选择性负状态与派生页共用这项映射。
+
+三张新分页表纳入归档引用版本保护；已发布页和 writer journal 均为物理 JSON 引用根。通用退休上传清理也核对新 canonical 与嵌套引用，不能删除仍被页引用的文件。RAW/SELECTIVE 界面支持独立证据页下载与上传及原浏览器加解密；SELECTIVE 导入显式构造允许参数，避免导出包装字段触发严格 API 校验。v1 的 visit-only 边界继续明确显示。
+
+根代理首次冻结九套回归：285 项通过、2 项失败。第一项的两次上传预期已被新增的第三次受追踪证据页上传改变；第二项在旧 200 步 fixture 上限处正进入 DELETE 的分页 ROWS 检查，实际进度为 revision19/proofRows0。修正上传契约断言并仅扩大该 fixture 的分页驱动预算后，第二项定向通过；所有实际删除、归档顺序和 native-purge 断言保留。更正冻结树的 12 套相关回归 283 项全部通过（295.074 秒），包括完整选择性恢复与 40k 描述符容量测试。此前首次冻结 RAW 完整套件也通过（240.116 秒）；共享参与者投影与严格边界更新后的最终 RAW 三模式定向复验 3/3 通过（32.967 秒），其余 61 项在该次定向运行未执行。
+
+已独立通过的证据包括 SOURCE/OLD/多归档范围隔离、600 条负状态页完整上传及旧反思/对话拒绝、参与者超界拒绝，及 UI 文件/加密/语言 56 项、SELECTIVE 严格参数 2 项。更正冻结树 Convex 类型检查与生产构建通过，仍有既有大包提示。真实浏览器归档恢复整链路、新版实机删除和 40k/2GiB 实际 payload 尚未验证；前述汉化浏览器复核只覆盖语言与管理登录入口，不覆盖归档业务。

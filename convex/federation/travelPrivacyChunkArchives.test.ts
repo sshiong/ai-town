@@ -1,3 +1,4 @@
+import { inspectionEvidence } from './travelPrivacyChunkArchives';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import schema from '../schema';
@@ -400,4 +401,13 @@ test('inspection retry reuses the newest matching parent revision scan', async (
   const retry = await f.t.mutation(mutationRef('travelPrivacyChunkArchives/startInspection'), { jobId: f.jobId });
   expect(second).not.toBe(first);
   expect(retry).toBe(second);
+});
+
+test('conversation deletion scope preserves every bounded participant and rejects truncation', () => {
+  const row = { _id: 'conversation-row', id: 'c:1', worldId: 'world', participants: ['p:0', 'p:1'] };
+  expect(inspectionEvidence('archivedConversations', encodeRow(row), 0, false))
+    .toMatchObject({ conversationId: 'c:1', conversationPlayerIds: ['p:0', 'p:1'] });
+  for (const participants of [Array.from({ length: 101 }, (_, index) => `p:${index}`), ['p:0', 1], undefined])
+    expect(() => inspectionEvidence('archivedConversations', encodeRow({ ...row, participants }), 0, false))
+      .toThrow('CHUNK_CONVERSATION_PARTICIPANTS_INVALID');
 });

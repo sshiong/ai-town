@@ -1,3 +1,4 @@
+import { createLocalArchiveProof } from './travelPrivacyLocalChunkManifest';
 import { drivePrivacyWithStorageMetadata } from '../../tests/helpers/privacyTestDriver';
 import * as selectiveImportFunctions from './backupSelectiveImport';
 import { seedMemoryBackupEvidence, assertMemoryBackupEvidence, useLegacyMemoryBackupDigests } from './memoryBackupTestHelpers';
@@ -10,12 +11,13 @@ import { v } from 'convex/values';
 import schema from '../schema';
 import { internalAction } from '../_generated/server';
 import { Id } from '../_generated/dataModel';
-import { createIdentityKeys, sign } from './security';
+import { createIdentityKeys, sign, digest, verifySignature } from './security';
 import { decodeRow, encodeRow } from './backupHelpers';
 import { LargeChunk, descriptor } from './backupLargeHelpers';
 import { SelectiveManifest } from './backupSelectiveHelpers';
 import { Options } from './backupSelectiveImportHelpers';
 const modules = {
+  '../federation/backupPrivacyChunks.ts': () => import('./backupPrivacyChunks'),
   '../federation/archiveUploadProvenance.ts': () => import('./archiveUploadProvenance'),
   '../_generated/server.ts': () => import('../_generated/server'),
   '../federation/backupSelective.ts': () => import('./backupSelective'),
@@ -424,6 +426,42 @@ test('selective privacy export ignores time bounds while excluding unrelated res
   expect(records.find(row => row.playerIds)!.playerIds).toEqual(['p:0']);
   const config = await archive(source, { scope: 'config-only', categories: ['configuration'], agentGlobalIds: [] });
   expect(config.chunks.filter(chunk => chunk.table === 'travelPrivacyTombstones').flatMap(chunk => chunk.rows)).toEqual([]);
+});
+
+test('native selective conversation deletion keeps mapped participants when explicit owner is skipped, without target local-ID collision', async () => {
+  const source = await fixture('mixed-source', 0), target = await fixture('mixed-target', 0);
+  const sourceKey = `conversation:${source.worldId}:c:removed-mixed`;
+  await source.t.run(async ctx => {
+    await ctx.db.insert('travelPrivacyTombstones', { key: sourceKey, visitId: 'mixed-cleared', createdAt: 1,
+      worldId: source.worldId, ownerGlobalId: source.globals[0], playerId: 'p:0', playerIds: ['p:0', 'p:1'] });
+    await ctx.db.insert('travelPrivacyTombstones', { key: 'memory:mixed-strict-skipped', visitId: 'mixed-cleared', createdAt: 1,
+      worldId: source.worldId, ownerGlobalId: source.globals[0], playerId: 'p:0', playerIds: ['p:0', 'p:1'] });
+  });
+  const one = await archive(source, { agentGlobalIds: [source.globals[1]] });
+  const oneNegatives = one.chunks.filter(chunk => chunk.table === 'travelPrivacyTombstones')
+    .flatMap(chunk => chunk.rows.map(decodeRow)).map(envelope => decodeRow(envelope.record));
+  expect(oneNegatives.map(row => row.key)).toContain(sourceKey);
+  expect(oneNegatives.find(row => row.key === sourceKey)).toMatchObject({ playerIds: ['p:1'] });
+  expect(oneNegatives.find(row => row.key === sourceKey)?.ownerGlobalId).toBeUndefined();
+  expect(oneNegatives.find(row => row.key === sourceKey)?.playerId).toBeUndefined();
+  expect(oneNegatives.map(row => row.key)).not.toContain('memory:mixed-strict-skipped');
+  const exported = await archive(source, { scope: 'agents-selected', agentGlobalIds: source.globals });
+  const configured = options(target, exported);
+  configured.owners[0] = { sourceAgentGlobalId: source.globals[0], operation: 'skip' };
+  const result = await apply(target, await start(target, exported, configured));
+  const retained = result.targetOwners[0];
+  expect(retained.sourceAgentGlobalId).toBe(source.globals[1]);
+  expect(retained.playerId).not.toBe('p:0'); // source skipped p:0 collides with an unrelated live target resident.
+  const graves = await target.t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect());
+  const conversation = graves.filter(row => row.key.startsWith('conversation:'));
+  expect(conversation).toHaveLength(2);
+  for (const row of conversation) {
+    expect(row.worldId).toBe(target.worldId);
+    expect(row.playerIds).toEqual([retained.playerId]);
+    expect(row.ownerGlobalId).toBeUndefined();
+    expect(row.playerId).toBeUndefined();
+  }
+  expect(graves.map(row => row.key)).not.toContain('memory:mixed-strict-skipped');
 });
 
 test('selective import rejects an incoming cleared memory and leaves the destination intact', async () => {
@@ -1513,4 +1551,132 @@ test('configuration-only explicitly merges resident denials while resident clone
     expect((await dst.t.run(ctx => ctx.db.query('residentModelBindings').collect())).map(row => row.agentGlobalId).sort())
       .toEqual([...dst.globals].sort());
   }
+});
+
+
+test.each(['clone', 'merge', 'restore'] as const)('formal selective export → sensitive clear → locally proven %s imports current bytes and negative pages', async operation => {
+  const source = await fixture(`derived-${operation}`, 1);
+  await source.t.run(async ctx => {
+    await ctx.db.patch(source.memories[0], { description: 'derived-selected-private-prose', data: { type: 'travel', visitId: 'derived-cleared',
+      eventId: 'derived-event', hostTownId: 'town:host', participants: [], occurredAt: 1 } });
+    await ctx.db.insert('visitLedger', { visitId: 'derived-cleared', worldId: source.worldId, homePlayerId: 'p:0',
+      agentGlobalId: source.globals[0], homeTownId: `town:derived-${operation}`, hostTownId: 'town:host',
+      homeDeploymentEpoch: 1, hostDeploymentEpoch: 1, agentAuthorityEpoch: 1, visitLeaseVersion: 1,
+      leaseExpiry: 1, fencingToken: 'fixture-fence', state: 'COMPLETED', role: 'home', profile: {}, createdAt: 1, updatedAt: 1 });
+  });
+  if (operation === 'merge') await source.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', {
+    key: 'memory:derived-skipped-owner', visitId: 'derived-skipped', createdAt: 1, worldId: source.worldId,
+    ownerGlobalId: source.globals[1], playerId: 'p:1' }));
+  if (operation === 'merge') await source.t.run(ctx => ctx.db.insert('travelPrivacyTombstones', {
+    key: `conversation:${source.worldId}:c:derived-mixed`, visitId: 'derived-mixed', createdAt: 1, worldId: source.worldId,
+    ownerGlobalId: source.globals[1], playerId: 'p:1', playerIds: ['p:0', 'p:1'] }));
+  const cold = operation === 'clone' ? await signedConversation(source, 0) : undefined;
+  const original = await archive(source, operation === 'merge' ? { scope: 'agents-selected', agentGlobalIds: source.globals } : {});
+  const exportJobId = original.manifest.exportId as Id<'backupLargeJobs'>;
+  jest.useFakeTimers();
+  try {
+    const privacyJobId: Id<'travelPrivacyJobs'> = await source.t.mutation(ref('travelPrivacy', 'inspect', 'mutation'), {
+      adminToken, visitId: 'derived-cleared', scope: 'SENSITIVE' });
+    await source.t.finishAllScheduledFunctions(() => jest.runAllTimers(), 2000);
+    expect((await source.t.run(ctx => ctx.db.get(privacyJobId)))!.state).toBe('READY');
+    await source.t.mutation(ref('travelPrivacy', 'start', 'mutation'), { adminToken, jobId: privacyJobId });
+    await drivePrivacyWithStorageMetadata(source.t, privacyJobId);
+    expect((await source.t.run(ctx => ctx.db.get(privacyJobId)))!.state).toBe('COMPLETE');
+  } finally { jest.useRealTimers(); }
+  const derived = await source.t.action(ref('backupSelective', 'getManifest', 'action'), { adminToken, jobId: exportJobId });
+  expect(derived.signature).toBe('');
+  expect(derived.manifest.format).toBe('ai-town-local-sanitized-chunks');
+  expect(derived.localProof).toBeDefined();
+  expect(derived.manifest.sourceEvidence.manifest).toEqual(original.manifest);
+  expect(await verifySignature(original.manifest, derived.manifest.sourceEvidence.signature, original.manifest.source.publicKey)).toBe(true);
+  expect(await verifySignature(derived.manifest, original.signature, original.manifest.source.publicKey)).toBe(false);
+  const chunks: LargeChunk[] = [];
+  for (const entry of derived.manifest.chunks) chunks.push(JSON.parse(await source.t.action(ref('backupSelective', 'getChunk', 'action'), {
+    adminToken, jobId: exportJobId, index: entry.index })));
+  expect(JSON.stringify(chunks)).not.toContain('derived-selected-private-prose');
+  const privacyPages: LargeChunk[] = [];
+  for (const entry of derived.manifest.privacyChunks ?? []) privacyPages.push(await source.t.action(ref('backupPrivacyChunks', 'getChunk', 'action'),
+    { adminToken, jobId: exportJobId, pageNumber: entry.index }));
+  if (operation === 'merge') {
+    const mixed = { key: `conversation:${source.worldId}:c:derived-sidecar-mixed`, visitId: 'derived-mixed', createdAt: 1,
+      worldId: source.worldId, ownerGlobalId: source.globals[1], playerId: 'p:1', playerIds: ['p:0', 'p:1'] };
+    const mixedPage: LargeChunk = { index: privacyPages.length, table: 'travelPrivacyTombstones', rows: [encodeRow(mixed)] };
+    privacyPages.push(mixedPage);
+    const privacyChunks = [...derived.manifest.privacyChunks, await descriptor(mixedPage)];
+    let privacyChainDigest = await digest([]);
+    for (const entry of privacyChunks) privacyChainDigest = await digest([privacyChainDigest, entry.index, entry.digest]);
+    derived.manifest = { ...derived.manifest, privacyChunks, privacyCount: derived.manifest.privacyCount + 1, privacyChainDigest };
+    const signingIdentity = (await source.t.run(ctx => ctx.db.query('federationIdentity').unique()))!;
+    derived.localProof = await createLocalArchiveProof(derived.manifest, signingIdentity, value => sign(value, signingIdentity.privateKeyEncrypted));
+  }
+  const target = operation === 'restore' ? source : await fixture(`derived-target-${operation}`, 0);
+  const configured = options(target, original, operation);
+  if (operation === 'merge') configured.owners[1] = { sourceAgentGlobalId: source.globals[1], operation: 'skip' };
+  const fingerprint = `sha256:${await digest(derived.localProof.publicKey)}`;
+  await expect(target.t.action(aa('createImport'), { adminToken, ...configured, manifest: derived.manifest, signature: '', localProof: derived.localProof })).rejects.toThrow('SIGNER_CONFIRMATION_REQUIRED');
+  await expect(target.t.action(aa('createImport'), { adminToken, ...configured, manifest: derived.manifest, signature: '', localProof: derived.localProof,
+    expectedLocalProofFingerprint: 'sha256:wrong' })).rejects.toThrow('SIGNER_MISMATCH');
+  const changedManifest = { ...derived.manifest, derivedAt: derived.manifest.derivedAt + 1 };
+  await expect(target.t.action(aa('createImport'), { adminToken, ...configured, manifest: changedManifest, signature: '',
+    localProof: derived.localProof, expectedLocalProofFingerprint: fingerprint })).rejects.toThrow('LOCAL_PROOF_INVALID');
+  await expect(target.t.action(aa('createImport'), { adminToken, ...configured, manifest: derived.manifest, signature: original.signature,
+    localProof: derived.localProof, expectedLocalProofFingerprint: fingerprint })).rejects.toThrow('SOURCE_SIGNATURE_NOT_CURRENT');
+  const targetSnapshot = await target.t.run(async ctx => ({ world: await ctx.db.get(target.worldId),
+    memories: await ctx.db.query('memories').collect(), bindings: await ctx.db.query('residentModelBindings').collect(),
+    storage: await ctx.db.system.query('_storage').collect() }));
+  let { jobId }: { jobId: Id<'backupLargeJobs'> } = await target.t.action(aa('createImport'), { adminToken, ...configured,
+    manifest: derived.manifest, signature: '', localProof: derived.localProof, expectedLocalProofFingerprint: fingerprint });
+  const saved = (await target.t.run(ctx => ctx.db.get(jobId)))!;
+  const tamperedDigest = await digest({ tampered: true });
+  await target.t.run(ctx => ctx.db.patch(jobId, { metadata: { ...saved.metadata, archiveLocalManifestDigest: tamperedDigest } }));
+  await expect(target.t.action(aa('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(chunks[0]) })).rejects.toThrow('DIGEST_MISMATCH');
+  await target.t.run(ctx => ctx.db.patch(jobId, { metadata: saved.metadata }));
+  for (const chunk of chunks) await target.t.action(aa('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(chunk) });
+  if (derived.manifest.privacyChunks?.length) {
+    await expect(target.t.mutation(am('validatePage'), { jobId })).rejects.toThrow('PRIVACY_CHUNKS_INCOMPLETE');
+    for (const entry of derived.manifest.privacyChunks) {
+      const chunk = privacyPages[entry.index];
+      await target.t.action(ref('backupPrivacyChunks', 'stageChunk', 'action'), { adminToken, jobId, pageNumber: entry.index, chunk: JSON.stringify(chunk) });
+    }
+  }
+  if (operation === 'clone') {
+    const ready = await drive(target, jobId, 'READY');
+    await target.t.mutation(am('startApply'), { adminToken, jobId, expectedPlanDigest: ready.planDigest,
+      expectedTargetDigest: ready.targetDigest, confirmChanges: true });
+    await drive(target, jobId, 'APPLY_COLD');
+    await target.t.action(aa('advanceImport'), { adminToken, jobId });
+    await target.t.mutation(am('cancel'), { adminToken, jobId });
+    await drive(target, jobId, 'CANCELLED');
+    const restored = await target.t.run(async ctx => ({ world: await ctx.db.get(target.worldId),
+      memories: await ctx.db.query('memories').collect(), bindings: await ctx.db.query('residentModelBindings').collect() }));
+    expect(restored).toEqual({ world: targetSnapshot.world, memories: targetSnapshot.memories, bindings: targetSnapshot.bindings });
+    ({ jobId } = await target.t.action(aa('createImport'), { adminToken, ...configured, manifest: derived.manifest,
+      signature: '', localProof: derived.localProof, expectedLocalProofFingerprint: fingerprint }));
+    for (const chunk of chunks) await target.t.action(aa('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(chunk) });
+    for (const entry of derived.manifest.privacyChunks ?? []) {
+      const chunk = privacyPages[entry.index];
+      await target.t.action(ref('backupPrivacyChunks', 'stageChunk', 'action'), { adminToken, jobId, pageNumber: entry.index, chunk: JSON.stringify(chunk) });
+    }
+  }
+  const result = await apply(target, jobId);
+  if (cold) {
+    const owner = await restoredColdOwner(target, result.targetOwners[0].agentGlobalId);
+    expect(await target.t.action(ref('coldHistoryFiles', 'exportFile', 'action'), owner)).toEqual(cold.file);
+  }
+  expect((await target.t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).map(row => row.key))
+    .toEqual(expect.arrayContaining(['visit:derived-cleared', `memory:${source.memories[0]}`]));
+  if (operation === 'merge') expect((await target.t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect())).map(row => row.key))
+    .not.toContain('memory:derived-skipped-owner');
+  if (operation === 'merge') {
+    const mixedRows = (await target.t.run(ctx => ctx.db.query('travelPrivacyTombstones').collect()))
+      .filter(row => row.key.startsWith('conversation:') && row.visitId === 'derived-mixed');
+    expect(mixedRows).toHaveLength(4);
+    for (const row of mixedRows) {
+      expect(row.playerIds).toEqual([result.targetOwners[0].playerId]);
+      expect(row.playerIds).not.toContain('p:1'); // unrelated live target resident has this colliding source ID.
+      expect(row.ownerGlobalId).toBeUndefined();
+      expect(row.playerId).toBeUndefined();
+    }
+  }
+  expect((await target.t.run(ctx => ctx.db.query('memories').collect())).some(row => row.description === 'derived-selected-private-prose')).toBe(false);
 });

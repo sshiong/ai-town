@@ -1,3 +1,5 @@
+import { assertPrivacyChunksStaged, stagedPrivacyTombstone, restoreStagedPrivacyPage } from './backupPrivacyChunks';
+import { validateSelectiveImportManifest, selectiveImportAuthenticationMetadata, assertSelectiveDerivativeClearedVisits } from './backupSelectiveLocalImport';
 import { validateGenerationEvidence, validateVectorSource, trustedVectorSource } from './vectorEvidence';
 import { trackedMutation as mutation, trackedInternalMutation as internalMutation } from '../maintenanceFunctions';
 import { v } from 'convex/values';
@@ -12,7 +14,7 @@ import {
 } from '../_generated/server';
 import { Doc, Id, TableNames } from '../_generated/dataModel';
 import { assertArchiveCanStart } from './maintenanceLock';
-import { assertBackupPrivacy, privacyRowBelongsToResident, restorePrivacyRows } from './backupPrivacy';
+import { assertBackupPrivacy, restorePrivacyRows } from './backupPrivacy';
 import { assertNoIdentityConflict } from './identityConflict';
 import { requireAdmin, digest } from './security';
 import { BackupRow, BackupBundle, decodeRow, encodeRow, stripSystem } from './backupHelpers';
@@ -44,7 +46,6 @@ import {
   rowOwner,
   inBounds,
   validateSelectiveChunk,
-  validateSelectiveManifest,
 } from './backupSelectiveHelpers';
 import {
   Options,
@@ -54,6 +55,8 @@ import {
   importOptions,
   key,
   validateOptions,
+  selectivePrivacyOwners,
+  selectivePrivacyProjection,
 } from './backupSelectiveImportHelpers';
 import { configuredResourceLimits } from './resources';
 import { validateConnection } from '../models/profiles';
@@ -309,6 +312,8 @@ export const createImportJob = internalMutation({
     adminToken: v.string(),
     manifest: v.any(),
     signature: v.string(),
+    localProof: v.optional(v.any()),
+    expectedLocalProofFingerprint: v.optional(v.string()),
     manifestStorageId: v.id('_storage'),
     ...importOptions,
   },
@@ -317,8 +322,8 @@ export const createImportJob = internalMutation({
     await assertArchiveCanStart(ctx);
     await assertNoIdentityConflict(ctx);
     const local = await stable(ctx);
-    const manifest = a.manifest as SelectiveManifest;
-    await validateSelectiveManifest(manifest, a.signature);
+    const plan = await validateSelectiveImportManifest(a.manifest, a.signature, a.localProof, undefined, a.expectedLocalProofFingerprint);
+    const manifest = plan.manifest;
     if (manifest.version !== 2 || manifest.usage !== 'selective-transfer')
       throw new Error('SELECTIVE_READ_ONLY_ARCHIVE_NOT_IMPORTABLE');
     if (manifest.source.mode === 'QUARANTINED') throw new Error('TOWN_CLONE_CONFLICT');
@@ -449,6 +454,7 @@ export const createImportJob = internalMutation({
       manifestStorageId: a.manifestStorageId,
       signature: a.signature,
       metadata: {
+        ...await selectiveImportAuthenticationMetadata(plan, a.localProof, a.expectedLocalProofFingerprint),
         options,
         vectorSourceTrusted: await trustedVectorSource(ctx.db, manifest.source as { townId: string; publicKey: string; fingerprint: string }),
         includeVectors: manifest.includeVectors,
@@ -474,10 +480,10 @@ export const createImportJob = internalMutation({
   },
 });
 export const createImport = action({
-  args: { adminToken: v.string(), manifest: v.any(), signature: v.string(), ...importOptions },
+  args: { adminToken: v.string(), manifest: v.any(), signature: v.string(), localProof: v.optional(v.any()), expectedLocalProofFingerprint: v.optional(v.string()), ...importOptions },
   handler: async (ctx, a): Promise<{ jobId: Id<'backupLargeJobs'> }> => {
     requireAdmin(a.adminToken);
-    await validateSelectiveManifest(a.manifest as SelectiveManifest, a.signature);
+    await validateSelectiveImportManifest(a.manifest, a.signature, a.localProof, undefined, a.expectedLocalProofFingerprint);
     const manifestStorageId = await ctx.storage.store(
       new Blob([JSON.stringify(a.manifest)], { type: 'application/json' }),
     );
@@ -540,6 +546,7 @@ export const saveChunk = internalMutation({
       return false;
     }
     const envelopes = await validateSelectiveChunk(chunk, a.expected as ChunkDescriptor);
+    assertSelectiveDerivativeClearedVisits(chunk, j.metadata.archiveClearedVisits ?? []);
     for (const [rowIndex, e] of envelopes.entries()) {
       const id = e.kind === 'record' ? (decodeRow(e.record)._id as string) : e.sourceId;
       if (await source(ctx, j, id)) throw new Error('DUPLICATE_BACKUP_DOCUMENT_ID');
@@ -597,11 +604,14 @@ export const stageChunk = action({
     if (size(a.chunk) > MAX_CHUNK_BYTES + 200000) throw new Error('SELECTIVE_IMPORT_CHUNK_BUDGET');
     const blob = await ctx.storage.get(j.manifestStorageId!);
     if (!blob) throw new Error('BACKUP_CHUNK_STORAGE_MISSING');
-    const manifest = JSON.parse(await blob.text()) as SelectiveManifest;
+    const plan = await validateSelectiveImportManifest(JSON.parse(await blob.text()), j.signature ?? '',
+      j.metadata.archiveLocalProof, j.metadata.archiveLocalManifestDigest, j.metadata.archiveLocalProofFingerprint);
+    const manifest = plan.manifest;
     const chunk = JSON.parse(a.chunk) as LargeChunk;
     const expected = manifest.chunks[chunk.index];
     if (!expected) throw new Error('LARGE_BACKUP_CHUNK_MISMATCH');
     await validateSelectiveChunk(chunk, expected);
+    assertSelectiveDerivativeClearedVisits(chunk, j.metadata.archiveClearedVisits ?? []);
     const storageId = await ctx.storage.store(new Blob([a.chunk], { type: 'application/json' }));
     // Only a confirmed duplicate rejection makes this newly uploaded object disposable.
     if (
@@ -629,7 +639,7 @@ async function ownersFor(ctx: { db: DatabaseReader }, j: Job, r: Row): Promise<s
     envelope = record(r);
   const owner = rowOwner(row, m.selection);
   if (r.table === 'travelPrivacyTombstones')
-    return m.selection.owners.filter(owner => privacyRowBelongsToResident(row, owner)).map(owner => owner.agentGlobalId);
+    return selectivePrivacyOwners(row, m.selection).map(owner => owner.agentGlobalId);
   if (r.table === 'coldHistoryFiles') {
     const coldOwner = rowOwner(row.owner, m.selection);
     return coldOwner ? [coldOwner.agentGlobalId] : [];
@@ -668,8 +678,8 @@ async function checkRecord(ctx: { db: DatabaseReader }, j: Job, r: Row) {
     const sourcePrivacy = await ctx.db.query('backupLargeRows').withIndex('job_table', q =>
       q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', 'travelPrivacyTombstones')).first();
     await assertBackupPrivacy(ctx.db, { [r.table]: [row] }, j.source.townId,
-      sourcePrivacy ? async negativeKey => !!(await ctx.db.query('backupLargeRows').withIndex('job_relation', q =>
-        q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', 'travelPrivacyTombstones').eq('relationKey', negativeKey)).unique()) : undefined);
+      async negativeKey => await stagedPrivacyTombstone(ctx.db, j._id, negativeKey) || !!(sourcePrivacy && await ctx.db.query('backupLargeRows').withIndex('job_relation', q =>
+        q.eq('jobId', j._id).eq('role', 'SOURCE').eq('table', 'travelPrivacyTombstones').eq('relationKey', negativeKey)).unique()));
   }
   await validateMemoryBackupRelations(r.table, row, async id => {
     const target = await source(ctx, j, id);
@@ -834,6 +844,7 @@ export const validatePage = internalMutation({
       m = metadata(j);
     if (j.phase === 'STAGING') {
       if (m.uploaded !== j.chunkCount) throw new Error('BACKUP_UPLOAD_INCOMPLETE');
+      assertPrivacyChunksStaged(j);
       await ctx.db.patch(j._id, { state: 'VALIDATING', phase: 'VALIDATING', cursor: null });
       return;
     }
@@ -1143,7 +1154,7 @@ export const applyColdPage = internalMutation({
       if (!staged || staged.table !== 'coldHistoryFiles') throw new Error('BACKUP_COLD_FILES_SOURCE_INVALID');
       const row = data(staged), target = m.targetOwners.find(o => o.sourceAgentGlobalId === row.owner.agentGlobalId);
       if (target) {
-        await assertBackupPrivacy(ctx.db, { coldHistoryFiles: [row] }, j.source.townId);
+        await assertBackupPrivacy(ctx.db, { coldHistoryFiles: [row] }, j.source.townId, key => stagedPrivacyTombstone(ctx.db, j._id, key));
         if (!a.storageId) throw new Error('BACKUP_COLD_FILES_STORAGE_REQUIRED');
         const memory = await source(ctx, j, row.owner.memoryId);
         if (!memory?.newId) throw new Error('BACKUP_COLD_FILES_TARGET_MAPPING_REQUIRED');
@@ -1695,7 +1706,7 @@ export const applyPage = internalMutation({
       const targets = m.targetOwners.filter((t) => owners.includes(t.sourceAgentGlobalId));
       const row = data(r);
       if (targets.length)
-        await assertBackupPrivacy(ctx.db, { [r.table]: [row] }, j.source.townId);
+        await assertBackupPrivacy(ctx.db, { [r.table]: [row] }, j.source.townId, key => stagedPrivacyTombstone(ctx.db, j._id, key));
       if (r.table === 'travelPrivacyTombstones') {
         if (remapping && targets.length) {
           const targetWorld = targets[0].worldId;
@@ -1713,7 +1724,8 @@ export const applyPage = internalMutation({
             if (originalWorld === row.worldId)
               mapping[conversation] = await localId(ctx, j, 'conversation', originalWorld, conversation);
           }
-          await restorePrivacyRows(ctx, [row], mapping);
+          const projected = selectivePrivacyProjection(row, m.selection, m.targetOwners);
+          if (projected) await restorePrivacyRows(ctx, [projected.row], mapping);
         }
         await ctx.db.patch(r._id, { state: remapping ? 'APPLIED' : 'ALLOCATED' });
         continue;
@@ -1913,7 +1925,7 @@ export const clearVectors = internalMutation({
       .filter((q) => q.eq(q.field('state'), 'APPLIED'))
       .first();
     if (!memory) {
-      await ctx.db.patch(j._id, { phase: 'FINALIZE' });
+      await ctx.db.patch(j._id, { phase: j.metadata.derivativeClearedVisitsCount ? 'DERIVED_PRIVACY' : 'FINALIZE', cursor: null, processedChunks: 0 });
       return;
     }
     const vectors = await ctx.db
@@ -1922,6 +1934,45 @@ export const clearVectors = internalMutation({
       .take(20);
     for (const vector of vectors) await ctx.db.delete(vector._id);
     if (vectors.length < 20) await ctx.db.patch(memory._id, { state: 'VECTOR_CLEARED' });
+  },
+});
+export const restoreDerivedPrivacy = internalMutation({
+  args: { jobId: v.id('backupLargeJobs') },
+  handler: async (ctx, a) => {
+    const j = await owned(ctx, a.jobId), m = metadata(j);
+    if (j.phase !== 'DERIVED_PRIVACY') throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    if (j.metadata.derivativePrivacyChunkCount) {
+      const page = await restoreStagedPrivacyPage(ctx, j, async row => {
+        const projected = selectivePrivacyProjection(row, m.selection, m.targetOwners);
+        if (!projected) return null;
+        const { targets } = projected;
+        const mapping: Record<string, string> = {};
+        for (const target of targets) {
+          const owner = m.selection.owners.find(owner => owner.agentGlobalId === target.sourceAgentGlobalId)!;
+          mapping[owner.worldId] = target.worldId; mapping[owner.agentGlobalId] = target.agentGlobalId;
+          mapping[owner.playerId] = target.playerId;
+        }
+        if (row.key.startsWith('memory:')) {
+          const id = row.key.slice('memory:'.length), target = (await source(ctx, j, id))?.newId;
+          if (target) mapping[id] = target;
+        } else if (row.key.startsWith('conversation:') && targets.length) {
+          const parts = row.key.slice('conversation:'.length), separator = parts.indexOf(':');
+          const world = parts.slice(0, separator), conversation = parts.slice(separator + 1);
+          mapping[world] = targets[0].worldId;
+          if (world === row.worldId) mapping[conversation] = await localId(ctx, j, 'conversation', world, conversation);
+        }
+        return { mapping, row: projected.row };
+      });
+      await ctx.db.patch(j._id, { cursor: page.isDone ? null : page.continueCursor,
+        phase: page.isDone ? 'FINALIZE' : j.phase, updatedAt: Date.now() });
+    } else {
+      const visits: string[] = j.metadata.archiveClearedVisits ?? [];
+      const page = visits.slice(j.processedChunks, j.processedChunks + 20);
+      await restorePrivacyRows(ctx, page.map(visitId => ({ key: `visit:${visitId}`, visitId,
+        createdAt: j.metadata.derivativeDerivedAt })), {});
+      await ctx.db.patch(j._id, { processedChunks: j.processedChunks + page.length,
+        phase: j.processedChunks + page.length === visits.length ? 'FINALIZE' : j.phase, updatedAt: Date.now() });
+    }
   },
 });
 async function release(ctx: MutationCtx, j: Job, state: 'COMPLETE' | 'CANCELLED') {
@@ -2086,7 +2137,8 @@ export const advanceImport = action({
         const page = await ctx.runQuery(qref('coldPageData'), { jobId: j._id });
         for (const entry of page.entries) {
           const files = [entry.file], bytes = size(files);
-          await validateColdAttachments({ coldHistoryFiles: files, signature: j.signature,
+          // Current outer authentication was checked at staging; inner immutable cold signatures are validated here.
+          await validateColdAttachments({ coldHistoryFiles: files, signature: j.metadata.archiveLocalProof?.signature ?? j.signature,
             manifest: { coldHistoryFiles: { count: 1, bytes, digest: await digest(files) } } } as BackupBundle, entry.rows, entry.file.file.version === 2);
         }
         await ctx.runMutation(mref('saveColdPage'), { jobId: j._id, expectedCursor: j.cursor,
@@ -2158,6 +2210,7 @@ export const advanceImport = action({
         await ctx.runMutation(mref('repairMemoryProvenance'), { jobId: j._id });
       else if (j.phase === 'VECTOR_RESET')
         await ctx.runMutation(mref('clearVectors'), { jobId: j._id });
+      else if (j.phase === 'DERIVED_PRIVACY') await ctx.runMutation(mref('restoreDerivedPrivacy'), { jobId: j._id });
       else if (j.phase === 'FINALIZE') await ctx.runMutation(mref('finalize'), { jobId: j._id });
       else if (j.phase === 'ROLLBACK_DELETE')
         await ctx.runMutation(mref('rollbackDelete'), { jobId: j._id });

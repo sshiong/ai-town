@@ -442,3 +442,46 @@ test('a cyclic physical root observation reuses its checkpoint and finishes with
   await f.t.mutation(mutationRef('travelPrivacyChunkReferenceProof/finish'), { proofId: f.proofId });
   expect(await f.t.run(ctx => ctx.db.query('travelPrivacyChunkReferenceObjects').collect())).toHaveLength(1);
 });
+
+async function privacyEvidenceRoot(f: Fixture, storageId: Id<'_storage'>, writer: boolean) {
+  return f.t.run(async ctx => {
+    if (!writer) return ctx.db.insert('backupPrivacyChunks', { jobId: f.backupId, pageNumber: 0,
+      descriptor: { index: 0, table: 'travelPrivacyTombstones', count: 1, bytes: 1, digest: 'proof-root' }, storageId });
+    const manifestId = await ctx.db.insert('travelPrivacyChunkManifestRewrites', {
+      rewriteId: f.rewriteId, backupJobId: f.backupId, expectedProducerDigest: 'producer', producerRevision: 1,
+      state: 'COMPLETE', cursor: null, sourceSignature: '', sourcePublicKey: '', clearedVisits: [],
+    });
+    return ctx.db.insert('travelPrivacyChunkEvidencePages', { manifestId, pageNumber: 0,
+      rows: [], state: 'PUBLISHED', storageId });
+  });
+}
+test.each([false, true])('privacy sidecar physical root writer=%s is scanned before deletion', async writer => {
+  const f = await fixture();
+  const storageId = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify({ retainedAlias: f.storageId })])));
+  await privacyEvidenceRoot(f, storageId, writer);
+  await finish(f);
+  await expect(absent(f)).rejects.toThrow('STRONG_REFERENCE');
+  expect((await f.t.run(ctx => ctx.db.query('travelPrivacyChunkReferenceObjects').collect()))
+    .find(object => object.storageId === storageId)?.state).toBe('VERIFIED');
+});
+test.each([false, true])('privacy sidecar reference change writer=%s invalidates a ready generation', async writer => {
+  const f = await fixture();
+  const rowId = await privacyEvidenceRoot(f, f.replacementStorageId, writer);
+  await finish(f);
+  await expect(absent(f)).resolves.toMatchObject({ phase: 'READY' });
+  const before = await f.t.run(ctx => dataRevision(ctx.db, archiveReferenceRevisionKey));
+  await f.t.run(ctx => withEmbeddingRevision(ctx).db.patch(rowId, { storageId: f.storageId }));
+  expect(await f.t.run(ctx => dataRevision(ctx.db, archiveReferenceRevisionKey))).toBe(before + 1);
+  await expect(absent(f)).rejects.toThrow('REFERENCE_EPOCH_CHANGED');
+});
+test('staged privacy identifier rows invalidate archive proofs on tracked mutation', async () => {
+  const f = await fixture(); await finish(f);
+  await f.t.run(ctx => withEmbeddingRevision(ctx).db.insert('backupPrivacyRows', {
+    jobId: f.backupId, key: 'privacy-evidence', row: { nestedAlias: f.storageId },
+  }));
+  await expect(absent(f)).rejects.toThrow('REFERENCE_EPOCH_CHANGED');
+});
+test('encoded privacy sidecar metadata declares a physical nested root', () => {
+  expect(nestedArchiveRoots({ table: 'backupPrivacyChunks', rows: [encodeRow({ storageId: 'sidecar-id' })] }))
+    .toEqual([{ storageId: 'sidecar-id', path: 'rows[].storageId', maxBytes: 900_000 }]);
+});

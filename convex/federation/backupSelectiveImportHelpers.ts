@@ -1,3 +1,4 @@
+import { privacyRowBelongsToResident } from './backupPrivacy';
 import { Infer, v } from 'convex/values';
 import { BackupRow, stripSystem } from './backupHelpers';
 import { Selection } from './backupSelectiveHelpers';
@@ -162,4 +163,27 @@ export function canonicalFields(table: string, row: BackupRow) {
     };
   }
   return fields;
+}
+
+
+/** Conversation deletion belongs to its participants; memory deletion retains strict single-owner proof. */
+export function selectivePrivacyOwners(row: BackupRow, selection: Selection) {
+  if (typeof row.key === 'string' && row.key.startsWith('conversation:')) {
+    const participants: string[] = Array.isArray(row.playerIds) ? row.playerIds : typeof row.playerId === 'string' ? [row.playerId] : [];
+    if (participants.length) return selection.owners.filter(owner => owner.worldId === row.worldId && participants.includes(owner.playerId));
+  }
+  return selection.owners.filter(owner => privacyRowBelongsToResident(row, owner));
+}
+
+/** Never retain an unmapped participant ID: local player IDs repeat across worlds and deployments. */
+export function selectivePrivacyProjection(row: BackupRow, selection: Selection, targetOwners: TargetOwner[]) {
+  const owners = selectivePrivacyOwners(row, selection);
+  const targets = targetOwners.filter(target => owners.some(owner => owner.agentGlobalId === target.sourceAgentGlobalId));
+  if (row.worldId && !targets.length) return null;
+  if (row.key.startsWith('conversation:') && targets.length) {
+    const retained = owners.filter(owner => targets.some(target => target.sourceAgentGlobalId === owner.agentGlobalId));
+    const { ownerGlobalId: _owner, playerId: _player, playerIds: _participants, ...fields } = row;
+    return { row: { ...fields, playerIds: retained.map(owner => owner.playerId) }, targets };
+  }
+  return { row, targets };
 }

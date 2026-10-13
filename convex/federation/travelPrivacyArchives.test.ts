@@ -464,7 +464,9 @@ test('formal sensitive start clears OLD chunk and ordinary bundle before native 
   expect(report.archiveCoverage!.largeChunks).toBe('READY');
   await f.t.mutation(mutationRef('travelPrivacy/start'), { adminToken, jobId });
   expect((await currentJob(f.t, jobId))!.phase).toBe('CHUNK_REWRITE');
-  for (let n = 0; n < 200; n++) {
+  // New physical privacy pages add registered roots and emulator upload recovery passes.
+  // The original phase, native-purge and physical deletion assertions remain mandatory.
+  for (let n = 0; n < 1000; n++) {
     const job = (await currentJob(f.t, jobId))!;
     if (job.phase !== 'CHUNK_REWRITE') break;
     const latest = await f.t.run(ctx => ctx.db.system.query('_storage').order('desc').first());
@@ -485,6 +487,13 @@ test('formal sensitive start clears OLD chunk and ordinary bundle before native 
     else if ((await currentJob(f.t, jobId))!.archiveError) throw new Error((await currentJob(f.t, jobId))!.archiveError);
   }
   const afterChunks = (await currentJob(f.t, jobId))!;
+  if (afterChunks.phase !== 'ARCHIVE_REWRITE') {
+    const writer = await f.t.run(ctx => ctx.db.query('travelPrivacyChunkRewrites').first());
+    const proof = writer?.referenceProofId ?? writer?.preflightProofId;
+    const progress = proof ? await f.t.run(ctx => ctx.db.get(proof)) : undefined;
+    throw new Error(JSON.stringify({ phase: afterChunks.phase, writerPhase: writer?.phase, revision: writer?.revision,
+      proofPhase: progress?.phase, proofRows: progress?.rows, tableIndex: progress?.tableIndex, objects: progress?.objects }));
+  }
   expect(afterChunks.phase).toBe('ARCHIVE_REWRITE');
   expect(await f.t.run(ctx => ctx.db.get(f.memoryId))).not.toBeNull();
   expect(await f.t.run(ctx => ctx.db.system.get(old.stored[1].storageId))).toBeNull();

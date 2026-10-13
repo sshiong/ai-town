@@ -1,6 +1,6 @@
-import { localArchiveExportSnapshot, readLocalArchiveManifest, validateLocalChunk, assertArchiveExportUnchanged, type LocalSanitizedChunkManifest } from './travelPrivacyLocalChunkManifest';
+import { localArchiveExportSnapshot, readLocalArchiveManifest, validateLocalChunk, createLocalArchiveProof, assertArchiveExportUnchanged, type LocalSanitizedChunkManifest } from './travelPrivacyLocalChunkManifest';
 import { portableVector } from './vectorEvidence';
-import { privacyRowBelongsToResident } from './backupPrivacy';
+import { selectivePrivacyOwners } from './backupSelectiveImportHelpers';
 import { isMemoryBackupTable } from './memoryBackup';
 import { correctionHead, sourceKey } from '../agent/memorySources';
 import { v } from 'convex/values';
@@ -73,6 +73,7 @@ function view(j: Job) {
     updatedAt: j.updatedAt,
     error: j.error,
     coldHistoryFiles: j.metadata.coldHistoryFiles ?? null,
+    archivePrivacyState: j.archivePrivacyState ?? null,
   };
 }
 async function owned(ctx: { db: DatabaseReader }, id: Id<'backupLargeJobs'>) {
@@ -277,7 +278,7 @@ async function primary(db: DatabaseReader, table: string, row: BackupRow, s: Sel
     );
   const residents = ['agent-one', 'agents-selected'].includes(s.scope);
   if (table === 'travelPrivacyTombstones')
-    return s.owners.some(owner => privacyRowBelongsToResident(row, owner));
+    return selectivePrivacyOwners(row, s).length > 0;
   if (table === 'federationIdentity') return true;
   if (residents && ['worlds', 'maps'].includes(table))
     return s.owners.some((o) => o.worldId === (table === 'worlds' ? row._id : row.worldId));
@@ -342,6 +343,11 @@ async function envelope(
   if (table === 'travelPrivacyTombstones' && row.playerIds)
     row = { ...row, playerIds: row.playerIds.filter((id: string) =>
       s.owners.some(owner => owner.worldId === row.worldId && owner.playerId === id)) };
+  if (table === 'travelPrivacyTombstones' && row.key.startsWith('conversation:') && row.playerIds?.length) {
+    // Conversation ownership follows selected participants, never one possibly unselected speaker.
+    const { ownerGlobalId: _owner, playerId: _player, ...participantOwned } = row;
+    row = participantOwned;
+  }
   if (table === 'worlds') row = scopedWorld(row, s);
   if (table === 'memories') {
     const { embeddingId: _embeddingId, embeddingSpaceId: _embeddingSpaceId, ...canonical } = row;
@@ -413,7 +419,7 @@ async function envelope(
   // Public resident/profile context preserves source bindings without cloning identities.
   if (table === 'memories' || table === 'travelPrivacyTombstones' || (historyTables as readonly string[]).includes(table)) {
     const own = rowOwner(row, s);
-    const involved = table === 'travelPrivacyTombstones' ? s.owners.filter(owner => privacyRowBelongsToResident(row, owner)) : own
+    const involved = table === 'travelPrivacyTombstones' ? selectivePrivacyOwners(row, s) : own
       ? [own]
       : s.owners.filter(
           (o) =>
@@ -1024,6 +1030,11 @@ export const exportReadData = internalQuery({
   args: { jobId: v.id('backupLargeJobs'), index: v.optional(v.number()) },
   handler: async (ctx, a) => localArchiveExportSnapshot(ctx, await owned(ctx, a.jobId), a.index),
 });
+export const localSigningIdentity = internalQuery({
+  args: { jobId: v.id('backupLargeJobs') },
+  handler: async (ctx, a) => { await owned(ctx, a.jobId); const local = await ctx.db.query('federationIdentity').unique();
+    if (!local) throw new Error('INITIALIZE_IDENTITY_FIRST'); return local; },
+});
 export const getManifest = action({
   args,
   handler: async (ctx, a): Promise<{ manifest: SelectiveManifest | LocalSanitizedChunkManifest; signature: string; sourceSignatureValid?: false; localProof?: import('./travelPrivacyLocalChunkManifest').LocalArchiveProof }> => {
@@ -1034,8 +1045,9 @@ export const getManifest = action({
     if (job.archivePrivacyState === 'LOCAL_SANITIZED') {
       const manifest = await readLocalArchiveManifest(ctx, job);
       if (manifest.chunks.some(chunk => chunk.role === 'OLD')) throw new Error('LOCAL_ARCHIVE_PRIVATE_ROLLBACK_NOT_PORTABLE');
+      const local = await ctx.runQuery(refQ('localSigningIdentity'), { jobId: a.jobId });
       result = { manifest, signature: '', sourceSignatureValid: false as const,
-        ...(job.metadata?.archiveLocalProof ? { localProof: job.metadata.archiveLocalProof } : {}) };
+        localProof: await createLocalArchiveProof(manifest, local, value => sign(value, local.privateKeyEncrypted)) };
     } else {
       if (!job.signature) throw new Error('BACKUP_MANIFEST_NOT_READY');
       const blob = await ctx.storage.get(job.manifestStorageId!);

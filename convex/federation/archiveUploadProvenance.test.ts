@@ -232,3 +232,22 @@ test('matching ownership marker with different bytes is a conflict, never a dele
   expect((await f.t.run(ctx => ctx.db.get(f.lease.operationId)))!.recoveryConflict).toBe(true);
   expect(await f.t.run(async ctx => !!await ctx.storage.get(wrongId))).toBe(true);
 });
+
+test.each(['canonical', 'staged'])('retired upload cleanup protects %s privacy sidecar references', async kind => {
+  const f = await retiredFixture();
+  const rowId = await f.t.run(async ctx => {
+    const jobId = await ctx.db.insert('backupLargeJobs', { kind: 'import', state: 'STAGING', phase: 'STAGING',
+      tableIndex: 0, cursor: null, chunkCount: 0, processedChunks: 0, recordCount: 0, bytes: 0,
+      createdAt: 1, updatedAt: 1, source: {} });
+    return kind === 'canonical'
+      ? ctx.db.insert('backupPrivacyChunks', { jobId, pageNumber: 0, storageId: f.storageId,
+        descriptor: { index: 0, table: 'travelPrivacyTombstones', count: 0, bytes: 1, digest: 'sidecar' } })
+      : ctx.db.insert('backupPrivacyRows', { jobId, key: 'negative-state', row: { nestedAlias: f.storageId } });
+  });
+  await expect(f.t.run(ctx => eraseRetiredArchiveUploadCandidate(ctx, { ...f.retired, candidateId: f.candidateId }, noAdditionalReferences)))
+    .rejects.toThrow('STRONG_REFERENCE');
+  expect(await f.t.run(ctx => ctx.db.system.get(f.storageId))).not.toBeNull();
+  await f.t.run(ctx => ctx.db.delete(rowId));
+  await expect(f.t.run(ctx => eraseRetiredArchiveUploadCandidate(ctx, { ...f.retired, candidateId: f.candidateId }, noAdditionalReferences)))
+    .resolves.toBe(true);
+});

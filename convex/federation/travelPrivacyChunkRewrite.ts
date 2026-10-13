@@ -33,6 +33,8 @@ import {
   beginArchiveUploadRecovery,
   saveArchiveUploadRecovery,
 } from './archiveUploadProvenance';
+import { validatePrivacyChunk } from './backupPrivacyChunks';
+import { validatePrivacyBackupRow } from './backupPrivacy';
 import { privatePayloadSummary } from './travelPrivacyGuard';
 import { validateSelectiveManifest } from './backupSelectiveHelpers';
 import { sanitizeTravelAuditSummary } from './travelAuditWriter';
@@ -67,6 +69,7 @@ const removeTables = new Set([
   'memorySourceClaims',
   'memorySummaryProvenance',
   'messages',
+  'archivedConversations',
   'messageTranslations',
   'homeTravelTranscripts',
   'homeTravelTranscriptPages',
@@ -924,6 +927,114 @@ export const manifestDescriptorPage = internalQuery({
   },
 });
 
+/** Persist identifier-only evidence before uploading it, with one bounded scan page per transaction. */
+export const buildEvidencePage = internalMutation({
+  args: manifestArgs, handler: async (ctx, a) => {
+    const current = await checked(ctx, a);
+    if (!current || current.session.phase !== 'MANIFESTS') return;
+    const producer = await ctx.db.get(a.manifestId);
+    if (!producer || producer.state !== 'BUILDING' || producer.evidenceComplete) return;
+    const backup = await producerChecked(ctx, producer);
+    const { parent, session } = current;
+    const page = await ctx.db.query('travelPrivacyChunkRows').withIndex('backup_selected', q =>
+      q.eq('scanId', session.scanId).eq('backupJobId', producer.backupJobId).eq('role', backup.kind === 'export' ? 'EXPORT' : 'SOURCE').eq('selected', true))
+      .paginate({ cursor: producer.evidenceCursor ?? null, numItems: 20 });
+    const rows: BackupRow[] = [];
+    const base = { visitId: parent.visitId, createdAt: session.createdAt };
+    if (!producer.evidenceStarted && page.page.length) {
+      // Parent identifiers are direct deletion evidence, never inferred from a text hash.
+      rows.push(...producer.clearedVisits.map(visitId => ({ key: `visit:${visitId}`, visitId,
+        createdAt: session.createdAt, ...(visitId === parent.visitId ? { worldId: parent.worldId, ownerGlobalId: parent.ownerGlobalId } : {}) })));
+    }
+    for (const selected of page.page) {
+      if (selected.backupJobId !== producer.backupJobId || selected.role === 'OLD') continue;
+      const e = selected.evidence;
+      const memoryOwner = e.table === 'memories' ? parent.memoryOwners.find(owner => owner.memoryId === e.sourceId) : undefined;
+      const conversationOwner = e.worldId === parent.worldId ? parent.conversationOwners.find(owner => owner.conversationId === e.conversationId) : undefined;
+      const fields = { ...base, ...(e.worldId ? { worldId: e.worldId } : {}),
+        ...((e.ownerGlobalId ?? memoryOwner?.ownerGlobalId) ? { ownerGlobalId: e.ownerGlobalId ?? memoryOwner?.ownerGlobalId } : {}),
+        ...((e.playerId ?? memoryOwner?.playerId) ? { playerId: e.playerId ?? memoryOwner?.playerId } : {}) };
+      if (e.table === 'memories') rows.push({ ...fields, key: `memory:${e.sourceId}` });
+      if (e.worldId && e.conversationId) rows.push({ ...fields, key: `conversation:${e.worldId}:${e.conversationId}`,
+        ...((e.conversationPlayerIds ?? conversationOwner?.playerIds) ? { playerIds: e.conversationPlayerIds ?? conversationOwner?.playerIds } : e.playerId ? { playerIds: [e.playerId] } : {}) });
+    }
+    if (!producer.evidenceStarted && !page.page.length) rows.push(...producer.clearedVisits.map(visitId =>
+      ({ key: `visit:${visitId}`, visitId, createdAt: session.createdAt })));
+    let pageNumber = producer.evidencePageCount;
+    if (pageNumber === undefined) {
+      const last = await ctx.db.query('backupPrivacyChunks').withIndex('job_page', q => q.eq('jobId', producer.backupJobId)).order('desc').first();
+      pageNumber = last ? last.pageNumber + 1 : 0;
+    }
+    const unique = [...new Map(rows.map(row => [row.key, row])).values()];
+    for (let offset = 0; offset < unique.length; offset += 100) {
+      const batch = unique.slice(offset, offset + 100);
+      for (const row of batch) validatePrivacyBackupRow(row);
+      await ctx.db.insert('travelPrivacyChunkEvidencePages', { manifestId: producer._id, pageNumber: pageNumber++, rows: batch, state: 'PREPARED' });
+    }
+    await ctx.db.patch(producer._id, { evidenceStarted: true, evidenceCursor: page.isDone ? null : page.continueCursor,
+      evidencePageCount: pageNumber, evidenceComplete: page.isDone });
+    await advance(ctx, session, {});
+  },
+});
+export const evidencePageData = internalQuery({
+  args: manifestArgs, handler: async (ctx, a) => {
+    const current = await checked(ctx, a);
+    if (!current || current.session.phase !== 'MANIFESTS') return null;
+    const producer = await ctx.db.get(a.manifestId);
+    if (!producer || producer.rewriteId !== a.rewriteId || producer.state !== 'BUILDING') fail('MANIFEST_CHECKPOINT_CHANGED');
+    await producerChecked(ctx, producer);
+    const page = await ctx.db.query('travelPrivacyChunkEvidencePages').withIndex('manifest_page', q => q.eq('manifestId', producer._id))
+      .filter(q => q.neq(q.field('state'), 'PUBLISHED')).first();
+    return { producer, page };
+  },
+});
+const evidenceArgs = { ...manifestArgs, evidenceId: v.id('travelPrivacyChunkEvidencePages') };
+export const reserveEvidence = internalMutation({
+  args: { ...evidenceArgs, descriptor: v.any(), sha256Hex: v.string(), size: v.number() }, handler: async (ctx, a) => {
+    const current = await checked(ctx, a);
+    if (!current || current.session.phase !== 'MANIFESTS') return null;
+    const page = await ctx.db.get(a.evidenceId), producer = await ctx.db.get(a.manifestId);
+    if (!producer || !page || page.manifestId !== producer._id || page.state !== 'PREPARED') return null;
+    await producerChecked(ctx, producer);
+    const chunk = { index: page.pageNumber, table: 'travelPrivacyTombstones', rows: page.rows.map(encodeRow) };
+    await validatePrivacyChunk(chunk, a.descriptor);
+    const operation = await reserveArchiveUpload(ctx, { producerKind: 'CHUNK_PRIVACY_MANIFEST', ownerKey: a.rewriteId,
+      operationKey: page._id, sha256Hex: a.sha256Hex, size: a.size });
+    const lease = await beginArchiveUpload(ctx, operation);
+    await ctx.db.patch(page._id, { state: 'UPLOADED', descriptor: a.descriptor, operationId: lease.operationId, operationRevision: lease.revision });
+    await advance(ctx, current.session, {});
+    return { ...lease, rewriteRevision: current.session.revision + 1 };
+  },
+});
+export const publishEvidence = internalMutation({
+  args: { ...evidenceArgs, storageId: v.id('_storage') }, handler: async (ctx, a) => {
+    const current = await checked(ctx, a);
+    if (!current || current.session.phase !== 'MANIFESTS') return;
+    const page = await ctx.db.get(a.evidenceId), producer = await ctx.db.get(a.manifestId);
+    if (!producer || !page || page.manifestId !== producer._id || page.state !== 'UPLOADED' || !page.operationId || !page.descriptor)
+      fail('EVIDENCE_CHECKPOINT_CHANGED');
+    await producerChecked(ctx, producer);
+    await confirmArchiveUploadCandidate(ctx, { operationId: page.operationId, revision: page.operationRevision!, storageId: a.storageId });
+    if (await ctx.db.query('backupPrivacyChunks').withIndex('job_page', q => q.eq('jobId', producer.backupJobId).eq('pageNumber', page.pageNumber)).first())
+      fail('EVIDENCE_PAGE_CHANGED');
+    const rowId = await ctx.db.insert('backupPrivacyChunks', { jobId: producer.backupJobId, pageNumber: page.pageNumber,
+      descriptor: page.descriptor, storageId: a.storageId, rewriteId: a.rewriteId });
+    await ctx.db.patch(page._id, { storageId: a.storageId, state: 'PUBLISHED' });
+    await markArchiveUploadPublished(ctx, { operationId: page.operationId, revision: page.operationRevision!, storageId: a.storageId,
+      publication: { table: 'backupPrivacyChunks', rowId, field: 'storageId' } });
+    await advance(ctx, current.session, {});
+  },
+});
+export const privacyDescriptorPage = internalQuery({
+  args: { ...manifestArgs, cursor: v.union(v.string(), v.null()) }, handler: async (ctx, a) => {
+    const current = await checked(ctx, a);
+    if (!current || current.session.phase !== 'MANIFESTS') return null;
+    const producer = await ctx.db.get(a.manifestId);
+    if (!producer || producer.rewriteId !== a.rewriteId || !producer.evidenceComplete) fail('EVIDENCE_INCOMPLETE');
+    await producerChecked(ctx, producer);
+    return ctx.db.query('backupPrivacyChunks').withIndex('job_page', q => q.eq('jobId', producer.backupJobId)).paginate({ cursor: a.cursor, numItems: 100 });
+  },
+});
 export const reserveManifest = internalMutation({
   args: { ...manifestArgs, manifestDigest: v.string(), sha256Hex: v.string(), size: v.number() },
   handler: async (ctx, a) => {
@@ -980,6 +1091,7 @@ export const publishManifest = internalMutation({
       archiveLocalManifestDigest: producer.manifestDigest,
       archiveLocalProof: undefined,
       archiveClearedVisits: producer.clearedVisits,
+      archivePrivacyChunkCount: producer.evidencePageCount ?? 0,
       archiveSourceEvidence: {
         manifestStorageId: producer.sourceManifestStorageId,
         digest: producer.sourceManifestDigest,
@@ -1277,9 +1389,14 @@ async function ownedRecovery(ctx: MutationCtx, a: { rewriteId: Id<'travelPrivacy
     fail('UPLOAD_RECOVERY_CHECKPOINT_CHANGED');
   // During UPLOADING there is no publication. Ownership is the reserved operation
   // key of the candidate/manifest chosen by this writer's durable checkpoint.
-  const record = current.session.phase === 'OBJECTS'
+  let record: any = current.session.phase === 'OBJECTS'
     ? await ctx.db.query('travelPrivacyChunkReplacements').withIndex('operation_storage', q => q.eq('operationId', op._id)).unique()
     : await ctx.db.query('travelPrivacyChunkManifestRewrites').withIndex('operation', q => q.eq('operationId', op._id)).unique();
+  if (!record && current.session.phase === 'MANIFESTS') {
+    const evidence = await ctx.db.query('travelPrivacyChunkEvidencePages').withIndex('operation', q => q.eq('operationId', op._id)).unique();
+    const producer = evidence && await ctx.db.get(evidence.manifestId);
+    if (evidence && producer) record = { ...evidence, rewriteId: producer.rewriteId };
+  }
   if (!record || record.rewriteId !== a.rewriteId || record.state !== 'UPLOADED' || record.operationRevision !== op.revision ||
     op.operationKey !== await archiveUploadSha256Hex(new TextEncoder().encode(record._id)) ||
     op.producerKind !== (current.session.phase === 'OBJECTS' ? 'CHUNK_PRIVACY_REPLACEMENT' : 'CHUNK_PRIVACY_MANIFEST'))
@@ -1478,6 +1595,35 @@ export const page = internalAction({
           await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/buildManifestPage'), a);
           return;
         }
+        if (manifest.state === 'BUILDING') {
+          const evidence = await ctx.runQuery(queryRef('travelPrivacyChunkRewrite/evidencePageData'), { ...a, manifestId: manifest._id });
+          if (evidence?.page) {
+            const page = evidence.page;
+            const chunk = { index: page.pageNumber, table: 'travelPrivacyTombstones', rows: page.rows.map(encodeRow) };
+            const expected = await descriptor(chunk);
+            const save = async (storageId: Id<'_storage'>) => {
+              const blob = await ctx.storage.get(storageId);
+              if (!blob || blob.size > MAX_CHUNK_BYTES) fail('EVIDENCE_UPLOAD_MISSING');
+              await validatePrivacyChunk(JSON.parse(await blob.text()), expected);
+              await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/publishEvidence'), { ...a, revision, manifestId: manifest._id, evidenceId: page._id, storageId });
+            };
+            if (page.state === 'UPLOADED') {
+              await recoverLease(ctx, a, page.operationId!, page.operationRevision!, save);
+              return;
+            }
+            const blob = new Blob([JSON.stringify(chunk)]);
+            const lease = await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/reserveEvidence'), {
+              ...a, manifestId: manifest._id, evidenceId: page._id, descriptor: expected, ...(await describeArchiveUpload(blob)) });
+            if (!lease) return;
+            revision = lease.rewriteRevision;
+            await save(await ctx.storage.store(new Blob([blob], { type: lease.contentType })));
+            return;
+          }
+          if (!manifest.evidenceComplete) {
+            await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/buildEvidencePage'), { ...a, manifestId: manifest._id });
+            return;
+          }
+        }
         const validateStored = async (storageId: Id<'_storage'>) => {
           const blob = await ctx.storage.get(storageId);
           if (!blob || blob.size > 10_000_000) fail('MANIFEST_MISSING_OR_SIZE');
@@ -1507,7 +1653,25 @@ export const page = internalAction({
           source = original.manifest;
           sourceDigest = original.digest;
         }
+        const privacyChunks: any[] = [];
+        let privacyCursor: string | null = null;
+        do {
+          const page: any = await ctx.runQuery(queryRef('travelPrivacyChunkRewrite/privacyDescriptorPage'), { ...a, manifestId: manifest._id, cursor: privacyCursor });
+          if (!page) fail('EVIDENCE_CHECKPOINT_CHANGED');
+          privacyChunks.push(...page.page.map((row: any) => row.descriptor));
+          privacyCursor = page.isDone ? null : page.continueCursor;
+        } while (privacyCursor);
+        if (producer.metadata?.archiveLocalManifestDigest && producer.manifestStorageId) {
+          const priorBlob = await ctx.storage.get(producer.manifestStorageId);
+          if (!priorBlob || priorBlob.size > 10_000_000) fail('EVIDENCE_SOURCE_MANIFEST_MISSING');
+          const prior = await validateLocalChunkManifest(JSON.parse(await priorBlob.text()), { expectedDigest: producer.metadata.archiveLocalManifestDigest });
+          for (const entry of prior.privacyChunks ?? [])
+            if (!privacyChunks[entry.index] || await digest(privacyChunks[entry.index]) !== await digest(entry)) fail('EVIDENCE_SOURCE_CHANGED');
+        }
+        let privacyChainDigest = await digest([]);
+        for (const entry of privacyChunks) privacyChainDigest = await digest([privacyChainDigest, entry.index, entry.digest]);
         const local = await createLocalChunkManifest({
+          ...(privacyChunks.length ? { privacyChunks, privacyCount: privacyChunks.reduce((n, entry) => n + entry.count, 0), privacyChainDigest } : {}),
           archiveId: producer._id,
           derivedAt: session.createdAt,
           chunks: await loadManifestDescriptors(ctx, a, manifest),
