@@ -7,7 +7,7 @@ import { actionRef, mutationRef, queryRef } from './refs';
 import { encodeRow, decodeRow, type BackupRow } from './backupHelpers';
 import { descriptor, largeTables, type LargeManifest } from './backupLargeHelpers';
 import { digest, toBase64, verifySignature } from './security';
-import { rewriteChunkRows, loadManifestDescriptors } from './travelPrivacyChunkRewrite';
+import { rewriteChunkRows, loadManifestDescriptors, readRewriteSourceEvidence } from './travelPrivacyChunkRewrite';
 import { canonicalJson } from './protocol';
 import {
   dataRevision,
@@ -608,20 +608,27 @@ test.each([false, true])(
       ),
     ).toBe(true);
     expect(local.sourceSignatureValid).toBe(false);
+    // Imported derivatives can have the live local manifest as their pinned
+    // source pointer. Read the actual stored bytes and preserve the original sig.
+    const evidence = { sourceManifestStorageId: backup.manifestStorageId,
+      sourceManifestDigest: await digest(manifest), sourceSignature: signature, sourcePublicKey: publicKey };
+    const extracted = await f.t.action(ctx => readRewriteSourceEvidence(ctx, { ...backup,
+      metadata: { ...backup.metadata, archiveImportedFromId: 'foreign-origin' } }, evidence));
+    expect(extracted.manifest).toEqual(manifest);
+    expect(extracted.signature).toBe(signature);
+    await expect(f.t.action(ctx => readRewriteSourceEvidence(ctx, { ...backup,
+      metadata: { ...backup.metadata, archiveLocalManifestDigest: '0'.repeat(64) } }, evidence))).rejects.toThrow('LOCAL_ARCHIVE_DIGEST_MISMATCH');
     expect(await f.t.run((ctx) => ctx.db.system.get(chosen.storageId))).toBeNull();
   },
 );
 
-test('oversized reference coverage is rejected before any canonical archive pointer is changed', async () => {
+test('129 external strong aliases are rejected by preflight before any canonical archive pointer is changed', async () => {
   const f = await fixture();
   await f.t.run(async (ctx) => {
-    await ctx.db.delete(f.rewriteId);
     for (let index = 0; index < 129; index++)
       await ctx.db.insert('music', { type: 'background', storageId: f.storageId });
   });
-  await expect(
-    f.t.mutation(mutationRef('travelPrivacyChunkRewrite/startRewrite'), { scanId: f.scanId }),
-  ).rejects.toThrow('REFERENCE_COVERAGE_UNKNOWN');
+  await expect(until(f, 'IMPORT_FENCE')).rejects.toThrow('STRONG_REFERENCE');
   expect((await f.t.run((ctx) => ctx.db.get(f.chunkId)))!.storageId).toBe(f.storageId);
   expect((await f.t.run((ctx) => ctx.db.get(f.backupId)))!.archivePrivacyState).toBeUndefined();
 });
@@ -949,17 +956,137 @@ test('actual DELETE transaction reuses one proof across two candidates and stale
   expect(await f.t.run((ctx) => ctx.db.system.get(f.storageId))).toBeNull();
   expect(await f.t.run((ctx) => ctx.db.system.get(secondOriginal))).toBeNull();
   expect(
-    await f.t.run((ctx) => ctx.db.query('travelPrivacyChunkReferenceProofs').collect()),
+    await f.t.run(async ctx => (await ctx.db.query('travelPrivacyChunkReferenceProofs').collect()).filter(p => (p.purpose ?? 'DELETE') === 'DELETE')),
   ).toHaveLength(1);
   await until(f, 'DONE');
+});
+async function readyPreflight(f: Awaited<ReturnType<typeof fixture>>) {
+  for (let n = 0; n < 3000; n++) {
+    const session = (await status(f))!;
+    if (session.preflightProofId) {
+      const proof = await f.t.run(ctx => ctx.db.get(session.preflightProofId!));
+      if (proof?.phase === 'READY') return proof;
+    }
+    const next = await step(f);
+    if (next.errorCode) throw new Error(next.errorCode);
+  }
+  throw new Error('Preflight page budget');
+}
+test('preflight handles 130 selected physical chunks and OLD rows with bounded pages and no payload journal', async () => {
+  const f = await fixture();
+  const chunks = await f.t.action(async ctx => {
+    const chunks = [];
+    for (let index = 1; index <= 129; index++) {
+    const raw = { _id: `selected-${index}`, description: `private-${index}`, playerId: 'p:0', data: { type: 'travel', visitId: 'selected-visit' } };
+    const chunk = { index, table: 'memories', rows: [encodeRow(raw)] }, d = await descriptor(chunk);
+      const storageId = await ctx.storage.store(new Blob([JSON.stringify(chunk)]));
+      chunks.push({ raw, d, storageId, index });
+    }
+    return chunks;
+  });
+  await f.t.run(async ctx => {
+    for (const { raw, d, storageId, index } of chunks) {
+
+      const chunkId = await ctx.db.insert('backupLargeChunks', { jobId: f.backupId, ...d, storageId });
+      const { _id, _creationTime, ...original } = (await ctx.db.get(f.planId))!;
+      const objectId = await ctx.db.insert('travelPrivacyChunkObjects', { ...original, chunkId, originalStorageId: storageId,
+        originalDigest: d.digest, descriptor: d, rowOffset: 1, aliases: [{ table: 'backupLargeChunks', id: chunkId }] });
+      await ctx.db.insert('travelPrivacyChunkRows', { scanId: f.scanId, objectId, backupJobId: f.backupId,
+        role: 'OLD', selected: true, evidence: { sourceId: raw._id, table: 'memories', rowIndex: 0,
+          relatedMemoryIds: [], evidenceMemoryIds: [], storageIds: [] } });
+      await ctx.db.insert('backupLargeRows', { jobId: f.backupId, role: 'OLD', table: 'memories', sourceId: raw._id,
+        chunkIndex: index, rowIndex: 0, state: 'SNAPSHOT', references: [], metadata: raw });
+    }
+  });
+  await step(f); // The real writer starts and binds the preflight generation.
+  const proofId = (await status(f))!.preflightProofId!;
+  let phase = 'TARGETS', priorTargets = 0;
+  while (phase === 'TARGETS') {
+    phase = await f.t.mutation(mutationRef('travelPrivacyChunkReferenceProof/targetPage'), { proofId });
+    const proof = (await f.t.run(ctx => ctx.db.get(proofId)))!;
+    expect(proof.targets - priorTargets).toBeLessThanOrEqual(10);
+    priorTargets = proof.targets;
+  }
+  for (let n = 0; n < 1000 && phase === 'ROWS'; n++)
+    phase = await f.t.mutation(mutationRef('travelPrivacyChunkReferenceProof/rowPage'), { proofId });
+  expect(phase).toBe('BLOBS');
+  for (let n = 0; n < 1000; n++)
+    if (!await f.t.action(actionRef('travelPrivacyChunkReferenceProof/blobPage'), { proofId })) break;
+  await f.t.mutation(mutationRef('travelPrivacyChunkReferenceProof/finish'), { proofId });
+  const proof = (await f.t.run(ctx => ctx.db.get(proofId)))!;
+  expect(proof.targets).toBe(130);
+  expect(proof.rows).toBeGreaterThan(500);
+  expect(proof.objects).toBe(130);
+  expect(proof.referenceRevision).toBe(0);
+  expect((await status(f))!.revision).toBe(0);
+  const journals = await f.t.run(async ctx => [await ctx.db.query('travelPrivacyChunkReferenceTargets').collect(),
+    await ctx.db.query('travelPrivacyChunkReferenceObjects').collect(), await ctx.db.query('travelPrivacyChunkReferenceEdges').collect()]);
+  expect(JSON.stringify(journals)).not.toContain('private-129');
+  for (let n = 0; n < 200; n++) {
+    const session = (await status(f))!;
+    if (session.phase === 'IMPORT_FENCE') break;
+    await f.t.mutation(mutationRef('travelPrivacyChunkRewrite/preparePage'), { rewriteId: f.rewriteId, revision: session.revision });
+  }
+  expect((await status(f))!.phase).toBe('IMPORT_FENCE');
+  expect((await status(f))!.preflightComplete).toBe(true);
+  expect((await status(f))!.objects).toBe(130);
+}, 180000);
+test('direct preparation cannot bypass preflight and a tracked late alias forces a new complete generation', async () => {
+  const f = await fixture();
+  await expect(f.t.mutation(mutationRef('travelPrivacyChunkRewrite/preparePage'), { rewriteId: f.rewriteId, revision: 0 })).rejects.toThrow('REFERENCE_PREFLIGHT_INCOMPLETE');
+  const proof = await readyPreflight(f);
+  await f.t.run(ctx => withEmbeddingRevision(ctx).db.insert('music', { type: 'background', storageId: f.storageId }));
+  await expect(f.t.mutation(mutationRef('travelPrivacyChunkRewrite/preparePage'), { rewriteId: f.rewriteId, revision: 0 })).rejects.toThrow('REFERENCE_EPOCH_CHANGED');
+  await expect(f.t.query(queryRef('travelPrivacyChunkReferenceProof/status'), { proofId: proof._id })).rejects.toThrow('REFERENCE_EPOCH_CHANGED');
+  await step(f);
+  expect((await status(f))!.preflightProofId).not.toBe(proof._id);
+  await expect(until(f, 'IMPORT_FENCE')).rejects.toThrow('STRONG_REFERENCE');
+  expect((await f.t.run(ctx => ctx.db.get(f.chunkId)))!.storageId).toBe(f.storageId);
+  expect((await f.t.run(ctx => ctx.db.get(f.backupId)))!.archivePrivacyState).toBeUndefined();
+});
+test('preflight rejects a late nested physical reference before preparing the producer', async () => {
+  const f = await fixture();
+  const nested = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify({ unknown: f.storageId })])));
+  const root = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify({ sections: { coldHistoryChunks: [encodeRow({ storageId: nested })] } })])));
+  await f.t.run(ctx => ctx.db.insert('backupImports', { sourceTownId: 'external', mode: 'resident', exportedAt: 1, importedAt: 1,
+    mapping: {}, runtimeSnapshot: {}, manifest: {}, localArchiveStorageId: root }));
+  await expect(until(f, 'IMPORT_FENCE')).rejects.toThrow('STRONG_REFERENCE');
+  expect((await f.t.run(ctx => ctx.db.get(f.backupId)))!.archivePrivacyState).toBeUndefined();
+});
+test('shared storage plans cannot hide different selected indices behind a reused selection digest', async () => {
+  const f = await fixture();
+  await f.t.run(async ctx => {
+    const { _id, _creationTime, ...original } = (await ctx.db.get(f.planId))!;
+    const chunkId = await ctx.db.insert('backupLargeChunks', { jobId: f.backupId, ...f.d, storageId: f.storageId });
+    const objectId = await ctx.db.insert('travelPrivacyChunkObjects', { ...original, chunkId, aliases: [{ table: 'backupLargeChunks', id: chunkId }] });
+    for (const row of await ctx.db.query('travelPrivacyChunkRows').withIndex('object', q => q.eq('objectId', f.planId)).collect()) {
+      const { _id, _creationTime, ...fields } = row;
+      await ctx.db.insert('travelPrivacyChunkRows', { ...fields, objectId, selected: !row.selected });
+    }
+  });
+  await expect(readyPreflight(f)).rejects.toThrow('REFERENCE_PLAN_ALIAS_CHANGED');
+  expect((await f.t.run(ctx => ctx.db.get(f.backupId)))!.archivePrivacyState).toBeUndefined();
+});
+test.each([false, true])('preflight virtually sanitizes selected payload but keeps unknown retained references; retained=%s', async retained => {
+  const f = await fixture();
+  const raw = { _id: 'selected-input', args: { alias: f.storageId }, ...(retained ? { unknownRetainedAlias: f.storageId } : {}) };
+  const chunk = { index: 1, table: 'inputs', rows: [encodeRow(raw)] }, d = await descriptor(chunk);
+  const storageId = await f.t.action(ctx => ctx.storage.store(new Blob([JSON.stringify(chunk)])));
+  await f.t.run(async ctx => {
+    const chunkId = await ctx.db.insert('backupLargeChunks', { jobId: f.backupId, ...d, storageId });
+    const { _id, _creationTime, ...original } = (await ctx.db.get(f.planId))!;
+    const objectId = await ctx.db.insert('travelPrivacyChunkObjects', { ...original, chunkId, originalStorageId: storageId,
+      descriptor: d, originalDigest: d.digest, selectedRows: 1, aliases: [{ table: 'backupLargeChunks', id: chunkId }] });
+    await ctx.db.insert('travelPrivacyChunkRows', { scanId: f.scanId, objectId, backupJobId: f.backupId, role: 'OLD', selected: true,
+      evidence: { sourceId: raw._id, table: 'inputs', rowIndex: 0, relatedMemoryIds: [], evidenceMemoryIds: [], storageIds: [] } });
+  });
+  if (retained) await expect(readyPreflight(f)).rejects.toThrow('STRONG_REFERENCE');
+  else await expect(readyPreflight(f)).resolves.toMatchObject({ phase: 'READY', targets: 2 });
 });
 
 test('actual erase rejects a late tracked reference after READY without deleting original or refreshing proof', async () => {
   const f = await fixture();
   const proof = await readyReferenceProof(f);
-  await f.t.run((ctx) =>
-    withEmbeddingRevision(ctx).db.insert('music', { type: 'background', storageId: f.storageId }),
-  );
   const deletion: { candidate: Doc<'travelPrivacyChunkReplacements'> } = await f.t.query(
     queryRef('travelPrivacyChunkRewrite/deletionData'),
     {
@@ -968,6 +1095,9 @@ test('actual erase rejects a late tracked reference after READY without deleting
     },
   );
   const candidate = deletion.candidate;
+  await f.t.run((ctx) =>
+    withEmbeddingRevision(ctx).db.insert('music', { type: 'background', storageId: f.storageId }),
+  );
   await expect(
     f.t.mutation(mutationRef('travelPrivacyChunkRewrite/eraseOriginal'), {
       rewriteId: f.rewriteId,

@@ -14,6 +14,7 @@ import {
   MAX_CHUNKS,
   MAX_ARCHIVE_BYTES,
   rowMetadata,
+  validateManifest,
   type LargeChunk,
 } from './backupLargeHelpers';
 import { digest } from './security';
@@ -29,8 +30,11 @@ import {
   archiveUploadSha256Hex,
   retireArchiveUpload,
   confirmArchiveUploadProducerTerminal,
+  beginArchiveUploadRecovery,
+  saveArchiveUploadRecovery,
 } from './archiveUploadProvenance';
 import { privatePayloadSummary } from './travelPrivacyGuard';
+import { validateSelectiveManifest } from './backupSelectiveHelpers';
 import { sanitizeTravelAuditSummary } from './travelAuditWriter';
 import {
   dataRevision,
@@ -45,7 +49,7 @@ import {
   validateLocalChunk,
 } from './travelPrivacyLocalChunkManifest';
 
-import { assertPagedReferenceProofAbsent } from './travelPrivacyChunkReferenceProof';
+import { assertPagedReferenceProofAbsent, assertPreflightReferenceProofReady } from './travelPrivacyChunkReferenceProof';
 
 type Session = Doc<'travelPrivacyChunkRewrites'>;
 type Candidate = Doc<'travelPrivacyChunkReplacements'>;
@@ -128,7 +132,7 @@ export function rewriteChunkRows(
   };
 }
 
-function sanitizeSelectedRow(table: string, raw: BackupRow): BackupRow | null {
+export function sanitizeSelectedRow(table: string, raw: BackupRow): BackupRow | null {
   if (removeTables.has(table)) return null;
   const row = { ...raw };
   if (table === 'federationEventFacts') row.payload = privatePayloadSummary(row.payload);
@@ -178,6 +182,7 @@ function sanitizeSelectedRow(table: string, raw: BackupRow): BackupRow | null {
 async function checked(
   ctx: DB,
   a: { rewriteId: Id<'travelPrivacyChunkRewrites'>; revision: number },
+  allowReferenceResume = false,
 ) {
   const session = await ctx.db.get(a.rewriteId);
   if (
@@ -192,6 +197,10 @@ async function checked(
     fail('PARENT_CHECKPOINT_CHANGED');
   if ((await dataRevision(ctx.db, privacyRevisionKey)) !== session.sourceRevision)
     fail('SOURCE_REVISION_CHANGED');
+  if (!allowReferenceResume && session.referenceResume) fail('REFERENCE_PREFLIGHT_INCOMPLETE');
+  if (!allowReferenceResume && session.referenceRevision !== undefined &&
+    await dataRevision(ctx.db, archiveReferenceRevisionKey) !== session.referenceRevision)
+    fail('REFERENCE_EPOCH_CHANGED');
   return { session, parent };
 }
 async function advance(ctx: MutationCtx, session: Session, fields: Partial<Session>) {
@@ -199,6 +208,9 @@ async function advance(ctx: MutationCtx, session: Session, fields: Partial<Sessi
     ...fields,
     revision: session.revision + 1,
     sourceRevision: await dataRevision(ctx.db, privacyRevisionKey),
+    // checked() read the entry epoch in this transaction. Convex retries that
+    // check after any conflict; only this writer's transaction can advance it.
+    referenceRevision: await dataRevision(ctx.db, archiveReferenceRevisionKey),
     updatedAt: Date.now(),
     errorCode: undefined,
   });
@@ -231,7 +243,6 @@ export async function beginChunkRewrite(
       .first()
   )
     fail('REWRITE_BUSY');
-  await assertRewriteCoverage(ctx, scanId);
   // Public archive readers/producers must check this global fence before their per-job fence.
   return ctx.db.insert('travelPrivacyChunkRewrites', {
     scanId,
@@ -316,6 +327,13 @@ export const preparePage = internalMutation({
     const current = await checked(ctx, a);
     if (!current) return;
     const { session } = current;
+    if (session.phase === 'PREPARING' && !session.preflightComplete) {
+      if (!session.preflightProofId) fail('REFERENCE_PREFLIGHT_INCOMPLETE');
+      await assertPreflightReferenceProofReady(ctx, session.preflightProofId, session._id);
+      // No await outside this transaction can separate consumption from the first
+      // producer/source write below. Tracked source writes then invalidate this proof.
+      await ctx.db.patch(session._id, { preflightComplete: true });
+    }
     if (session.phase === 'PREPARING') {
       const page = await ctx.db
         .query('travelPrivacyChunkObjects')
@@ -459,7 +477,8 @@ export const preparePage = internalMutation({
 export const pageData = internalQuery({
   args: checkpoint,
   handler: async (ctx, a) => {
-    const current = await checked(ctx, a);
+    const sessionBefore = await ctx.db.get(a.rewriteId);
+    const current = await checked(ctx, a, sessionBefore?.referenceResume === true);
     if (!current) return null;
     const { session } = current;
     const candidates = ['PREPARED', 'UPLOADED', 'VERIFIED'] as const;
@@ -987,112 +1006,6 @@ export const publishManifest = internalMutation({
   },
 });
 
-async function physicalArchiveReferences(ctx: DB) {
-  const storageIds = new Set<Id<'_storage'>>();
-  for (const table of [
-    'backupImports',
-    'backupLargeJobs',
-    'coldHistoryArchives',
-    'coldHistoryChunks',
-  ] as const) {
-    const rows = await ctx.db.query(table).take(129);
-    if (rows.length > 128) fail('REFERENCE_COVERAGE_UNKNOWN');
-    for (const row of rows) {
-      const raw = row as any;
-      for (const id of [
-        raw.localArchiveStorageId,
-        raw.manifest?.vectorArchiveStorageId,
-        raw.manifestStorageId,
-        raw.storageId,
-      ])
-        if (id) storageIds.add(id);
-    }
-  }
-  if (storageIds.size > 128) fail('REFERENCE_COVERAGE_UNKNOWN');
-  const objects = [];
-  for (const storageId of storageIds) {
-    const metadata = await ctx.db.system.get(storageId);
-    if (!metadata) fail('REFERENCED_ARCHIVE_MISSING');
-    objects.push(metadata);
-  }
-  return objects;
-}
-
-/** Encoded archive records are JSON strings; traverse them as well as ordinary JSON fields. */
-function decodedArchiveReferences(value: unknown): unknown {
-  if (typeof value === 'string' && /^[\[{]/.test(value)) {
-    try {
-      return decodedArchiveReferences(JSON.parse(value));
-    } catch {
-      return value;
-    }
-  }
-  if (Array.isArray(value)) return value.map(decodedArchiveReferences);
-  if (value && typeof value === 'object')
-    return Object.fromEntries(
-      Object.entries(value).map(([key, child]) => [key, decodedArchiveReferences(child)]),
-    );
-  return value;
-}
-
-async function assertRewriteCoverage(ctx: DB, scanId?: Id<'travelPrivacyChunkScans'>) {
-  const tables = [
-    'backupImports',
-    'backupLargeJobs',
-    'backupLargeRows',
-    'backupSelectiveHistory',
-    'coldHistoryArchives',
-    'coldHistoryChunks',
-    'coldArchiveMirrorJobs',
-    'music',
-    'travelPrivacyArchiveObjects',
-    'travelPrivacyChunkObjects',
-    'travelPrivacyChunkRows',
-    'travelPrivacyChunkReplacements',
-    'travelPrivacyChunkManifestRewrites',
-    'archiveUploadOperations',
-    'archiveUploadCandidates',
-  ] as const;
-  let bytes = 0;
-  const plans = scanId
-    ? await ctx.db
-        .query('travelPrivacyChunkObjects')
-        .withIndex('scan', (q) => q.eq('scanId', scanId))
-        .take(129)
-    : [];
-  if (plans.length > 128) fail('REFERENCE_COVERAGE_UNKNOWN');
-  const affected = plans.filter((plan) => plan.selectedRows > 0);
-  const newObjects = new Set(affected.map((plan) => plan.originalStorageId)).size;
-  const newProducers = new Set(
-    affected.flatMap((plan) =>
-      plan.aliases.filter((alias) => alias.table === 'backupLargeChunks').map((alias) => alias.id),
-    ),
-  ).size;
-  const journalGrowth = newObjects + newProducers;
-  for (const table of tables) {
-    const rows = await ctx.db.query(table).take(129);
-    const growth = ['archiveUploadOperations', 'archiveUploadCandidates'].includes(table)
-      ? journalGrowth
-      : table === 'travelPrivacyChunkReplacements'
-        ? newObjects
-        : table === 'travelPrivacyChunkManifestRewrites'
-          ? newProducers
-          : 0;
-    if (rows.length + growth > 128) fail('REFERENCE_COVERAGE_UNKNOWN');
-    bytes += new TextEncoder().encode(JSON.stringify(rows)).length;
-  }
-  const chunks = await ctx.db.query('backupLargeChunks').take(129);
-  if (
-    chunks.length > 128 ||
-    chunks.reduce((n, c) => n + c.bytes, 0) +
-      (await physicalArchiveReferences(ctx)).reduce((n, object) => n + object.size, 0) >
-      8 * 1024 * 1024 ||
-    bytes + new TextEncoder().encode(JSON.stringify(affected)).length * 3 + journalGrowth * 2048 >
-      400 * 1024
-  )
-    fail('REFERENCE_COVERAGE_UNKNOWN');
-}
-
 async function supersededUpload(
   ctx: DB,
   storageId: Id<'_storage'>,
@@ -1107,37 +1020,49 @@ async function supersededUpload(
     !['PUBLISHED', 'RETIRED'].includes(op.state)
   )
     return null;
-  const publications = await ctx.db.query('travelPrivacyChunkReplacements').take(129);
-  if (publications.length > 128) fail('REFERENCE_COVERAGE_UNKNOWN');
-  const writer = publications.find(
-    (row) =>
-      row.operationId === op._id &&
-      row.replacementStorageId === storageId &&
-      row.state === 'DELETED',
-  );
+  const writer = await ctx.db.query('travelPrivacyChunkReplacements')
+    .withIndex('operation_storage', q => q.eq('operationId', op._id).eq('replacementStorageId', storageId)).unique();
+  if (writer?.state !== 'DELETED') return null;
   const parent = writer ? await ctx.db.get(writer.rewriteId) : null;
   return parent?.phase === 'DONE' ? op : null;
 }
 
-export const preflightData = internalQuery({
-  args: checkpoint,
-  handler: async (ctx, a) => {
-    const current = await checked(ctx, a);
-    if (!current || current.session.phase !== 'PREPARING') return null;
-    await assertRewriteCoverage(ctx);
-    const plans = await ctx.db
-      .query('travelPrivacyChunkObjects')
-      .withIndex('scan', (q) => q.eq('scanId', current.session.scanId))
-      .take(129);
-    if (plans.length > 128) fail('REFERENCE_COVERAGE_UNKNOWN');
-    return {
-      originals: plans
-        .filter((plan) => plan.selectedRows > 0)
-        .map((plan) => plan.originalStorageId),
-      archiveObjects: await physicalArchiveReferences(ctx),
-    };
+export const bindPreflightProof = internalMutation({
+  args: { ...checkpoint, proofId: v.id('travelPrivacyChunkReferenceProofs') }, handler: async (ctx, a) => {
+    const sessionBefore = await ctx.db.get(a.rewriteId);
+    const current = await checked(ctx, a, sessionBefore?.referenceResume === true);
+    if (!current || (!current.session.referenceResume && (current.session.phase !== 'PREPARING' || current.session.preflightComplete))) return false;
+    const proof = await ctx.db.get(a.proofId);
+    const referenceRevision = await dataRevision(ctx.db, archiveReferenceRevisionKey);
+    const previous = current.session.preflightProofId && await ctx.db.get(current.session.preflightProofId);
+    if (!proof || proof.purpose !== 'PREPARING' || proof.rewriteId !== a.rewriteId || proof.rewriteRevision !== a.revision ||
+      proof.referenceRevision !== referenceRevision ||
+      (previous && previous._id !== a.proofId && previous.referenceRevision === referenceRevision)) fail('REFERENCE_CHECKPOINT_CHANGED');
+    await ctx.db.patch(a.rewriteId, { preflightProofId: a.proofId });
+    return true;
   },
 });
+export const preflightData = internalQuery({ args: checkpoint, handler: async (ctx, a) => {
+  const sessionBefore = await ctx.db.get(a.rewriteId);
+  const current = await checked(ctx, a, sessionBefore?.referenceResume === true);
+  if (!current || (!current.session.referenceResume && (current.session.phase !== 'PREPARING' || current.session.preflightComplete))) return null;
+  const proof = current.session.preflightProofId && await ctx.db.get(current.session.preflightProofId);
+  return { stale: !!proof && proof.referenceRevision !== await dataRevision(ctx.db, archiveReferenceRevisionKey) };
+} });
+export async function requestReferencePreflightRetry(ctx: MutationCtx, a: { rewriteId: Id<'travelPrivacyChunkRewrites'>; revision: number }) {
+  const current = await checked(ctx, a, true);
+  if (!current || !['PREPARING', 'IMPORT_FENCE', 'ROWS', 'OBJECTS', 'MANIFESTS'].includes(current.session.phase)) return false;
+  await ctx.db.patch(a.rewriteId, { referenceResume: true, preflightProofId: undefined, errorCode: undefined });
+  return true;
+}
+export const retryReferencePreflight = internalMutation({ args: checkpoint, handler: requestReferencePreflightRetry });
+export const resumeReferenceWriter = internalMutation({ args: { ...checkpoint, proofId: v.id('travelPrivacyChunkReferenceProofs') }, handler: async (ctx, a) => {
+  const current = await checked(ctx, a, true);
+  if (!current?.session.referenceResume || current.session.preflightProofId !== a.proofId) fail('REFERENCE_CHECKPOINT_CHANGED');
+  const proof = await assertPreflightReferenceProofReady(ctx, a.proofId, a.rewriteId);
+  await ctx.db.patch(a.rewriteId, { referenceRevision: proof.referenceRevision, referenceResume: false, errorCode: undefined });
+  return true;
+} });
 export const bindReferenceProof = internalMutation({
   args: { ...checkpoint, proofId: v.id('travelPrivacyChunkReferenceProofs') },
   handler: async (ctx, a) => {
@@ -1341,6 +1266,39 @@ export const clearError = internalMutation({
     if (current) await ctx.db.patch(a.rewriteId, { errorCode: undefined });
   },
 });
+const recoveryArgs = { ...checkpoint, operationId: v.id('archiveUploadOperations'), operationRevision: v.number() };
+async function ownedRecovery(ctx: MutationCtx, a: { rewriteId: Id<'travelPrivacyChunkRewrites'>; revision: number; operationId: Id<'archiveUploadOperations'>; operationRevision: number }) {
+  const current = await checked(ctx, a);
+  if (!current || !['OBJECTS', 'MANIFESTS'].includes(current.session.phase)) fail('UPLOAD_RECOVERY_CHECKPOINT_CHANGED');
+  const op = await ctx.db.get(a.operationId);
+  if (!op || op.revision !== a.operationRevision || !['UPLOADING', 'UPLOADED'].includes(op.state) ||
+    op.ownerKey !== await archiveUploadSha256Hex(new TextEncoder().encode(a.rewriteId)) ||
+    op.contentType !== 'application/vnd.ai-town.archive-upload+json; operation=' + await archiveUploadSha256Hex(new TextEncoder().encode(op._id)))
+    fail('UPLOAD_RECOVERY_CHECKPOINT_CHANGED');
+  // During UPLOADING there is no publication. Ownership is the reserved operation
+  // key of the candidate/manifest chosen by this writer's durable checkpoint.
+  const record = current.session.phase === 'OBJECTS'
+    ? await ctx.db.query('travelPrivacyChunkReplacements').withIndex('operation_storage', q => q.eq('operationId', op._id)).unique()
+    : await ctx.db.query('travelPrivacyChunkManifestRewrites').withIndex('operation', q => q.eq('operationId', op._id)).unique();
+  if (!record || record.rewriteId !== a.rewriteId || record.state !== 'UPLOADED' || record.operationRevision !== op.revision ||
+    op.operationKey !== await archiveUploadSha256Hex(new TextEncoder().encode(record._id)) ||
+    op.producerKind !== (current.session.phase === 'OBJECTS' ? 'CHUNK_PRIVACY_REPLACEMENT' : 'CHUNK_PRIVACY_MANIFEST'))
+    fail('UPLOAD_RECOVERY_CHECKPOINT_CHANGED');
+  return current;
+}
+export const recoveryBegin = internalMutation({ args: recoveryArgs, handler: async (ctx, a) => {
+  await ownedRecovery(ctx, a);
+  const token = await beginArchiveUploadRecovery(ctx, { operationId: a.operationId, revision: a.operationRevision });
+  await ctx.db.patch(a.rewriteId, { referenceRevision: await dataRevision(ctx.db, archiveReferenceRevisionKey) });
+  return token;
+} });
+export const recoverySave = internalMutation({ args: { ...recoveryArgs, recoveryRevision: v.number(), expectedCursor: v.union(v.string(), v.null()),
+  cursor: v.string(), done: v.boolean(), storageIds: v.array(v.id('_storage')), conflict: v.boolean() }, handler: async (ctx, a) => {
+  await ownedRecovery(ctx, a);
+  const saved = await saveArchiveUploadRecovery(ctx, { ...a, revision: a.operationRevision });
+  await ctx.db.patch(a.rewriteId, { referenceRevision: await dataRevision(ctx.db, archiveReferenceRevisionKey) });
+  return saved;
+} });
 
 async function readChunk(
   ctx: { storage: { get(id: Id<'_storage'>): Promise<Blob | null> } },
@@ -1354,6 +1312,46 @@ async function readChunk(
     fail('CHUNK_CHECKSUM_CHANGED');
   return chunk;
 }
+/** A pinned local derivative authenticates its embedded original evidence;
+ * its own JSON must never be substituted for the original signed manifest.
+ */
+export async function readRewriteSourceEvidence(
+  ctx: { storage: { get(id: Id<'_storage'>): Promise<Blob | null> } },
+  producer: Doc<'backupLargeJobs'>,
+  evidence: Pick<Producer, 'sourceSignature' | 'sourcePublicKey' | 'sourceManifestStorageId' | 'sourceManifestDigest'>,
+): Promise<LocalSanitizedChunkManifest['sourceEvidence']> {
+  if (!evidence.sourceSignature || !evidence.sourceManifestStorageId) fail('SOURCE_EVIDENCE_MISSING');
+  const sourceBlob = await ctx.storage.get(evidence.sourceManifestStorageId);
+  let raw: any;
+  let localDigest: string | undefined;
+  if (sourceBlob && sourceBlob.size <= 6_000_000) {
+    raw = JSON.parse(await sourceBlob.text());
+    localDigest = evidence.sourceManifestStorageId === producer.manifestStorageId
+      ? producer.metadata?.archiveLocalManifestDigest : evidence.sourceManifestDigest;
+  } else {
+    const currentBlob = producer.manifestStorageId && await ctx.storage.get(producer.manifestStorageId);
+    if (!currentBlob || currentBlob.size > 10_000_000) fail('SOURCE_MANIFEST_MISSING_OR_SIZE');
+    raw = JSON.parse(await currentBlob.text());
+    localDigest = producer.metadata?.archiveLocalManifestDigest;
+    if (raw.format !== 'ai-town-local-sanitized-chunks') fail('SOURCE_EVIDENCE_MISSING');
+  }
+  let source: LocalSanitizedChunkManifest['sourceEvidence'];
+  if (raw.format === 'ai-town-local-sanitized-chunks') {
+    if (!localDigest) fail('SOURCE_EVIDENCE_MISSING');
+    const local = await validateLocalChunkManifest(raw, { expectedDigest: localDigest });
+    source = local.sourceEvidence;
+    if (!source.manifest) fail('SOURCE_EVIDENCE_MISSING');
+  } else {
+    if (await digest(raw) !== evidence.sourceManifestDigest) fail('SOURCE_EVIDENCE_CHANGED');
+    if (raw.format === 'ai-town-chunks') await validateManifest(raw, evidence.sourceSignature);
+    else if (raw.format === 'ai-town-selective-archive') await validateSelectiveManifest(raw, evidence.sourceSignature);
+    else fail('SOURCE_EVIDENCE_MISSING');
+    source = { manifest: raw, digest: evidence.sourceManifestDigest!, signature: evidence.sourceSignature, publicKey: evidence.sourcePublicKey };
+  }
+  if (source.signature !== evidence.sourceSignature || source.publicKey !== evidence.sourcePublicKey)
+    fail('SOURCE_EVIDENCE_CHANGED');
+  return source;
+}
 
 /** Retry only recovers the original lease; it never invokes storage.store a second time. */
 export const page = internalAction({
@@ -1364,19 +1362,28 @@ export const page = internalAction({
       const data = await ctx.runQuery(queryRef('travelPrivacyChunkRewrite/pageData'), a);
       if (!data) return;
       const { session, candidate, producer, manifest } = data;
-      if (session.phase === 'PREPARING' && session.cursor === null && session.objects === 0) {
-        const proof = await ctx.runQuery(queryRef('travelPrivacyChunkRewrite/preflightData'), a);
-        if (!proof) return;
-        for (const metadata of proof.archiveObjects) {
-          const blob = await ctx.storage.get(metadata._id);
-          if (!blob || blob.size !== metadata.size) fail('REFERENCED_ARCHIVE_MISSING');
-          const raw = decodedArchiveReferences(JSON.parse(await blob.text()));
-          if (
-            proof.originals.some((storageId: Id<'_storage'>) =>
-              archiveHasStrongStorageReference(raw, storageId),
-            )
-          )
-            fail('NESTED_STORAGE_REFERENCE');
+      if ((session.phase === 'PREPARING' && !session.preflightComplete) || session.referenceResume) {
+        const proofId = session.preflightProofId;
+        const preflight = await ctx.runQuery(queryRef('travelPrivacyChunkRewrite/preflightData'), a);
+        if (!proofId || preflight?.stale) {
+          const created = await ctx.runMutation(mutationRef('travelPrivacyChunkReferenceProof/startPreflight'), { ...a, ...(session.referenceResume ? { resume: true } : {}) });
+          await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/bindPreflightProof'), { ...a, proofId: created });
+          return;
+        }
+        const proof = await ctx.runQuery(queryRef('travelPrivacyChunkReferenceProof/status'), { proofId });
+        if (proof.phase === 'TARGETS' || proof.phase === 'ROWS') {
+          await ctx.runMutation(mutationRef('travelPrivacyChunkReferenceProof/' +
+            (proof.phase === 'TARGETS' ? 'targetPage' : 'rowPage')), { proofId });
+          return;
+        }
+        if (proof.phase === 'BLOBS') {
+          if (!await ctx.runAction(actionRef('travelPrivacyChunkReferenceProof/blobPage'), { proofId }))
+            await ctx.runMutation(mutationRef('travelPrivacyChunkReferenceProof/finish'), { proofId });
+          return;
+        }
+        if (session.referenceResume) {
+          await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/resumeReferenceWriter'), { ...a, proofId });
+          return;
         }
       }
       if (['PREPARING', 'IMPORT_FENCE', 'ROWS'].includes(session.phase)) {
@@ -1494,24 +1501,11 @@ export const page = internalAction({
           return;
         }
         let source: LocalSanitizedChunkManifest['sourceEvidence']['manifest'];
+        let sourceDigest = manifest.sourceManifestDigest;
         if (manifest.sourceSignature) {
-          if (!manifest.sourceManifestStorageId) fail('SOURCE_EVIDENCE_MISSING');
-          const sourceBlob = await ctx.storage.get(manifest.sourceManifestStorageId);
-          if (sourceBlob && sourceBlob.size <= 6_000_000)
-            source = JSON.parse(await sourceBlob.text());
-          else {
-            const currentBlob = producer.manifestStorageId
-              ? await ctx.storage.get(producer.manifestStorageId)
-              : null;
-            if (!currentBlob || currentBlob.size > 10_000_000)
-              fail('SOURCE_MANIFEST_MISSING_OR_SIZE');
-            const currentLocal = await validateLocalChunkManifest(
-              JSON.parse(await currentBlob.text()),
-              { expectedDigest: producer.metadata?.archiveLocalManifestDigest },
-            );
-            source = currentLocal.sourceEvidence.manifest;
-            if (!source) fail('SOURCE_EVIDENCE_MISSING');
-          }
+          const original = await readRewriteSourceEvidence(ctx, producer, manifest);
+          source = original.manifest;
+          sourceDigest = original.digest;
         }
         const local = await createLocalChunkManifest({
           archiveId: producer._id,
@@ -1523,7 +1517,7 @@ export const page = internalAction({
             ...(manifest.sourceManifestStorageId
               ? { manifestStorageId: manifest.sourceManifestStorageId }
               : {}),
-            digest: manifest.sourceManifestDigest!,
+            digest: sourceDigest!,
             signature: manifest.sourceSignature,
             publicKey: manifest.sourcePublicKey,
           },
@@ -1704,13 +1698,13 @@ async function recoverLease(
 ) {
   await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/clearError'), a);
   const args = { operationId, revision: operationRevision };
-  const token = await ctx.runMutation(mutationRef('archiveUploadProvenance/recoveryBegin'), args);
+  const token = await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/recoveryBegin'), { ...a, operationId, operationRevision });
   const page = await ctx.runQuery(queryRef('archiveUploadProvenance/recoveryRead'), {
     ...args,
     recoveryRevision: token.recoveryRevision,
   });
-  const saved = await ctx.runMutation(mutationRef('archiveUploadProvenance/recoverySave'), {
-    ...args,
+  const saved = await ctx.runMutation(mutationRef('travelPrivacyChunkRewrite/recoverySave'), {
+    ...a, operationId, operationRevision,
     recoveryRevision: token.recoveryRevision,
     expectedCursor: page.cursor,
     cursor: page.continueCursor,

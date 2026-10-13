@@ -7,6 +7,9 @@ import { actionRef, mutationRef, queryRef } from './refs';
 import { encodeRow, type BackupRow } from './backupHelpers';
 import { descriptor } from './backupLargeHelpers';
 import { digest } from './security';
+import { withEmbeddingRevision } from '../models/embeddingDataRevision';
+import { rewriteChunkRows } from './travelPrivacyChunkRewrite';
+import { describeArchiveUpload } from './archiveUploadProvenance';
 
 const modules = {
   '../federation/travelPrivacy.ts': () => import('./travelPrivacy'),
@@ -351,6 +354,7 @@ test('retry fences an already planned DELETE invocation before object erasure', 
 test('duplicate actors with one checkpoint allocate only one physical candidate', async () => {
   const f = await fixture();
   await wireParent(f);
+  await readyPreflight(f);
   const before = (await status(f))!;
   await Promise.all(
     [0, 1].map(() =>
@@ -369,6 +373,55 @@ test('duplicate actors with one checkpoint allocate only one physical candidate'
   expect(
     await f.t.run((ctx) => ctx.db.query('travelPrivacyChunkManifestRewrites').collect()),
   ).toHaveLength(1);
+});
+async function readyPreflight(f: Awaited<ReturnType<typeof fixture>>) {
+  for (let n = 0; n < 1000; n++) {
+    const session = (await status(f))!;
+    if (session.preflightProofId) {
+      const proof = await f.t.run(ctx => ctx.db.get(session.preflightProofId as Id<'travelPrivacyChunkReferenceProofs'>));
+      if (proof?.phase === 'READY') return proof;
+    }
+    const next = await step(f);
+    if (next.errorCode) throw new Error(next.errorCode);
+  }
+  throw new Error('Preflight page budget');
+}
+test('public retry re-proves late external references before publication and resumes only after removal', async () => {
+  const f = await fixture(); await wireParent(f); await until(f, 'OBJECTS');
+  const pinned = (await status(f))!.referenceRevision;
+  const musicId = await f.t.run(ctx => withEmbeddingRevision(ctx).db.insert('music', { type: 'background', storageId: f.storageId }));
+  expect((await step(f)).errorCode).toBe('REFERENCE_EPOCH_CHANGED');
+  expect((await f.t.run(ctx => ctx.db.get(f.chunkId)))!.storageId).toBe(f.storageId);
+  await f.t.mutation(mutationRef('travelPrivacy/retry'), { adminToken: retryToken, jobId: f.jobId });
+  expect((await status(f))!.referenceRevision).toBe(pinned);
+  expect((await status(f))!.referenceResume).toBe(true);
+  await expect(until(f, 'DONE')).rejects.toThrow('STRONG_REFERENCE');
+  expect((await f.t.run(ctx => ctx.db.get(f.chunkId)))!.storageId).toBe(f.storageId);
+  expect(await f.t.run(ctx => ctx.db.system.get(f.storageId))).not.toBeNull();
+  await f.t.run(ctx => withEmbeddingRevision(ctx).db.delete(musicId));
+  await f.t.mutation(mutationRef('travelPrivacy/retry'), { adminToken: retryToken, jobId: f.jobId });
+  await until(f, 'DONE');
+  expect(await f.t.run(ctx => ctx.db.system.get(f.storageId))).toBeNull();
+  expect((await status(f))!.referenceResume).toBe(false);
+});
+test('public retry after a lost upload acknowledgement re-proves and recovers the same single-start lease', async () => {
+  const f = await fixture(); await wireParent(f); await until(f, 'OBJECTS');
+  const candidate = (await f.t.run(ctx => ctx.db.query('travelPrivacyChunkReplacements').collect()))[0];
+  const rewritten = rewriteChunkRows(f.chunk, [0], false, candidate._id), replacementDescriptor = await descriptor(rewritten.chunk);
+  const blob = new Blob([JSON.stringify(rewritten.chunk)]);
+  const lease = await f.t.mutation(mutationRef('travelPrivacyChunkRewrite/reserveObject'), {
+    rewriteId: f.rewriteId, revision: (await status(f))!.revision, candidateId: candidate._id,
+    replacementDescriptor, rowIndices: rewritten.rowIndices, ...(await describeArchiveUpload(blob)),
+  });
+  const stored = await f.t.action(ctx => ctx.storage.store(new Blob([blob], { type: lease.contentType })));
+  await f.t.run(ctx => ctx.db.patch(stored as never, { contentType: lease.contentType } as never));
+  await f.t.mutation(mutationRef('travelPrivacy/retry'), { adminToken: retryToken, jobId: f.jobId });
+  await until(f, 'DONE');
+  const current = (await f.t.run(ctx => ctx.db.get(candidate._id)))!;
+  expect(current.replacementStorageId).toBe(stored);
+  expect(current.state).toBe('DELETED');
+  expect((await f.t.run(ctx => ctx.db.query('archiveUploadOperations').collect())).filter(op => op.producerKind === 'CHUNK_PRIVACY_REPLACEMENT')).toHaveLength(1);
+  expect((await f.t.run(ctx => ctx.db.query('archiveUploadCandidates').collect())).filter(row => row.storageId === stored)).toHaveLength(1);
 });
 
 test('inspection retry creates a new checkpoint and stale parent actors cannot mark it READY', async () => {

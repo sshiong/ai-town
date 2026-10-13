@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
 import type { Id } from '../../../convex/_generated/dataModel';
-import type { FunctionReturnType } from 'convex/server';
 import {
   encryptBackupText,
   readBackupText,
@@ -19,14 +18,17 @@ import {
   useAdminTask,
   formatTime,
 } from './AdminShared';
-import { selectArchiveDirectory, supportsArchiveDirectory, writeArchiveText } from './archiveFiles';
+import {
+  loadLargeArchiveManifest,
+  confirmedLargeArchiveSigner,
+  selectArchiveDirectory,
+  supportsArchiveDirectory,
+  writeArchiveText,
+  type LoadedLargeArchiveManifest,
+} from './archiveFiles';
 import { VectorExportOption } from './EmbeddingPanel';
 import ColdArchivePanel from './ColdArchivePanel';
 
-type ArchiveManifest = {
-  manifest: Extract<FunctionReturnType<typeof api.federation.backupLarge.getManifest>['manifest'], { format: 'ai-town-chunks' }>;
-  signature: string;
-};
 export default function ArchivePanel({ adminToken }: { adminToken: string }) {
   const { t } = useLocale();
   const convex = useConvex();
@@ -36,7 +38,8 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
   const world = useQuery(api.world.defaultWorldStatus);
   const [jobId, setJobId] = useState<Id<'backupLargeJobs'>>();
   const job = useQuery(api.federation.backupLarge.status, jobId ? { adminToken, jobId } : 'skip');
-  const [manifest, setManifest] = useState<ArchiveManifest>();
+  const [manifest, setManifest] = useState<LoadedLargeArchiveManifest>();
+  const [expectedLocalProofFingerprint, setExpectedLocalProofFingerprint] = useState('');
   const [manifestName, setManifestName] = useState('');
   const [mode, setMode] = useState<'restore' | 'migrate' | 'clone'>('restore');
   const [endpoint, setEndpoint] = useState('');
@@ -72,18 +75,17 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
       : encryptBackupText(text, secret, purpose, purpose === 'manifest' ? 5_000_000 : 1024 * 1024);
   }
   async function loadManifest(file: File) {
+    setExpectedLocalProofFingerprint('');
     const secret = importPassphrase;
     setImportPassphrase('');
-    const value = JSON.parse(
+    const value: unknown = JSON.parse(
       await readBackupText(file, 5_000_000, 'manifest', secret),
-    ) as ArchiveManifest;
-    if (
-      value?.manifest?.format !== 'ai-town-chunks' ||
-      !Array.isArray(value.manifest.chunks) ||
-      typeof value.signature !== 'string'
-    )
-      throw new Error(t('Choose the signed manifest file, not an individual data chunk.'));
-    setManifest(value);
+    );
+    try {
+      setManifest(await loadLargeArchiveManifest(value));
+    } catch (error) {
+      throw new Error(t(error instanceof Error ? error.message : 'The archive manifest metadata is invalid.'));
+    }
     setManifestName(file.name);
     setManifestFile(undefined);
   }
@@ -559,9 +561,9 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
       <details className="admin-disclosure">
         <summary>{t('Stage a chunked archive for import')}</summary>
         <Field
-          label={t('Signed archive manifest')}
+          label={t('Town archive manifest')}
           hint={t(
-            'Choose a plain or browser-encrypted signed manifest (up to 5 MB before encryption). For encrypted files, enter the passphrase below and retry loading. Keep every referenced chunk.',
+            'Choose a plain or browser-encrypted RAW manifest, either original signed or locally sanitized with its local proof (up to 5 MB before encryption). Keep every referenced chunk.',
           )}
         >
           <input
@@ -571,16 +573,17 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
             onChange={(event) => {
               const file = event.target.files?.[0];
               setManifest(undefined);
+              setExpectedLocalProofFingerprint('');
               setManifestName('');
               setSourceStopped(false);
               setReviewed(false);
               setManifestFile(file);
               if (!file) return;
               void task.run(
-                t('Reading signed manifest'),
+                t('Reading town archive manifest'),
                 () => loadManifest(file),
                 t(
-                  'Manifest loaded but unverified. The server verifies its signature and archive structure when creating the import task.',
+                  'Manifest loaded but unverified. The server authenticates its source evidence, current archive proof and structure when creating the import task.',
                 ),
               );
             }}
@@ -607,10 +610,10 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
               disabled={!!task.pending}
               onClick={() =>
                 void task.run(
-                  t('Reading signed manifest'),
+                  t('Reading town archive manifest'),
                   () => loadManifest(manifestFile),
                   t(
-                    'Manifest loaded but unverified. Create a staging task to verify its signature on the server.',
+                    'Manifest loaded but unverified. Create a staging task to authenticate it on the server.',
                   ),
                 )
               }
@@ -659,26 +662,58 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
         {manifestName && (
           <p className="admin-muted">
             {t('Manifest: ')}
-            {manifestName} · {manifest?.manifest.chunks.length}
+            {manifestName} · {manifest?.archive.manifest.chunks.length}
             {t(' declared chunks · source declarations remain unverified until server validation.')}
           </p>
         )}
         {manifest && (
           <p className="admin-muted">
             {t('Declared source: ')}
-            {String(manifest.manifest.source?.townId ?? t('missing'))}
+            {String(manifest.source.source?.townId ?? t('missing'))}
             {t(' · signing-key fingerprint:')}
-            <code>{String(manifest.manifest.source?.fingerprint ?? t('missing'))}</code>
+            <code>{String(manifest.source.source?.fingerprint ?? t('missing'))}</code>
             {t(' · optional vectors: ')}
-            {manifest.manifest.includeVectors ? t('included') : t('omitted')}
+            {manifest.source.includeVectors ? t('included') : t('omitted')}
             {t('. A valid signature does not grant trust in an unfamiliar key.')}
           </p>
+        )}
+        {manifest?.archive.manifest.format === 'ai-town-local-sanitized-chunks' &&
+          'localProof' in manifest.archive && (
+          <>
+            <p className="admin-warning">
+              {t(
+                'This is a locally sanitized RAW derivative. The original source signature proves only the embedded source evidence; it does not sign these current chunk bytes. This import restores cleared visit markers; complete memory and conversation deletion evidence is not yet portable.',
+              )}
+            </p>
+            <p className="admin-muted">
+              {t('Declared local signer town: ')}
+              <code>{manifest.archive.localProof.townId}</code>
+              {t(' · declared local signer fingerprint: ')}
+              <code>{manifest.declaredLocalSignerFingerprint}</code>
+            </p>
+            <Field
+              label={t('Trusted local signer fingerprint')}
+              hint={t(
+                'Verify the local signer fingerprint through a trusted channel, then type it here. The displayed archive declaration is unverified and is never copied into this confirmation automatically.',
+              )}
+            >
+              <input
+                value={expectedLocalProofFingerprint}
+                autoComplete="off"
+                maxLength={100}
+                disabled={!!task.pending}
+                onChange={(event) => setExpectedLocalProofFingerprint(event.target.value)}
+                placeholder="sha256:..."
+              />
+            </Field>
+          </>
         )}
         <div className="admin-toolbar">
           <AdminButton
             disabled={
               !!task.pending ||
               !manifest ||
+              !confirmedLargeArchiveSigner(manifest, expectedLocalProofFingerprint) ||
               !maintenanceReady ||
               (mode !== 'clone' && !sourceStopped) ||
               (mode === 'clone' &&
@@ -689,11 +724,23 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
               void task.run(
                 t('Creating verified staging task'),
                 async () => {
-                  if (!manifest) return;
+                  if (
+                    !manifest ||
+                    !confirmedLargeArchiveSigner(manifest, expectedLocalProofFingerprint)
+                  )
+                    throw new Error(
+                      t('Confirm the trusted local signer fingerprint before creating this import task.'),
+                    );
                   const created = await convex.action(api.federation.backupLarge.createImport, {
                     adminToken,
-                    manifest: manifest.manifest,
-                    signature: manifest.signature,
+                    manifest: manifest.archive.manifest,
+                    signature: manifest.archive.signature,
+                    ...('localProof' in manifest.archive
+                      ? {
+                          localProof: manifest.archive.localProof,
+                          expectedLocalProofFingerprint: expectedLocalProofFingerprint.trim(),
+                        }
+                      : {}),
                     mode,
                     sourceStopped,
                     targetEndpoint: mode === 'clone' ? endpoint.trim() : undefined,
@@ -713,7 +760,7 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
         <Field
           label={t('Archive data chunks')}
           hint={t(
-            'Select plain or encrypted chunk JSON files (up to 1 MiB each before encryption). Parts are decrypted and staged one at a time; the server verifies each digest against the signed manifest.',
+            'Select plain or encrypted chunk JSON files (up to 1 MiB each before encryption). Parts are decrypted and staged one at a time; the server verifies each digest against the authenticated manifest.',
           )}
         >
           <input

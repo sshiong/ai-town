@@ -1,13 +1,14 @@
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import schema from '../schema';
+import type { Doc, Id } from '../_generated/dataModel';
 import { encodeRow, decodeRow, type BackupRow } from './backupHelpers';
 import { descriptor, largeTables, validateManifest, type LargeChunk, type LargeManifest } from './backupLargeHelpers';
 import { validateSelectiveManifest, type SelectiveManifest } from './backupSelectiveHelpers';
 import { canonicalJson } from './protocol';
-import { digest, toBase64, verifySignature } from './security';
+import { createIdentityKeys, digest, toBase64, verifySignature } from './security';
 import { createLocalChunkManifest, createLocalArchiveProof, portableLocalChunkManifest,
-  validateLocalChunkManifest, validateLocalChunk, type LocalChunkDescriptor } from './travelPrivacyLocalChunkManifest';
+  assertLocalArchiveOwner, readLocalArchiveManifest, validateLocalChunkManifest, validateLocalChunk, type LocalChunkDescriptor } from './travelPrivacyLocalChunkManifest';
 
 beforeAll(() => Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true }));
 async function signer(townId: string) {
@@ -155,6 +156,11 @@ const readerModules = {
 };
 async function readerFixture(selective: boolean) {
   const f = await fixture(selective), t = convexTest(schema, readerModules);
+  process.env.FEDERATION_KEY_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64');
+  const keys = await createIdentityKeys();
+  const { _id: _sourceId, _creationTime: _sourceTime, ...sourceFields } = f.sourceEvidence.manifest!.source;
+  await t.run(ctx => ctx.db.insert('federationIdentity', { ...sourceFields,
+    ...keys, townId: 'reader-local-town', deploymentInstanceId: 'reader-local-instance' } as any));
   const jobId = await t.run(ctx => ctx.db.insert('backupLargeJobs', {
     kind: 'export', state: 'COMPLETE', phase: 'COMPLETE', tableIndex: 0, cursor: null,
     chunkCount: f.local.chunks.length, processedChunks: 0, recordCount: 2, bytes: 1, createdAt: 1, updatedAt: 1,
@@ -180,7 +186,14 @@ async function readerFixture(selective: boolean) {
 test.each([false, true])('official export readers load pinned LOCAL_SANITIZED manifest and chunk; selective=%s', async selective => {
   const f = await readerFixture(selective);
   const response = await f.t.action(f.ref('getManifest'), f.args);
-  expect(response).toEqual({ manifest: f.local, signature: '', sourceSignatureValid: false });
+  expect(response.manifest).toEqual(f.local);
+  expect(response.signature).toBe('');
+  expect(response.sourceSignatureValid).toBe(false);
+  if (!selective) {
+    expect(response.localProof).toBeDefined();
+    expect(await validateLocalChunkManifest(response.manifest, { localProof: response.localProof }, { portable: true })).toEqual(f.local);
+    expect(response.localProof.townId).toBe('reader-local-town');
+  }
   expect(JSON.parse(await f.t.action(f.ref('getChunk'), { ...f.args, index: f.world.index }))).toEqual(f.world);
   await f.t.run(ctx => ctx.db.patch(f.jobId, { metadata: { archiveLocalManifestDigest: 'A'.repeat(43) + '=' } }));
   await expect(f.t.action(f.ref('getManifest'), f.args)).rejects.toThrow('LOCAL_ARCHIVE_DIGEST_MISMATCH');
@@ -283,4 +296,24 @@ test('selective private rollback identity is locally authenticated and never por
   await expect(validateLocalChunkManifest(local, { expectedDigest: await digest(local) }, { portable: true }))
     .rejects.toThrow('LOCAL_ARCHIVE_PRIVATE_ROLLBACK_NOT_PORTABLE');
   expect((await portableLocalChunkManifest(local)).chunks.some(c => c.role === 'OLD')).toBe(false);
+});
+
+
+test('imported portable derivative pins its original archive ID, digest and explicit local signer', async () => {
+  const f = await fixture(), proof = await createLocalArchiveProof(f.local, f.localSigner, f.localSigner.sign);
+  const metadata = { archiveImportedFromId: f.local.archiveId, archiveLocalManifestDigest: await digest(f.local),
+    archiveLocalProof: proof, archiveLocalProofFingerprint: `sha256:${await digest(proof.publicKey)}` };
+  const job = { _id: 'new-import-job' as Id<'backupLargeJobs'>, kind: 'import', metadata } as Doc<'backupLargeJobs'>;
+  expect(await assertLocalArchiveOwner(f.local, job)).toBe(true);
+  const t = convexTest(schema, { '../_generated/server.ts': () => import('../_generated/server') });
+  const manifestStorageId = await t.action(ctx => ctx.storage.store(new Blob([JSON.stringify(f.local)])));
+  expect(await t.action(ctx => readLocalArchiveManifest(ctx, { ...job, manifestStorageId }))).toEqual(f.local);
+  for (const changed of [
+    { ...job, kind: 'export' },
+    { ...job, metadata: { ...metadata, archiveImportedFromId: 'other-export' } },
+    { ...job, metadata: { ...metadata, archiveLocalProof: undefined } },
+    { ...job, metadata: { ...metadata, archiveLocalProofFingerprint: 'sha256:wrong' } },
+    { ...job, metadata: { ...metadata, archiveLocalManifestDigest: undefined } },
+  ]) await expect(assertLocalArchiveOwner(f.local, changed as Doc<'backupLargeJobs'>)).rejects.toThrow('LOCAL_ARCHIVE_ARCHIVE_ID_MISMATCH');
+  await expect(assertLocalArchiveOwner({ ...f.local, derivedAt: 3 }, job)).rejects.toThrow('LOCAL_ARCHIVE_DIGEST_MISMATCH');
 });

@@ -9,7 +9,10 @@ import { makeFunctionReference, getFunctionName } from 'convex/server';
 import schema from '../schema';
 import { DEFAULT_RESOURCE_LIMITS } from './resources';
 import { Id } from '../_generated/dataModel';
-import { createIdentityKeys, digest, sign } from './security';
+import { createIdentityKeys, digest, sign, verifySignature } from './security';
+import { createLocalArchiveProof, createLocalChunkManifest, type LocalSanitizedChunkManifest } from './travelPrivacyLocalChunkManifest';
+import { validateLargeImportManifest, assertLargeDerivativeClearedVisits } from './backupLargeLocalImport';
+import type { SelectiveManifest } from './backupSelectiveHelpers';
 import { decodeRow, encodeRow } from './backupHelpers';
 import { Game } from '../aiTown/game';
 import { engineInsertInput } from '../engine/abstractGame';
@@ -364,6 +367,256 @@ async function staged(
     await t.action(action('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(chunk) });
   return jobId as Id<'backupLargeJobs'>;
 }
+
+async function localDerivative(source: Town, archive: Awaited<ReturnType<typeof exported>>,
+  chunks = archive.chunks) {
+  const local = await createLocalChunkManifest({ archiveId: archive.manifest.exportId, derivedAt: 2,
+    clearedVisits: ['removed-visit'], chunks: await Promise.all(chunks.map(async chunk => ({
+      ...await descriptor(chunk), role: 'EXPORT' as const, encoding: 'RAW' as const,
+    }))), sourceEvidence: { manifest: archive.manifest, signature: archive.signature,
+      publicKey: archive.manifest.source.publicKey, digest: await digest(archive.manifest), manifestStorageId: 'foreign-source-storage' } });
+  const localProof = await createLocalArchiveProof(local, { townId: archive.manifest.source.townId,
+    publicKey: source.keys.publicKey }, value => sign(value, source.keys.privateKeyEncrypted));
+  return { manifest: local, signature: '', localProof,
+    expectedLocalProofFingerprint: `sha256:${await digest(localProof.publicKey)}`, chunks };
+}
+
+test('RAW derivative import requires a pinned signer and rejects tampering, signature ambiguity and private rollback', async () => {
+  const source = await town(0), archive = await exported(source.t), derivative = await localDerivative(source, archive);
+  await expect(validateLargeImportManifest(derivative.manifest, '', derivative.localProof)).rejects.toThrow('SIGNER_CONFIRMATION_REQUIRED');
+  await expect(validateLargeImportManifest(derivative.manifest, '', derivative.localProof, undefined, 'sha256:wrong'))
+    .rejects.toThrow('SIGNER_MISMATCH');
+  await expect(validateLargeImportManifest({ ...derivative.manifest, derivedAt: 3 }, '', derivative.localProof,
+    undefined, derivative.expectedLocalProofFingerprint)).rejects.toThrow('LOCAL_PROOF_INVALID');
+  await expect(validateLargeImportManifest(derivative.manifest, archive.signature, derivative.localProof,
+    undefined, derivative.expectedLocalProofFingerprint)).rejects.toThrow('SOURCE_SIGNATURE_NOT_CURRENT');
+  const old = structuredClone(derivative.manifest);
+  old.chunks[0].role = 'OLD';
+  await expect(validateLargeImportManifest(old, '', derivative.localProof, undefined,
+    derivative.expectedLocalProofFingerprint)).rejects.toThrow('PRIVATE_ROLLBACK_NOT_PORTABLE');
+  expect(await verifySignature(derivative.manifest.sourceEvidence.manifest!, archive.signature, source.keys.publicKey)).toBe(true);
+  expect(await verifySignature(derivative.manifest, archive.signature, source.keys.publicKey)).toBe(false);
+  const target = convexTest(schema, modules);
+  await expect(target.action(action('createImport'), { adminToken, manifest: derivative.manifest,
+    signature: '', localProof: derivative.localProof, mode: 'clone', targetEndpoint: 'https://derived.example' }))
+    .rejects.toThrow('SIGNER_CONFIRMATION_REQUIRED');
+  expect(await target.run(ctx => ctx.db.query('backupLargeJobs').collect())).toEqual([]);
+});
+
+test('RAW derivative stage validates its current descriptors and missing references remain fatal before apply', async () => {
+  const source = await town(2), archive = await exported(source.t);
+  const chunks = structuredClone(archive.chunks);
+  const memories = chunks.find(chunk => chunk.table === 'memories')!;
+  // Removing one side of a reflection cycle is not a valid closed privacy derivative.
+  memories.rows = memories.rows.slice(0, 1);
+  const derivative = await localDerivative(source, archive, chunks);
+  const target = convexTest(schema, modules);
+  const { jobId }: { jobId: Id<'backupLargeJobs'> } = await target.action(action('createImport'), { adminToken,
+    manifest: derivative.manifest, signature: '', localProof: derivative.localProof,
+    expectedLocalProofFingerprint: derivative.expectedLocalProofFingerprint,
+    mode: 'clone', targetEndpoint: 'https://derived.example' });
+  await expect(target.action(action('stageChunk'), { adminToken, jobId,
+    chunk: JSON.stringify(archive.chunks.find(chunk => chunk.table === 'memories')) })).rejects.toThrow('CHECKSUM_MISMATCH');
+  for (const chunk of chunks) await target.action(action('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(chunk) });
+  await expect(drive(target, jobId, 'import', 'READY')).rejects.toThrow('BACKUP_REFERENCE_MISSING');
+  expect(await target.run(ctx => ctx.db.query('worlds').collect())).toEqual([]);
+  expect(await target.run(ctx => ctx.db.query('memories').collect())).toEqual([]);
+  const job = (await target.run(ctx => ctx.db.get(jobId)))!;
+  expect(job.metadata.sourceSignatureValid).toBe(false);
+  expect(job.metadata.vectorSourceTrusted).toBe(false);
+  expect(job.source).toEqual(archive.manifest.source);
+  expect(job.metadata.archiveSourceEvidence).not.toHaveProperty('manifestStorageId');
+});
+
+test('RAW derivative stage refuses retained cleared-visit prose while permitting safe control metadata', async () => {
+  const source = await town(1);
+  await source.t.run(ctx => ctx.db.patch(source.memoryIds[0], { data: { type: 'travel', visitId: 'removed-visit',
+    eventId: 'removed-event', hostTownId: 'other', participants: [], occurredAt: 1 } }));
+  const archive = await exported(source.t), derivative = await localDerivative(source, archive);
+  const target = convexTest(schema, modules);
+  const { jobId }: { jobId: Id<'backupLargeJobs'> } = await target.action(action('createImport'), { adminToken,
+    manifest: derivative.manifest, signature: '', localProof: derivative.localProof,
+    expectedLocalProofFingerprint: derivative.expectedLocalProofFingerprint,
+    mode: 'clone', targetEndpoint: 'https://derived.example' });
+  await expect(target.action(action('stageChunk'), { adminToken, jobId,
+    chunk: JSON.stringify(archive.chunks.find(chunk => chunk.table === 'memories')) })).rejects.toThrow('BACKUP_PRIVACY_REDACTED');
+  expect(() => assertLargeDerivativeClearedVisits({ index: 0, table: 'visitLedger',
+    rows: [encodeRow({ visitId: 'removed-visit', state: 'COMPLETED' })] }, ['removed-visit'])).not.toThrow();
+});
+
+test('RAW derivative retains empty-world infrastructure and same-identity recovery gates', async () => {
+  const source = await town(0);
+  await source.t.run(async ctx => {
+    await ctx.db.patch(source.worldId, { players: [], agents: [] });
+    for (const binding of await ctx.db.query('residentModelBindings').collect()) await ctx.db.delete(binding._id);
+    for (const runtime of await ctx.db.query('federationAgentRuntimes').collect()) await ctx.db.delete(runtime._id);
+  });
+  const derivative = await localDerivative(source, await exported(source.t));
+  const request = { adminToken, manifest: derivative.manifest, signature: '', localProof: derivative.localProof,
+    expectedLocalProofFingerprint: derivative.expectedLocalProofFingerprint };
+  await expect(source.t.action(action('createImport'), { ...request, mode: 'restore', sourceStopped: false }))
+    .rejects.toThrow('RESTORE_SOURCE_STOP_REQUIRED');
+  const other = await town(0);
+  await expect(other.t.action(action('createImport'), { ...request, mode: 'migrate', sourceStopped: true }))
+    .rejects.toThrow('RESTORE_IDENTITY_PROOF_REQUIRED');
+  const target = convexTest(schema, modules);
+  const { jobId }: { jobId: Id<'backupLargeJobs'> } = await target.action(action('createImport'), {
+    ...request, mode: 'clone', targetEndpoint: 'https://empty-derived.example' });
+  for (const chunk of derivative.chunks) await target.action(action('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(chunk) });
+  await drive(target, jobId, 'import', 'READY');
+  await target.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(target, jobId, 'import', 'COMPLETE');
+  await target.run(async ctx => {
+    const world = (await ctx.db.query('worlds').unique())!;
+    expect(world.agents).toEqual([]);
+    expect(world.players).toEqual([]);
+    const status = (await ctx.db.query('worldStatus').unique())!;
+    expect(status.worldId).toBe(world._id);
+    expect(status.status).toBe('stoppedByDeveloper');
+    expect((await ctx.db.get(status.engineId))!.running).toBe(false);
+    expect((await ctx.db.query('maps').unique())!.worldId).toBe(world._id);
+  });
+});
+
+test('RAW entry explicitly rejects a valid locally signed SELECTIVE derivative', async () => {
+  const source = await town(0), archive = await exported(source.t);
+  const chunks = archive.chunks.filter(chunk => ['worlds', 'federationIdentity'].includes(chunk.table))
+    .map((chunk, index) => ({ ...chunk, index }));
+  const original: SelectiveManifest = { format: 'ai-town-selective-archive', version: 2, schemaVersion: 1,
+    scope: 'config-only', source: archive.manifest.source, exportedAt: archive.manifest.exportedAt,
+    exportId: 'selective-fixture', chunks: await Promise.all(chunks.map(descriptor)),
+    selection: { scope: 'config-only', owners: [], categories: ['configuration'], from: null, to: null,
+      includePublicPeers: false, dependencyPolicy: 'same-owner-evidence-and-public-context',
+      timePolicy: 'event-time-else-creation-time-half-open' }, usage: 'selective-transfer', operator: 'fixture', reason: 'fixture' };
+  const signature = await sign(original, source.keys.privateKeyEncrypted);
+  const local = await createLocalChunkManifest({ archiveId: 'selective-derived', derivedAt: 2,
+    clearedVisits: ['removed-visit'], chunks: original.chunks.map(chunk => ({ ...chunk,
+      role: 'EXPORT', encoding: 'SELECTIVE' })),
+    sourceEvidence: { manifest: original, signature, publicKey: source.keys.publicKey, digest: await digest(original) } });
+  const proof = await createLocalArchiveProof(local, { townId: original.source.townId, publicKey: source.keys.publicKey },
+    value => sign(value, source.keys.privateKeyEncrypted));
+  await expect(validateLargeImportManifest(local, '', proof, undefined, `sha256:${await digest(proof.publicKey)}`))
+    .rejects.toThrow('SELECTIVE_ARCHIVE_USE_SELECTIVE_API');
+});
+
+test('RAW staging rechecks its persisted proof, signer pin and manifest digest before storing any chunk', async () => {
+  const source = await town(0), derivative = await localDerivative(source, await exported(source.t));
+  const target = convexTest(schema, modules);
+  const { jobId }: { jobId: Id<'backupLargeJobs'> } = await target.action(action('createImport'), { adminToken,
+    manifest: derivative.manifest, signature: '', localProof: derivative.localProof,
+    expectedLocalProofFingerprint: derivative.expectedLocalProofFingerprint,
+    mode: 'clone', targetEndpoint: 'https://proof-fenced.example' });
+  const original = (await target.run(ctx => ctx.db.get(jobId)))!;
+  const beforeObjects = await target.run(ctx => ctx.db.system.query('_storage').collect());
+  for (const [changes, expectedError] of [
+    [{ archiveLocalProofFingerprint: 'sha256:wrong' }, 'SIGNER_MISMATCH'],
+    [{ archiveLocalManifestDigest: await digest({ altered: true }) }, 'DIGEST_MISMATCH'],
+    [{ archiveLocalProof: { ...derivative.localProof, signature: 'invalid' } }, 'LOCAL_PROOF_INVALID'],
+  ] as const) {
+    await target.run(ctx => ctx.db.patch(jobId, { metadata: { ...original.metadata, ...changes } }));
+    await expect(target.action(action('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(derivative.chunks[0]) }))
+      .rejects.toThrow(expectedError);
+    expect(await target.run(ctx => ctx.db.query('backupLargeChunks').collect())).toEqual([]);
+    expect(await target.run(ctx => ctx.db.system.query('_storage').collect())).toEqual(beforeObjects);
+  }
+  await target.run(ctx => ctx.db.patch(jobId, { metadata: original.metadata }));
+  await target.action(action('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(derivative.chunks[0]) });
+  expect(await target.run(ctx => ctx.db.query('backupLargeChunks').collect())).toHaveLength(1);
+});
+
+test.each(['clone', 'restore', 'migrate'] as const)('real RAW export, sensitive clear, derivative export and formal %s retain other prose and stopped runtime', async mode => {
+  let checkpoint = 'source setup';
+  try {
+    const source = await town(0);
+    await source.t.run(async ctx => {
+      for (const [visitId, description] of [['removed-visit', 'selected-private-travel-prose'],
+        ['retained-visit', 'other-private-travel-prose']]) {
+        await ctx.db.insert('memories', { worldId: source.worldId, playerId: 'p:0', agentGlobalId: source.agentGlobalId,
+          description, importance: 8, lastAccess: 1, data: { type: 'travel', visitId, eventId: `${visitId}-event`,
+            hostTownId: 'foreign', participants: [], occurredAt: 1 } });
+        await ctx.db.insert('visitLedger', { visitId, worldId: source.worldId, homePlayerId: 'p:0',
+          agentGlobalId: source.agentGlobalId, homeTownId: 'town:large', hostTownId: 'foreign',
+          homeDeploymentEpoch: 1, hostDeploymentEpoch: 1, agentAuthorityEpoch: 1, visitLeaseVersion: 1,
+          leaseExpiry: 1, state: 'COMPLETED', role: 'home', fencingToken: 'fixture-fence', profile: {}, createdAt: 1, updatedAt: 1 });
+      }
+    });
+    checkpoint = 'original export';
+    const { jobId: exportJobId } = await source.t.mutation(mutation('startExport'), { adminToken });
+    await drive(source.t, exportJobId, 'export', 'COMPLETE');
+    const original = await source.t.action(action('getManifest'), { adminToken, jobId: exportJobId });
+    const originalManifest = original.manifest as LargeManifest;
+    jest.useFakeTimers();
+    try {
+      checkpoint = 'first privacy inspection';
+      const privacyJobId: Id<'travelPrivacyJobs'> = await source.t.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:inspect'), {
+        adminToken, visitId: 'removed-visit', scope: 'SENSITIVE' });
+      await source.t.finishAllScheduledFunctions(() => jest.runAllTimers(), 2000);
+      expect((await source.t.run(ctx => ctx.db.get(privacyJobId)))!.state).toBe('READY');
+      checkpoint = 'first privacy clear';
+      await source.t.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:start'), { adminToken, jobId: privacyJobId });
+      await drivePrivacyWithStorageMetadata(source.t, privacyJobId);
+      expect((await source.t.run(ctx => ctx.db.get(privacyJobId)))!.state).toBe('COMPLETE');
+    } finally { jest.useRealTimers(); }
+    checkpoint = 'derivative export';
+    const derived = await source.t.action(action('getManifest'), { adminToken, jobId: exportJobId });
+    const local = derived.manifest as LocalSanitizedChunkManifest;
+    expect(local.format).toBe('ai-town-local-sanitized-chunks');
+    expect(local.sourceSignatureValid).toBe(false);
+    expect(derived.signature).toBe('');
+    expect(derived.localProof).toBeDefined();
+    expect(local.sourceEvidence.manifest).toEqual(originalManifest);
+    expect(await verifySignature(originalManifest, local.sourceEvidence.signature, local.sourceEvidence.publicKey)).toBe(true);
+    expect(await verifySignature(local, local.sourceEvidence.signature, local.sourceEvidence.publicKey)).toBe(false);
+    const chunks: LargeChunk[] = [];
+    for (const entry of local.chunks) chunks.push(JSON.parse(await source.t.action(action('getChunk'), { adminToken,
+      jobId: exportJobId, index: entry.index })));
+    expect(JSON.stringify(chunks)).not.toContain('selected-private-travel-prose');
+    expect(JSON.stringify(chunks)).toContain('other-private-travel-prose');
+    const target = mode === 'clone' ? convexTest(schema, modules) : source.t;
+    checkpoint = 'formal derivative import creation';
+    const { jobId }: { jobId: Id<'backupLargeJobs'> } = await target.action(action('createImport'), { adminToken,
+      manifest: local, signature: '', localProof: derived.localProof, sourceSignatureValid: false,
+      expectedLocalProofFingerprint: `sha256:${await digest(derived.localProof!.publicKey)}`,
+      mode, sourceStopped: true, ...(mode === 'clone' ? { targetEndpoint: 'https://local-derived-copy.example' } : {}) });
+    checkpoint = 'formal derivative staging';
+    for (const chunk of chunks) await target.action(action('stageChunk'), { adminToken, jobId, chunk: JSON.stringify(chunk) });
+    checkpoint = 'formal derivative preflight';
+    await drive(target, jobId, 'import', 'READY');
+    checkpoint = 'formal derivative apply';
+    await target.mutation(mutation('startApply'), { adminToken, jobId });
+    await drive(target, jobId, 'import', 'COMPLETE');
+    const restored = await retainedState(target);
+    expect(restored.memories.map(memory => memory.description)).toEqual(['other-private-travel-prose']);
+    expect(restored.worlds[0].agents).toHaveLength(1);
+    expect(await target.run(ctx => ctx.db.query('engines').filter(q => q.eq(q.field('running'), true)).collect())).toEqual([]);
+    expect(await target.run(ctx => ctx.db.query('visitLedger').collect())).toEqual([]);
+    expect(await target.run(ctx => ctx.db.query('travelPrivacyTombstones').withIndex('key', q => q.eq('key', 'visit:removed-visit')).unique())).toBeTruthy();
+    const imported = (await target.run(ctx => ctx.db.query('backupImports').order('desc').first()))!;
+    expect(imported.manifest.sourceSignatureValid).toBe(false);
+    expect(imported.sourceTownId).toBe(originalManifest.source.townId);
+    expect(restored.identity[0].townId === originalManifest.source.townId).toBe(mode !== 'clone');
+    if (mode === 'clone') {
+      checkpoint = 'imported derivative second inspection';
+      const candidates = await target.query(makeFunctionReference<'query'>('federation/travelPrivacy:historicalCandidates'), {
+        adminToken, visitId: 'retained-visit', paginationOpts: { cursor: null, numItems: 5 } });
+      expect(candidates.page).toHaveLength(1);
+      jest.useFakeTimers();
+      try {
+        const secondPrivacyJobId: Id<'travelPrivacyJobs'> = await target.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:inspect'), {
+          adminToken, visitId: 'retained-visit', scope: 'SENSITIVE', history: candidates.page[0].history });
+        await target.finishAllScheduledFunctions(() => jest.runAllTimers(), 2000);
+        expect((await target.run(ctx => ctx.db.get(secondPrivacyJobId)))!.state).toBe('READY');
+        checkpoint = 'imported derivative second clear';
+        await target.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:start'), { adminToken, jobId: secondPrivacyJobId });
+        await drivePrivacyWithStorageMetadata(target, secondPrivacyJobId);
+        expect((await target.run(ctx => ctx.db.get(secondPrivacyJobId)))!.state).toBe('COMPLETE');
+        expect(await target.run(ctx => ctx.db.query('memories').collect())).toEqual([]);
+      } finally { jest.useRealTimers(); }
+    }
+  } catch (error) {
+    throw new Error(`RAW_${mode}_${checkpoint}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+});
 
 test('large import detects a conflicting deletion record in a later chunk before touching destination data', async () => {
   const source = await town(1);
@@ -991,7 +1244,8 @@ test('formal large clone supplies terminal historical evidence for privacy clean
       expect(stored).toEqual(object.descriptor);
     }
     await target.mutation(makeFunctionReference<'mutation'>('federation/travelPrivacy:start'), { adminToken, jobId });
-    await drivePrivacyWithStorageMetadata(target, jobId);
+    // Complete-generation preflight is repeated after each emulated lost upload ACK.
+    await drivePrivacyWithStorageMetadata(target, jobId, 5000);
     await target.run(async ctx => {
       const completed = (await ctx.db.get(jobId))!;
       if (completed.state !== 'COMPLETE') throw new Error(JSON.stringify({ state: completed.state, phase: completed.phase, code: completed.archiveError }));

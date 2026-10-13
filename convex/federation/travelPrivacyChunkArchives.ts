@@ -7,7 +7,7 @@ import { digest, verifySignature } from './security';
 import { mutationRef, queryRef } from './refs';
 import { chunkEvidence } from './travelPrivacyChunkSchema';
 import { dataRevision, privacyRevisionKey } from '../models/embeddingDataRevision';
-import { validateLocalChunkManifest, validateLocalChunk } from './travelPrivacyLocalChunkManifest';
+import { assertLocalArchiveOwner, validateLocalChunkManifest, validateLocalChunk } from './travelPrivacyLocalChunkManifest';
 
 type ObjectPlan = Doc<'travelPrivacyChunkObjects'>;
 type Row = Doc<'travelPrivacyChunkRows'>;
@@ -195,9 +195,14 @@ export const inspectPage = internalAction({
           expectedDigest: backup.metadata?.archiveLocalManifestDigest,
           localProof: backup.metadata?.archiveLocalProof,
         });
-        if (manifest.archiveId !== backup._id) throw new Error('ARCHIVE_ID_MISMATCH');
-        const expected = manifest.chunks.find(c => c.index === chunk.index);
-        if (!expected || expected.role !== role || await digest({ index: expected.index, table: expected.table,
+        const imported = await assertLocalArchiveOwner(manifest, backup);
+        // New private rollback chunks belong to this import, not to the portable source manifest.
+        const expected = imported && role === 'OLD'
+          ? { ...actual, role: 'OLD' as const, encoding: 'RAW' as const }
+          : manifest.chunks.find(c => c.index === chunk.index);
+        const matchesRole = expected && (expected.role === role ||
+          imported && role === 'SOURCE' && ['SOURCE', 'EXPORT'].includes(expected.role));
+        if (!expected || !matchesRole || await digest({ index: expected.index, table: expected.table,
           count: expected.count, bytes: expected.bytes, digest: expected.digest }) !== await digest(actual))
           throw new Error('MANIFEST_DESCRIPTOR_MISMATCH');
         await validateLocalChunk(raw, expected);

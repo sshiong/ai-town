@@ -205,6 +205,22 @@ export async function localArchiveExportSnapshot(ctx: { db: DatabaseReader }, jo
   return { job, chunk };
 }
 
+/** A portable derivative retains its exporting archive ID; importing must pin that origin and signer. */
+export async function assertLocalArchiveOwner(manifest: LocalSanitizedChunkManifest, job: Doc<'backupLargeJobs'>) {
+  if (manifest.archiveId === job._id) return false;
+  const metadata = job.metadata;
+  if (job.kind !== 'import' || metadata?.archiveImportedFromId !== manifest.archiveId ||
+    !metadata.archiveLocalProof || typeof metadata.archiveLocalManifestDigest !== 'string' ||
+    typeof metadata.archiveLocalProofFingerprint !== 'string' ||
+    metadata.archiveLocalProofFingerprint !== `sha256:${await digest(metadata.archiveLocalProof.publicKey)}`)
+    fail('ARCHIVE_ID_MISMATCH');
+  await validateLocalChunkManifest(manifest, {
+    expectedDigest: metadata.archiveLocalManifestDigest,
+    localProof: metadata.archiveLocalProof,
+  }, { portable: true });
+  return true;
+}
+
 export async function readLocalArchiveManifest(
   ctx: { storage: { get(id: Doc<'backupLargeJobs'>['manifestStorageId'] & {}): Promise<Blob | null> } },
   job: Doc<'backupLargeJobs'>,
@@ -218,7 +234,7 @@ export async function readLocalArchiveManifest(
     expectedDigest: job.metadata.archiveLocalManifestDigest,
     localProof: job.metadata.archiveLocalProof,
   });
-  if (manifest.archiveId !== job._id) fail('ARCHIVE_ID_MISMATCH');
+  await assertLocalArchiveOwner(manifest, job);
   return manifest;
 }
 

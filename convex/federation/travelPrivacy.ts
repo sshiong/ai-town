@@ -375,6 +375,10 @@ export const retry = mutation({
       revision: rewrite.revision + 1, expectedParentRevision: next.revision,
       // A retry fences the old scan; a fresh proof must cover the new writer checkpoint.
       referenceProofId: undefined,
+      preflightProofId: undefined,
+      // Retry retains the old archive epoch. Pre-delete work resumes only after
+      // a fresh fixed-generation reference proof succeeds at this checkpoint.
+      referenceResume: ['PREPARING', 'IMPORT_FENCE', 'ROWS', 'OBJECTS', 'MANIFESTS'].includes(rewrite.phase),
       sourceRevision: rewrite.phase === 'DONE' ? rewrite.sourceRevision : await dataRevision(ctx.db, privacyRevisionKey), errorCode: undefined,
     });
     if (job.phase === 'CHUNK_CHECK') {

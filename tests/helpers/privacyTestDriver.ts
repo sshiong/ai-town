@@ -6,8 +6,9 @@ import { actionRef, mutationRef } from '../../convex/federation/refs';
 
 type Test = ReturnType<typeof convexTest<typeof schema.tables>>;
 /** Drive real privacy handlers; convex-test omits Blob.type, so restore only that metadata field. */
-export async function drivePrivacyWithStorageMetadata(t: Test, jobId: Id<'travelPrivacyJobs'>) {
-  for (let n = 0; n < 2000; n++) {
+export async function drivePrivacyWithStorageMetadata(t: Test, jobId: Id<'travelPrivacyJobs'>, pageBudget = 2000) {
+  if (!Number.isSafeInteger(pageBudget) || pageBudget < 1 || pageBudget > 20000) throw new Error('PRIVACY_TEST_BUDGET_INVALID');
+  for (let n = 0; n < pageBudget; n++) {
     const job = (await t.run(ctx => ctx.db.get(jobId)))!;
     if (job.state === 'COMPLETE') return;
     if (job.state !== 'RUNNING') throw new Error(`PRIVACY_TEST_STATE_${job.state}`);
@@ -40,5 +41,12 @@ export async function drivePrivacyWithStorageMetadata(t: Test, jobId: Id<'travel
       if (next.archiveError) throw new Error(`PRIVACY_TEST_${next.phase}_${next.archiveError}`);
     }
   }
-  throw new Error('PRIVACY_TEST_PAGE_LIMIT');
+  const job = await t.run(ctx => ctx.db.get(jobId));
+  const rewrite = job?.chunkRewriteId ? await t.run(ctx => ctx.db.get(job.chunkRewriteId!)) : null;
+  const proofId = rewrite?.preflightProofId ?? rewrite?.referenceProofId;
+  const proof = proofId ? await t.run(ctx => ctx.db.get(proofId)) : null;
+  throw new Error(`PRIVACY_TEST_PAGE_LIMIT:${JSON.stringify({ parentPhase: job?.phase,
+    writerPhase: rewrite?.phase, writerRevision: rewrite?.revision, referenceResume: rewrite?.referenceResume,
+    proofPhase: proof?.phase, tableIndex: proof?.tableIndex, rows: proof?.rows,
+    objects: proof?.objects, bytes: proof?.bytes, leafOffset: proof?.leafOffset })}`);
 }

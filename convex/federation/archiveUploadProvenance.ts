@@ -188,13 +188,14 @@ export async function completeArchiveUploadRetirement(ctx: MutationCtx, a: Check
 }
 
 const checkpoint = { operationId: v.id('archiveUploadOperations'), revision: v.number() };
-export const recoveryBegin = trackedInternalMutation({ args: checkpoint, handler: async (ctx, a) => {
+export async function beginArchiveUploadRecovery(ctx: MutationCtx, a: Checkpoint) {
   const op = await checked(ctx, a); assert(op.state !== 'CLEANED', 'ALREADY_CLEANED');
   if (op.recoveryCutoff === undefined) await ctx.db.patch(op._id, { recoveryCutoff: Date.now(), recoveryCursor: null,
     recoveryRevision: op.recoveryRevision + 1, updatedAt: Date.now() });
   const next = (await ctx.db.get(op._id))!;
   return { ...reservation(next), recoveryRevision: next.recoveryRevision, cursor: next.recoveryCursor, cutoff: next.recoveryCutoff! };
-} });
+}
+export const recoveryBegin = trackedInternalMutation({ args: checkpoint, handler: beginArchiveUploadRecovery });
 export const recoveryRead = internalQuery({ args: { ...checkpoint, recoveryRevision: v.number() }, handler: async (ctx, a) => {
   const op = await checked(ctx, a); assert(op.recoveryRevision === a.recoveryRevision && op.recoveryCutoff !== undefined, 'RECOVERY_CHANGED');
   const page = await ctx.db.system.query('_storage').filter(q => q.lte(q.field('_creationTime'), op.recoveryCutoff!))
@@ -203,8 +204,9 @@ export const recoveryRead = internalQuery({ args: { ...checkpoint, recoveryRevis
   return { cursor: op.recoveryCursor, continueCursor: page.continueCursor, done: page.isDone, scanned: page.page.length,
     storageIds: owned.filter(row => archiveUploadMetadataMatches(op, row)).map(row => row._id), conflict: owned.some(row => !archiveUploadMetadataMatches(op, row)) };
 } });
-export const recoverySave = trackedInternalMutation({ args: { ...checkpoint, recoveryRevision: v.number(), expectedCursor: v.union(v.string(), v.null()),
-  cursor: v.string(), done: v.boolean(), storageIds: v.array(v.id('_storage')), conflict: v.boolean() }, handler: async (ctx, a) => {
+type RecoverySave = Checkpoint & { recoveryRevision: number; expectedCursor: string | null; cursor: string;
+  done: boolean; storageIds: Id<'_storage'>[]; conflict: boolean };
+export async function saveArchiveUploadRecovery(ctx: MutationCtx, a: RecoverySave) {
   const op = await checked(ctx, a);
   if (op.state === 'CLEANED' || op.recoveryRevision !== a.recoveryRevision || op.recoveryCursor !== a.expectedCursor || op.recoveryCutoff === undefined) return false;
   assert(a.storageIds.length <= PAGE, 'RECOVERY_PAGE_BUDGET');
@@ -216,7 +218,11 @@ export const recoverySave = trackedInternalMutation({ args: { ...checkpoint, rec
     recoveryConflict: op.recoveryConflict || a.conflict,
     ...(a.done ? { recoveryCompleteCutoff: op.recoveryCutoff, recoveryCutoff: undefined, recoveryPasses: op.recoveryPasses + 1 } : {}), updatedAt: Date.now() });
   return true;
-} });
+}
+export const recoverySave = trackedInternalMutation({ args: { ...checkpoint, recoveryRevision: v.number(), expectedCursor: v.union(v.string(), v.null()),
+  cursor: v.string(), done: v.boolean(), storageIds: v.array(v.id('_storage')), conflict: v.boolean() }, handler: saveArchiveUploadRecovery });
+
+
 /** One bounded page per call; callers schedule further pages/windows and retain UNKNOWN until terminal proof. */
 export const recoverPage = action({ args: { ...checkpoint, adminToken: v.string() }, handler: async (ctx, a) => {
   requireAdmin(a.adminToken);

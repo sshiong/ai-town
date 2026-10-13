@@ -1,10 +1,14 @@
 import { v } from 'convex/values';
 import { internalAction, internalMutation, internalQuery, type QueryCtx, type MutationCtx } from '../_generated/server';
 import type { Doc, Id } from '../_generated/dataModel';
-import { archiveReferenceRevisionKey, archiveReferenceTables, dataRevision } from '../models/embeddingDataRevision';
+import { archiveReferenceRevisionKey, archiveReferenceTables, dataRevision, privacyRevisionKey } from '../models/embeddingDataRevision';
 import { archiveUploadSha256Hex, archiveUploadMetadataMatches, archiveStorageReferenceKind } from './archiveUploadProvenance';
 import { mutationRef, queryRef } from './refs';
 import { toBase64 } from './security';
+import { digest } from './security';
+import { descriptor, rowMetadata } from './backupLargeHelpers';
+import { decodeRow, encodeRow } from './backupHelpers';
+import { rewriteChunkRows, sanitizeSelectedRow } from './travelPrivacyChunkRewrite';
 
 /* Integration contract:
  * 1. After all aliases/manifests publish, start(rewriteId, exact revision). Drive TARGETS, ROWS, BLOBS, finish.
@@ -114,12 +118,27 @@ async function checked(ctx: DB, proofId: Id<'travelPrivacyChunkReferenceProofs'>
   const proof = await ctx.db.get(proofId);
   requireProof(proof, 'REFERENCE_PROOF_MISSING');
   const rewrite = await ctx.db.get(proof.rewriteId);
-  requireProof(rewrite?.revision === proof.rewriteRevision && rewrite.phase === 'DELETE', 'REFERENCE_WRITER_CHANGED');
+  requireProof(rewrite?.revision === proof.rewriteRevision && rewrite.phase === (proof.writerPhase ?? proof.purpose ?? 'DELETE'), 'REFERENCE_WRITER_CHANGED');
   requireProof(await dataRevision(ctx.db, archiveReferenceRevisionKey) === proof.referenceRevision, 'REFERENCE_EPOCH_CHANGED');
   return proof;
 }
 const args = { proofId: v.id('travelPrivacyChunkReferenceProofs') };
 export const status = internalQuery({ args, handler: (ctx, a) => checked(ctx, a.proofId) });
+export const startPreflight = internalMutation({
+  args: { rewriteId: v.id('travelPrivacyChunkRewrites'), revision: v.number(), resume: v.optional(v.boolean()) }, handler: async (ctx, a) => {
+    const rewrite = await ctx.db.get(a.rewriteId);
+    requireProof(rewrite && ['PREPARING', 'IMPORT_FENCE', 'ROWS', 'OBJECTS', 'MANIFESTS'].includes(rewrite.phase) && rewrite.revision === a.revision &&
+      (a.resume ? rewrite.referenceResume : rewrite.phase === 'PREPARING' && rewrite.cursor === null && rewrite.objects === 0 && !rewrite.preflightComplete), 'REFERENCE_WRITER_CHANGED');
+    const parent = await ctx.db.get(rewrite.privacyJobId), scan = await ctx.db.get(rewrite.scanId);
+    requireProof(parent?.revision === rewrite.expectedParentRevision && scan?.phase === 'READY_TO_REWRITE' &&
+      scan.blockers === 0 && rewrite.sourceRevision === await dataRevision(ctx.db, privacyRevisionKey), 'REFERENCE_WRITER_CHANGED');
+    return ctx.db.insert('travelPrivacyChunkReferenceProofs', {
+      rewriteId: a.rewriteId, rewriteRevision: a.revision, purpose: 'PREPARING', writerPhase: rewrite.phase as 'PREPARING' | 'IMPORT_FENCE' | 'ROWS' | 'OBJECTS' | 'MANIFESTS',
+      referenceRevision: await dataRevision(ctx.db, archiveReferenceRevisionKey), phase: 'TARGETS',
+      tableIndex: 0, cursor: null, leafOffset: 0, rows: 0, targets: 0, objects: 0, bytes: 0,
+    });
+  },
+});
 export const start = internalMutation({
   args: { rewriteId: v.id('travelPrivacyChunkRewrites'), revision: v.number() },
   handler: async (ctx, a) => {
@@ -139,6 +158,34 @@ export const start = internalMutation({
 export const targetPage = internalMutation({ args, handler: async (ctx, a) => {
   const p = await checked(ctx, a.proofId);
   if (p.phase !== 'TARGETS') return p.phase;
+  if (p.purpose === 'PREPARING') {
+    const rewrite = (await ctx.db.get(p.rewriteId))!;
+    const page = await ctx.db.query('travelPrivacyChunkObjects').withIndex('scan', q => q.eq('scanId', rewrite.scanId))
+      .paginate({ cursor: p.cursor, numItems: 10, maximumRowsRead: 10, maximumBytesRead: 128 * 1024 });
+    let targets = p.targets;
+    for (const plan of page.page) {
+      if (!plan.selectedRows) continue;
+      requireProof(plan.state === 'CHECKED' && plan.blockers.length === 0, 'REFERENCE_PLAN_CHANGED');
+      const rows = await ctx.db.query('travelPrivacyChunkRows').withIndex('object', q => q.eq('objectId', plan._id)).take(21);
+      const indices = rows.filter(row => row.selected).map(row => row.evidence.rowIndex).sort((x, y) => x - y);
+      requireProof(rows.length <= 20 && indices.length === plan.selectedRows && new Set(indices).size === indices.length &&
+        indices.every(index => Number.isSafeInteger(index) && index >= 0 && index < plan.descriptor.count), 'REFERENCE_PLAN_CHANGED');
+      const producer = await ctx.db.get(plan.backupJobId);
+      const selective = plan.role !== 'OLD' && !!producer?.mode?.startsWith('selective-');
+      const prior = await ctx.db.query('travelPrivacyChunkReferenceTargets').withIndex('target', q => q.eq('proofId', p._id).eq('storageId', plan.originalStorageId)).first();
+      if (prior) {
+        const originalPlan = prior.planObjectId && await ctx.db.get(prior.planObjectId);
+        requireProof(originalPlan && originalPlan.selectionDigest === plan.selectionDigest && originalPlan.originalDigest === plan.originalDigest &&
+          await digest(originalPlan.descriptor) === await digest(plan.descriptor) && prior.selective === selective &&
+          JSON.stringify(prior.selectedIndices) === JSON.stringify(indices), 'REFERENCE_PLAN_ALIAS_CHANGED');
+      } else {
+        await ctx.db.insert('travelPrivacyChunkReferenceTargets', { proofId: p._id, storageId: plan.originalStorageId,
+          planObjectId: plan._id, selectedIndices: indices, selective }); targets++;
+      }
+    }
+    await ctx.db.patch(p._id, { targets, cursor: page.isDone ? null : page.continueCursor, phase: page.isDone ? 'ROWS' : 'TARGETS' });
+    return page.isDone ? 'ROWS' : 'TARGETS';
+  }
   const page = await ctx.db.query('travelPrivacyChunkReplacements').withIndex('rewrite_storage', q => q.eq('rewriteId', p.rewriteId))
     .paginate({ cursor: p.cursor, numItems: 10, maximumRowsRead: 10, maximumBytesRead: 128 * 1024 });
   let targets = p.targets;
@@ -160,6 +207,11 @@ async function superseded(ctx: DB, p: Proof, row: Doc<'travelPrivacyChunkReplace
 async function historical(ctx: DB, p: Proof, table: string, row: any, leaf: Leaf): Promise<boolean> {
   if (archiveStorageReferenceKind(leaf.path) === 'HISTORICAL_EVIDENCE') return true;
   const rewrite = (await ctx.db.get(p.rewriteId))!;
+  if (p.purpose === 'PREPARING' && table === 'backupLargeChunks' && leaf.path === 'storageId') {
+    const plan = await ctx.db.query('travelPrivacyChunkObjects').withIndex('scan_chunk', q => q.eq('scanId', rewrite.scanId).eq('chunkId', row._id)).unique();
+    return !!plan && plan.selectedRows > 0 && plan.state === 'CHECKED' && !plan.blockers.length &&
+      plan.originalStorageId === leaf.storageId && plan.aliases.some(alias => alias.table === table && alias.id === row._id);
+  }
   if (table === 'travelPrivacyChunkObjects' && row.scanId === rewrite.scanId && leaf.path === 'originalStorageId') return true;
   if (table === 'travelPrivacyChunkReplacements') {
     if (row.rewriteId === p.rewriteId && leaf.path === 'originalStorageId') return true;
@@ -167,8 +219,49 @@ async function historical(ctx: DB, p: Proof, table: string, row: any, leaf: Leaf
   }
   const operationId = table === 'archiveUploadOperations' ? row._id : table === 'archiveUploadCandidates' ? row.operationId : null;
   if (operationId && ['publishedStorageId', 'storageId'].includes(leaf.path))
-    return !!await ctx.db.query('travelPrivacyChunkReferenceRetirements').withIndex('operation', q => q.eq('proofId', p._id).eq('operationId', operationId).eq('storageId', leaf.storageId)).first();
+    return !!await ctx.db.query('travelPrivacyChunkReferenceRetirements').withIndex('operation', q => q.eq('proofId', p._id).eq('operationId', operationId).eq('storageId', leaf.storageId)).first() ||
+      (p.purpose === 'PREPARING' && await plannedUpload(ctx, rewrite, operationId, leaf.storageId));
   return false;
+}
+async function plannedUpload(ctx: DB, rewrite: Doc<'travelPrivacyChunkRewrites'>, operationId: Id<'archiveUploadOperations'>, storageId: Id<'_storage'>) {
+  const op = await ctx.db.get(operationId);
+  if (!op || op.state !== 'PUBLISHED' || !op.uploadAcknowledged || op.publishedStorageId !== storageId ||
+    !['LARGE_CHUNK', 'SELECTIVE_CHUNK', 'CHUNK_PRIVACY_REPLACEMENT'].includes(op.producerKind) ||
+    op.publication?.table !== 'backupLargeChunks' || op.publication.field !== 'storageId') return false;
+  const chunkId = ctx.db.normalizeId('backupLargeChunks', op.publication.rowId);
+  const plan = chunkId && await ctx.db.query('travelPrivacyChunkObjects').withIndex('scan_chunk', q => q.eq('scanId', rewrite.scanId).eq('chunkId', chunkId)).unique();
+  const metadata = await ctx.db.system.get(storageId);
+  return !!plan && plan.selectedRows > 0 && plan.state === 'CHECKED' && plan.originalStorageId === storageId &&
+    plan.aliases.some(alias => alias.table === 'backupLargeChunks' && alias.id === chunkId) && !!metadata && archiveUploadMetadataMatches(op, metadata);
+}
+async function preflightRow(ctx: DB, p: Proof, table: string, row: any) {
+  if (p.purpose !== 'PREPARING' || !['backupLargeRows', 'backupSelectiveHistory'].includes(table)) return row;
+  const rewrite = (await ctx.db.get(p.rewriteId))!;
+  const roles = table === 'backupLargeRows' ? [row.role] : ['SOURCE', 'OLD'];
+  const chunk = table === 'backupLargeRows' ? await ctx.db.query('backupLargeChunks')
+    .withIndex('job_index', q => q.eq('jobId', row.jobId).eq('index', row.chunkIndex)).unique() : null;
+  const chunkPlan = chunk && await ctx.db.query('travelPrivacyChunkObjects')
+    .withIndex('scan_chunk', q => q.eq('scanId', rewrite.scanId).eq('chunkId', chunk._id)).unique();
+  if (table === 'backupLargeRows' && !chunkPlan) return row;
+  for (const role of roles) {
+    const evidence = chunkPlan ? await ctx.db.query('travelPrivacyChunkRows').withIndex('object', q => q.eq('objectId', chunkPlan._id))
+      .filter(q => q.and(q.eq(q.field('evidence.sourceId'), row.sourceId), q.eq(q.field('evidence.rowIndex'), row.rowIndex))).take(2) :
+      await ctx.db.query('travelPrivacyChunkRows').withIndex('source', q => q.eq('scanId', rewrite.scanId)
+        .eq('backupJobId', row.jobId).eq('role', role).eq('evidence.sourceId', row.sourceId).eq('evidence.table', row.table)).take(21);
+    requireProof(evidence.length <= (chunkPlan ? 1 : 20), 'REFERENCE_PLAN_CHANGED');
+    const planned = evidence.find(item => item.selected);
+    if (!planned?.selected) continue;
+    const plan = await ctx.db.get(planned.objectId);
+    if (!plan || !plan.selectedRows || plan.state !== 'CHECKED' ||
+      (table === 'backupLargeRows' && (plan.descriptor.index !== row.chunkIndex || planned.evidence.rowIndex !== row.rowIndex))) continue;
+    const target = await ctx.db.query('travelPrivacyChunkReferenceTargets').withIndex('target', q => q.eq('proofId', p._id).eq('storageId', plan.originalStorageId)).first();
+    if (!target) continue;
+    const raw = table === 'backupSelectiveHistory' ? decodeRow(row.record) : row.metadata?.envelope ? decodeRow(row.metadata.envelope.record) : row.metadata;
+    const sanitized = sanitizeSelectedRow(row.table, raw);
+    if (!sanitized) return null;
+    return table === 'backupSelectiveHistory' ? { ...row, record: encodeRow(sanitized) } : { ...row, metadata: rowMetadata(row.table, sanitized) };
+  }
+  return row;
 }
 function physicalPointer(table: string, path: string) {
   return (['backupImports', 'backupLargeJobs', 'backupLargeChunks', 'coldHistoryArchives', 'coldHistoryChunks'].includes(table) &&
@@ -198,7 +291,8 @@ export const rowPage = internalMutation({ args, handler: async (ctx, a) => {
   const table = referenceSourceTables[p.tableIndex];
   const page = await ctx.db.query(table as (typeof archiveReferenceTables)[number])
     .paginate({ cursor: p.cursor, numItems: 1, maximumRowsRead: 1, maximumBytesRead: 1024 * 1024 });
-  const row = page.page[0] as any;
+  const sourceRow = page.page[0] as any;
+  const row = sourceRow ? await preflightRow(ctx, p, table, sourceRow) : null;
   let objects = p.objects;
   if (row) {
     const leaves = storageLeaves(row, id => ctx.db.system.normalizeId('_storage', id));
@@ -217,7 +311,7 @@ export const rowPage = internalMutation({ args, handler: async (ctx, a) => {
     for (const leaf of batch) {
       const history = await historical(ctx, p, table, row, leaf);
       await edge(ctx, p, leaf, table, row._id, history ? 'HISTORICAL' : 'STRONG');
-      if (physicalPointer(table, leaf.path) && !history) {
+      if (physicalPointer(table, leaf.path) && (!history || (p.purpose === 'PREPARING' && table === 'backupLargeChunks'))) {
         // Writer original pointers are audit evidence, not declarations that a deleted file still exists.
         // Their strings still create STRONG edges above; any canonical pointer is independently mandatory.
         const auditOriginal = ['travelPrivacyArchiveObjects', 'travelPrivacyChunkObjects', 'travelPrivacyChunkReplacements'].includes(table) && leaf.path === 'originalStorageId';
@@ -242,7 +336,7 @@ export const rowPage = internalMutation({ args, handler: async (ctx, a) => {
     }
   }
   const nextTable = page.isDone ? p.tableIndex + 1 : p.tableIndex;
-  await ctx.db.patch(p._id, { rows: p.rows + (row ? 1 : 0), objects, leafOffset: 0,
+  await ctx.db.patch(p._id, { rows: p.rows + (sourceRow ? 1 : 0), objects, leafOffset: 0,
     cursor: page.isDone ? null : page.continueCursor, tableIndex: nextTable,
     phase: nextTable === referenceSourceTables.length ? 'BLOBS' : 'ROWS' });
   return nextTable === referenceSourceTables.length ? 'BLOBS' : 'ROWS';
@@ -252,6 +346,15 @@ export const blobData = internalQuery({ args, handler: async (ctx, a) => {
   requireProof(p.phase === 'BLOBS', 'REFERENCE_PHASE');
   const object = await ctx.db.query('travelPrivacyChunkReferenceObjects').withIndex('pending', q => q.eq('proofId', p._id).eq('state', 'PENDING')).first();
   return object;
+} });
+export const preflightBlobPlan = internalQuery({ args: { ...args, storageId: v.id('_storage') }, handler: async (ctx, a) => {
+  const p = await checked(ctx, a.proofId);
+  if (p.purpose !== 'PREPARING') return null;
+  const target = await ctx.db.query('travelPrivacyChunkReferenceTargets').withIndex('target', q => q.eq('proofId', p._id).eq('storageId', a.storageId)).first();
+  if (!target?.planObjectId) return null;
+  const plan = await ctx.db.get(target.planObjectId);
+  requireProof(plan?.state === 'CHECKED', 'REFERENCE_PLAN_CHANGED');
+  return { descriptor: plan.descriptor, indices: target.selectedIndices!, selective: target.selective! };
 } });
 // Only this action supplies blob observations to saveBlobStrings. No payload crosses into a journal.
 export const blobPage = internalAction({ args, handler: async (ctx, a): Promise<boolean> => {
@@ -265,6 +368,12 @@ export const blobPage = internalAction({ args, handler: async (ctx, a): Promise<
   requireProof(toBase64(hashBytes) === object.sha256 || hex === object.sha256.toLowerCase(), 'REFERENCE_OBJECT_CHANGED');
   let raw: unknown;
   try { raw = JSON.parse(new TextDecoder().decode(bytes)); } catch { throw new Error('REFERENCE_FORMAT_UNKNOWN'); }
+  const plan: { descriptor: Doc<'travelPrivacyChunkObjects'>['descriptor']; indices: number[]; selective: boolean } | null =
+    await ctx.runQuery(queryRef('travelPrivacyChunkReferenceProof/preflightBlobPlan'), { ...a, storageId: object.storageId });
+  if (plan) {
+    requireProof(await digest(await descriptor(raw as any)) === await digest(plan.descriptor), 'REFERENCE_PLAN_CHANGED');
+    raw = rewriteChunkRows(raw as any, plan.indices, plan.selective, 'preflight-observation').chunk;
+  }
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     const declared = (raw as { format?: unknown; manifest?: { format?: unknown } }).format ??
       (raw as { manifest?: { format?: unknown } }).manifest?.format;
@@ -323,14 +432,22 @@ export const finish = internalMutation({ args, handler: async (ctx, a) => {
   if (p.phase === 'READY') return;
   requireProof(p.phase === 'BLOBS' && p.tableIndex === referenceSourceTables.length && p.cursor === null && p.leafOffset === 0 &&
     !await ctx.db.query('travelPrivacyChunkReferenceObjects').withIndex('pending', q => q.eq('proofId', p._id).eq('state', 'PENDING')).first(), 'REFERENCE_COVERAGE_INCOMPLETE');
+  if (p.purpose === 'PREPARING') for (const kind of ['STRONG', 'UNKNOWN'] as const)
+    requireProof(!await ctx.db.query('travelPrivacyChunkReferenceEdges').withIndex('proof_kind', q => q.eq('proofId', p._id).eq('kind', kind)).first(), 'STRONG_REFERENCE');
   await ctx.db.patch(p._id, { phase: 'READY' });
 } });
 /** Call in the SAME mutation as final alias/metadata checks and deletion, before any source write. */
 export async function assertPagedReferenceProofAbsent(ctx: DB, proofId: Id<'travelPrivacyChunkReferenceProofs'>, rewriteId: Id<'travelPrivacyChunkRewrites'>, storageId: Id<'_storage'>) {
   const p = await checked(ctx, proofId);
-  requireProof(p.phase === 'READY' && p.rewriteId === rewriteId &&
+  requireProof((p.purpose ?? 'DELETE') === 'DELETE' && p.phase === 'READY' && p.rewriteId === rewriteId &&
     await ctx.db.query('travelPrivacyChunkReferenceTargets').withIndex('target', q => q.eq('proofId', p._id).eq('storageId', storageId)).first(), 'REFERENCE_TARGET_NOT_PROVEN');
   for (const kind of ['STRONG', 'UNKNOWN'] as const)
     requireProof(!await ctx.db.query('travelPrivacyChunkReferenceEdges').withIndex('target_kind', q => q.eq('proofId', p._id).eq('targetStorageId', storageId).eq('kind', kind)).first(), 'STRONG_REFERENCE');
+  return p;
+}
+/** Consume this before the first source write, in the writer's checked transaction. */
+export async function assertPreflightReferenceProofReady(ctx: DB, proofId: Id<'travelPrivacyChunkReferenceProofs'>, rewriteId: Id<'travelPrivacyChunkRewrites'>) {
+  const p = await checked(ctx, proofId);
+  requireProof(p.purpose === 'PREPARING' && p.phase === 'READY' && p.rewriteId === rewriteId, 'REFERENCE_PREFLIGHT_INCOMPLETE');
   return p;
 }

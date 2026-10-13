@@ -25,7 +25,11 @@ export const travelPrivacyChunkRewriteTables = {
     key: v.optional(v.string()),
     revision: v.number(),
     sourceRevision: v.number(),
+    referenceRevision: v.optional(v.number()),
     referenceProofId: v.optional(v.id('travelPrivacyChunkReferenceProofs')),
+    preflightProofId: v.optional(v.id('travelPrivacyChunkReferenceProofs')),
+    preflightComplete: v.optional(v.boolean()),
+    referenceResume: v.optional(v.boolean()),
     phase: v.union(
       v.literal('PREPARING'),
       v.literal('IMPORT_FENCE'),
@@ -83,6 +87,7 @@ export const travelPrivacyChunkRewriteTables = {
     deletedAt: v.optional(v.number()),
   })
     .index('rewrite_state', ['rewriteId', 'state'])
+    .index('operation_storage', ['operationId', 'replacementStorageId'])
     .index('rewrite_storage', ['rewriteId', 'originalStorageId']),
   // Bounded descriptor pages never contain row bodies or storage pointers.
   travelPrivacyChunkManifestPages: defineTable({
@@ -124,5 +129,6 @@ export const travelPrivacyChunkRewriteTables = {
     localProof: v.optional(v.any()),
   })
     .index('rewrite_job', ['rewriteId', 'backupJobId'])
+    .index('operation', ['operationId'])
     .index('rewrite_state', ['rewriteId', 'state']),
 };

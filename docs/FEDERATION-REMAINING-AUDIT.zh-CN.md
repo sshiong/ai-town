@@ -406,3 +406,16 @@ SENSITIVE 预检在普通归档检查后继续分块检查，归属、来源签�
 根代理第一次冻结 11 套综合测试得到 222 通过/1 失败，失败来自 ordinary+OLD 正式联调未注册新增 proof 模块；补齐所有同类测试注册后，在更正冻结树 11 套 222 项通过（26.342 秒），唯一未重复项为 40k 描述符测试。该项在前一冻结 writer 全套已通过（writer 套件 161.392 秒），三份 writer 文件逐字节未变，保留该证据而不重复昂贵容量测试。另同更正冻结树正式 large clone、selective explicit/legacy 和普通+OLD 清理四项通过（32.982 秒，其余定向排除），Convex 类型检查及生产构建通过。
 
 当前保留 PREPARING 的 128 行/分块与 8MB 保护，分页最终删除已接通不等于大规模 preflight 完成；40k/2GiB 仍只有描述符预算证据。真实 K 分块删除/清理、派生格式正式恢复、完整浏览器和全方案验收仍未关闭。
+
+
+分页 PREPARING 预检与持续引用版本保护已完成代码验证：proof 固定阶段/父任务/来源与引用 epoch，逐页收集 scan selected targets，对 SOURCE/OLD 计划使用相同纯重写逻辑作虚拟删除，全部已注册引用根与嵌套物理根扫描后才在首次写入事务消费证明。128 行/物理分块、8MB 全量 snapshot 限制已由分页覆盖替代。130 个实际小 JSON 分块（130 targets，超过 500 个来源行）预检与消费通过；40k 描述符测试继续通过，但不冒称实际读取/删除 2GiB payload。
+
+消费后 writer 每笔事务都校验 archiveReference epoch，自身受控写入在同事务推进 session epoch，外部变更阻止后续发布。正式 retry 保留旧 epoch，重新完整分页证明后续原 checkpoint；外部引用仍存在则拒绝，移除后可恢复。上传丢 ACK recovery 提取共享 helper，由 writer 所有权与入口 epoch 控制的事务执行，原 provenance 断言保留。旧 DELETE proof 独立，不通用刷新。
+
+RAW 本地派生分块现可通过正式 createImport/stage/validate/apply 走 clone/restore/migrate。导出生成当前小镇 localProof，导入必须明确提交受信任签署指纹；原来源签名只证明 sourceEvidence，当前描述符由 localProof 证明，sourceSignatureValid=false。跨部署 manifestStorageId 不当本地权威指针复制；导入 pinned archiveId 与 SOURCE←原 EXPORT 角色映射经独立读侧验证。实际导入后再次清理保留访次已通过。当前负状态仅认证 clearedVisits→visit 墓碑，完整 memory/conversation 删除证据与 SELECTIVE 派生恢复仍未完成。
+
+ArchivePanel 现接受 RAW 派生文件并独立显示原来源/当前签署者，受信任指纹须手动填入，换文件清空；保留原格式及浏览器加解密/分块上传。未知 metadata、原始签名冒用、OLD 和 SELECTIVE 拒绝。真实浏览器端验收尚未进行。
+
+根代理独立冻结后：后端隐私/引用/读侧等九套 222 项通过（162.68 秒），含 40k descriptor 测试；正式大包及 Audit 完整两套 67 项通过（255.636 秒）；选择性正式两条 clone 清理通过（21.983 秒）；UI 文件加载/处理器/加密/语言四套 44 项通过（4.775 秒）。Convex 类型检查和生产构建通过。一次 formal large 测试因 emulator 每次缺 contentType 都走 public retry 完整续证，2000 页 budget 在 MANIFESTS 持续推进时耗尽；只对该 fixture 明确增加至 5000 页后完成，默认预算和 COMPLETE/实际删除断言保留，失败日志增加无正文 checkpoint 诊断。
+
+隔离 K exact 0e61f70+临时入口的真实 SOURCE/OLD 两对象清理已通过，旧 storage.get/_storage 为空，另一访次原生与两份归档完整摘要不变、原签名验证与来源文件保留。非 fixture 表/存储严格保持，明确例外为四个单调 revision 与自然更新 federationClock。初期 URL 尾斜杠请求错误在 seed 前修复；时钟自然变化触发保护后沿原 receipt 继续。合成数据 teardown 首次单事务、随后计划生成都触发实机系统操作上限，事务回滚未宣称清理完成；现在通过分组摘要与分页 exact-ID 清理继续，正式恢复验证仍待完成。临时入口不进入本提交。

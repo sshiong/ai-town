@@ -1,4 +1,5 @@
-import { localArchiveExportSnapshot, readLocalArchiveManifest, validateLocalChunk, assertArchiveExportUnchanged, type LocalSanitizedChunkManifest } from './travelPrivacyLocalChunkManifest';
+import { localArchiveExportSnapshot, readLocalArchiveManifest, validateLocalChunk, createLocalArchiveProof, assertArchiveExportUnchanged, type LocalSanitizedChunkManifest } from './travelPrivacyLocalChunkManifest';
+import { validateLargeImportManifest, largeImportAuthenticationMetadata, assertLargeDerivativeClearedVisits } from './backupLargeLocalImport';
 import { trackedMutation as mutation, trackedInternalMutation as internalMutation } from '../maintenanceFunctions';
 import { assertBackupPrivacy, restorePrivacyRows } from './backupPrivacy';
 import { coldLargeOwner, checkColdLargeExport, validateColdLargeRow, coldScope, type ColdLargeRow } from './coldLarge';
@@ -534,8 +535,10 @@ export const getManifest = action({
     if (job.archivePrivacyState === 'LOCAL_SANITIZED') {
       const manifest = await readLocalArchiveManifest(ctx, job);
       if (manifest.chunks.some(chunk => chunk.role === 'OLD')) throw new Error('LOCAL_ARCHIVE_PRIVATE_ROLLBACK_NOT_PORTABLE');
+      const local: Doc<'federationIdentity'> = await ctx.runQuery(readRef('signingIdentity'), { jobId: job._id });
+      const localProof = await createLocalArchiveProof(manifest, local, value => sign(value, local.privateKeyEncrypted));
       result = { manifest, signature: '', sourceSignatureValid: false as const,
-        ...(job.metadata?.archiveLocalProof ? { localProof: job.metadata.archiveLocalProof } : {}) };
+        localProof };
     } else {
       if (!job.signature) throw new Error('BACKUP_MANIFEST_NOT_READY');
       const blob = await ctx.storage.get(job.manifestStorageId!);
@@ -575,6 +578,9 @@ const importArgs = {
   adminToken: v.string(),
   manifest: v.any(),
   signature: v.string(),
+  localProof: v.optional(v.any()),
+  sourceSignatureValid: v.optional(v.boolean()),
+  expectedLocalProofFingerprint: v.optional(v.string()),
   mode: v.union(v.literal('restore'), v.literal('migrate'), v.literal('clone')),
   sourceStopped: v.optional(v.boolean()),
   targetEndpoint: v.optional(v.string()),
@@ -619,8 +625,9 @@ export const createImportJob = internalMutation({
     await assertArchiveCanStart(ctx);
     await assertNoIdentityConflict(ctx);
     const local = await stable(ctx, a.mode === 'clone');
-    await validateManifest(a.manifest, a.signature);
-    const source = a.manifest.source;
+    const plan = await validateLargeImportManifest(a.manifest, a.signature, a.localProof, undefined, a.expectedLocalProofFingerprint);
+    if (plan.local && a.sourceSignatureValid === true) throw new Error('LOCAL_ARCHIVE_SOURCE_SIGNATURE_NOT_CURRENT');
+    const source = plan.source;
     if (source.mode === 'QUARANTINED') throw new Error('TOWN_CLONE_CONFLICT');
     if (a.mode === 'clone') {
       if (!a.targetEndpoint) throw new Error('CLONE_ENDPOINT_REQUIRED');
@@ -660,28 +667,31 @@ export const createImportJob = internalMutation({
       phase: 'STAGING',
       tableIndex: 0,
       cursor: null,
-      chunkCount: a.manifest.chunks.length,
+      chunkCount: plan.chunks.length,
       processedChunks: 0,
-      recordCount: a.manifest.chunks.reduce((n: number, c: ChunkDescriptor) => n + c.count, 0),
-      bytes: a.manifest.chunks.reduce((n: number, c: ChunkDescriptor) => n + c.bytes, 0),
+      recordCount: plan.chunks.reduce((n: number, c: ChunkDescriptor) => n + c.count, 0),
+      bytes: plan.chunks.reduce((n: number, c: ChunkDescriptor) => n + c.bytes, 0),
       createdAt: now,
       updatedAt: now,
       source,
       manifestStorageId: a.manifestStorageId,
       signature: a.signature,
+      ...(plan.local ? { archivePrivacyState: 'LOCAL_SANITIZED' as const } : {}),
       mode: a.mode,
       targetEndpoint: a.targetEndpoint,
       sourceStoppedAt: a.sourceStopped ? now : undefined,
       newTownId: a.mode === 'clone' ? `town:${crypto.randomUUID()}` : local!.townId,
       keys: a.keys,
       metadata: {
-        vectorSourceTrusted: await trustedVectorSource(ctx.db, source),
-        includeVectors: a.manifest.includeVectors,
+        ...await largeImportAuthenticationMetadata(plan, a.localProof, a.expectedLocalProofFingerprint),
+        vectorSourceTrusted: !plan.local && await trustedVectorSource(ctx.db,
+          source as { townId: string; publicKey: string; fingerprint: string }),
+        includeVectors: plan.includeVectors,
         uploadedChunks: 0,
         oldChunkCount: 0,
         oldBytes: 0,
         destructive: false,
-        exportedAt: a.manifest.exportedAt,
+        exportedAt: plan.exportedAt,
       },
     });
     await ctx.db.insert('backupMaintenanceLocks', { key: 'town', jobId, createdAt: now });
@@ -692,7 +702,8 @@ export const createImport = action({
   args: importArgs,
   handler: async (ctx, a): Promise<{ jobId: Id<'backupLargeJobs'> }> => {
     requireAdmin(a.adminToken);
-    await validateManifest(a.manifest, a.signature);
+    const plan = await validateLargeImportManifest(a.manifest, a.signature, a.localProof, undefined, a.expectedLocalProofFingerprint);
+    if (plan.local && a.sourceSignatureValid === true) throw new Error('LOCAL_ARCHIVE_SOURCE_SIGNATURE_NOT_CURRENT');
     const keys = a.mode === 'clone' ? await createIdentityKeys() : undefined;
     const manifestStorageId = await storeJSON(ctx, a.manifest);
     // Preserve the manifest if publication acknowledgement is unknown.
@@ -822,11 +833,17 @@ export const stageChunk = action({
     const job: Job = await ctx.runQuery(readRef('jobData'), { jobId: a.jobId });
     if (job.kind !== 'import' || job.phase !== 'STAGING' || !job.manifestStorageId)
       throw new Error('BACKUP_NOT_STAGING');
-    const manifest: LargeManifest = await load(ctx, job.manifestStorageId);
+    const manifest = await load(ctx, job.manifestStorageId);
+    const plan = await validateLargeImportManifest(manifest, job.signature ?? '',
+      job.metadata?.archiveLocalProof, job.metadata?.archiveLocalManifestDigest, job.metadata?.archiveLocalProofFingerprint);
     const chunk: LargeChunk = JSON.parse(a.chunk);
-    const expected = manifest.chunks[chunk?.index];
+    const expected = plan.chunks[chunk?.index];
     if (!expected) throw new Error('BACKUP_CHUNK_NOT_FOUND');
-    await validateChunk(chunk, expected);
+    if (plan.local) {
+      await validateLocalChunk(chunk, plan.local.chunks[chunk.index]);
+      assertLargeDerivativeClearedVisits(chunk, plan.local.clearedVisits);
+    }
+    else await validateChunk(chunk, expected);
     const storageId = await storeJSON(ctx, chunk);
     // Only a confirmed duplicate rejection makes this newly uploaded object disposable.
     if (
@@ -1383,7 +1400,25 @@ export const remapPrivacyPage = internalMutation({
       await restorePrivacyRows(ctx, [grave], mapping, true);
     }
     await ctx.db.patch(job._id, { cursor: page.isDone ? null : page.continueCursor,
-      phase: page.isDone ? (rollback ? 'ROLLBACK_FINISH' : 'FINALIZE') : job.phase, updatedAt: Date.now() });
+      phase: page.isDone ? (rollback ? 'ROLLBACK_FINISH' : job.metadata?.derivativeClearedVisitsCount ? 'DERIVED_PRIVACY' : 'FINALIZE') : job.phase,
+      ...(page.isDone && !rollback ? { processedChunks: 0 } : {}), updatedAt: Date.now() });
+  },
+});
+export const restoreDerivedPrivacyPage = internalMutation({
+  args: { jobId: v.id('backupLargeJobs'), offset: v.number(), visits: v.array(v.string()) },
+  handler: async (ctx, a) => {
+    const job = await owned(ctx, a.jobId);
+    const count = job.metadata?.derivativeClearedVisitsCount;
+    if (job.phase !== 'DERIVED_PRIVACY' || job.processedChunks !== a.offset ||
+      !Number.isSafeInteger(count) || a.visits.length !== Math.min(20, count - a.offset) || !a.visits.length)
+      throw new Error('BACKUP_CHECKPOINT_CHANGED');
+    // The signed local manifest's cleared visit set is portable negative state.
+    // No absent row/reference is synthesized or exempted from ordinary graph validation.
+    await restorePrivacyRows(ctx, a.visits.map(visitId => ({ key: `visit:${visitId}`, visitId,
+      createdAt: job.metadata.derivativeDerivedAt })), {});
+    const processedChunks = a.offset + a.visits.length;
+    await ctx.db.patch(job._id, { processedChunks,
+      phase: processedChunks === count ? 'FINALIZE' : job.phase, updatedAt: Date.now() });
   },
 });
 export const finalizeImport = internalMutation({
@@ -1469,7 +1504,9 @@ export const finalizeImport = internalMutation({
       sourceStoppedAt: job.sourceStoppedAt,
       mapping: {},
       runtimeSnapshot: { largeJobId: job._id },
-      manifest: { format: 'ai-town-chunks', largeJobId: job._id, sourceTownId: source.townId },
+      manifest: { format: 'ai-town-chunks', largeJobId: job._id, sourceTownId: source.townId,
+        ...(job.metadata?.sourceSignatureValid === false ? { sourceSignatureValid: false,
+          localManifestDigest: job.metadata.archiveLocalManifestDigest } : {}) },
     });
     await ctx.db.patch(job._id, { metadata: { ...job.metadata, importId } });
     await release(ctx, job, 'COMPLETE');
@@ -1613,6 +1650,14 @@ export const advanceImport = action({
         await ctx.runMutation(writeRef('repairMemoryProvenance'), { jobId: job._id });
       else if (['PRIVACY_REMAP', 'PRIVACY_REMAP_ROLLBACK'].includes(job.phase))
         await ctx.runMutation(writeRef('remapPrivacyPage'), { jobId: job._id });
+      else if (job.phase === 'DERIVED_PRIVACY') {
+        if (!job.manifestStorageId) throw new Error('BACKUP_MANIFEST_NOT_READY');
+        const plan = await validateLargeImportManifest(await load(ctx, job.manifestStorageId), job.signature ?? '',
+          job.metadata?.archiveLocalProof, job.metadata?.archiveLocalManifestDigest, job.metadata?.archiveLocalProofFingerprint);
+        if (!plan.local) throw new Error('LOCAL_ARCHIVE_AUTHENTICATION_REQUIRED');
+        await ctx.runMutation(writeRef('restoreDerivedPrivacyPage'), { jobId: job._id,
+          offset: job.processedChunks, visits: plan.local.clearedVisits.slice(job.processedChunks, job.processedChunks + 20) });
+      }
       else if (job.phase === 'FINALIZE')
         await ctx.runMutation(writeRef('finalizeImport'), { jobId: job._id });
       else if (job.phase === 'ROLLBACK_DELETE')
