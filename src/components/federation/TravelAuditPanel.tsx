@@ -40,7 +40,7 @@ export default function TravelAuditPanel({ adminToken }: { adminToken: string })
       <ol className="admin-list">{result.page.map((entry: any) => <li key={entry._id}><div>
         <strong>{entry.source} · {entry.operation}</strong><p>{formatTime(entry.at)} · <code>{entry.visitId ?? t("No visit ID")}</code></p>
         {entry.previous?.state && <p>{t("Previous:")} {entry.previous.state}</p>}
-        <dl className="admin-summary">{Object.entries(entry.next ?? {}).filter(([, value]) => value !== undefined).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value)}</dd></div>)}</dl>
+        <dl className="admin-summary">{Object.entries(entry.next ?? {}).filter(([, value]) => value !== undefined).map(([key, value]) => <div key={key}><dt>{key === 'actionType' ? t("Action type") : key === 'destination' ? t("Movement destination") : key}</dt><dd>{key === 'destination' && value && typeof value === 'object' && 'x' in value && 'y' in value ? `(${value.x}, ${value.y})` : String(value)}</dd></div>)}</dl>
       </div></li>)}</ol>
       <div className="admin-toolbar"><AdminButton disabled={cursor === null} onClick={() => setCursor(null)}>{t("Newest page")}</AdminButton><AdminButton disabled={result.isDone} onClick={() => setCursor(result.continueCursor)}>{t("Older records")}</AdminButton></div>
       <p className="admin-muted">{result.isDone ? t("End of matching saved history.") : t("More saved records are available.")}</p>

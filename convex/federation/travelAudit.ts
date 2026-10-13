@@ -2,6 +2,27 @@ import { v } from 'convex/values';
 import { query } from '../maintenanceFunctions';
 import { assertFederationAdmin } from './auth';
 import { sanitizeTravelAuditSummary } from './travelAuditWriter';
+import type { RemoteAction } from './decision';
+import type { Doc } from '../_generated/dataModel';
+
+const actionTypes: Record<RemoteAction['type'], true> = {
+  say: true, moveTo: true, inviteToTalk: true, acceptInvite: true,
+  rejectInvite: true, leaveConversation: true, leaveTown: true, wait: true,
+};
+function actionSummary(row: Doc<'federationPendingActions'>) {
+  const actionType = typeof row.action?.type === 'string' && Object.hasOwn(actionTypes, row.action.type)
+    ? row.action.type as RemoteAction['type'] : undefined;
+  const target = actionType === 'moveTo' ? row.action.destination : undefined;
+  // Retained/imported actions are untrusted. Project only legal integer coordinates,
+  // never the action object, text, observation or arbitrary result fields.
+  const destination = target && !Array.isArray(target) &&
+    Number.isSafeInteger(target.x) && Number.isSafeInteger(target.y)
+    ? { x: target.x as number, y: target.y as number } : undefined;
+  return { actionId: row.actionId, actionType, destination, turnId: row.turnId,
+    basedOnEventId: row.basedOnEventId, agentAuthorityEpoch: row.agentAuthorityEpoch,
+    visitLeaseVersion: row.visitLeaseVersion, state: row.state,
+    accepted: row.result ? row.result.kind === 'ok' : undefined, receiptPending: row.receiptPending };
+}
 
 export const history = query({
   args: { adminToken: v.string(), visitId: v.optional(v.string()), from: v.optional(v.number()), to: v.optional(v.number()),
@@ -31,7 +52,7 @@ export const history = query({
       // Existing records provide retained delivery/visit facts; they cannot reconstruct old transitions.
       return { ...base, next: source === 'VISITS' ? { state: row.state, role: row.role, homeTownId: row.homeTownId, hostTownId: row.hostTownId,
         communicationState: row.communicationState, leaseExpiry: row.leaseExpiry, cleanupConfirmed: row.cleanupConfirmed }
-        : source === 'ACTIONS' ? { actionId: row.actionId, state: row.state, accepted: row.result ? row.result.kind === 'ok' : undefined, receiptPending: row.receiptPending }
+        : source === 'ACTIONS' ? actionSummary(row)
         : { messageId: row.messageId, messageType: row.envelope?.type, state: row.status,
           peerTownId: row.toTownId ?? row.fromTownId, attempts: row.attempts, ackedAt: row.ackedAt, failedAt: row.failedAt, processedAt: row.processedAt } };
     }) };

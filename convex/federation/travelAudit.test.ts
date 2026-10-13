@@ -44,12 +44,15 @@ test('retained action history has real visit/time indexes and excludes action an
     const inputId = await ctx.db.insert('inputs', { engineId, number: 0, name: 'federationAction', args: {}, received: 1 });
     for (let i = 0; i < 61; i++) await ctx.db.insert('federationPendingActions', { actionId: `action-${i}`, visitId: i % 2 ? 'other' : 'wanted',
       turnId: 'turn', basedOnEventId: 'event', agentAuthorityEpoch: 1, visitLeaseVersion: 1, inputId, state: 'COMMITTED', createdAt: i,
-      action: { text: 'PRIVATE ACTION' }, result: { kind: 'error', message: 'PRIVATE RESULT' }, receiptPending: false });
+      action: { type: 'say', text: 'PRIVATE ACTION', observation: { privateMemory: 'PRIVATE MEMORY' }, apiKey: 'SECRET KEY' }, result: { kind: 'error', message: 'PRIVATE RESULT' }, receiptPending: false });
   });
   const found: number[] = []; let cursor: string | null = null;
   do {
     const page: AuditPage = await t.query(history, { adminToken, source: 'ACTIONS', visitId: 'wanted', from: 10, to: 50, cursor, numItems: 7 });
-    expect(JSON.stringify(page)).not.toMatch(/PRIVATE ACTION|PRIVATE RESULT|turnId|basedOnEventId/);
+    expect(JSON.stringify(page)).not.toMatch(/PRIVATE ACTION|PRIVATE RESULT|PRIVATE MEMORY|SECRET KEY|observation|apiKey/);
+    expect(page.page.every((row: any) => row.next.actionType === 'say' && row.next.turnId === 'turn' &&
+      row.next.basedOnEventId === 'event' && row.next.agentAuthorityEpoch === 1 && row.next.visitLeaseVersion === 1 &&
+      row.next.destination === undefined)).toBe(true);
     found.push(...page.page.map((row: any) => row.at));
     if (page.isDone) break;
     cursor = page.continueCursor;
@@ -57,6 +60,36 @@ test('retained action history has real visit/time indexes and excludes action an
   expect(found).toEqual(Array.from({ length: 21 }, (_, i) => 50 - i * 2));
   const allVisits = await t.query(history, { adminToken, source: 'ACTIONS', from: 10, to: 20, cursor: null });
   expect(allVisits.page).toHaveLength(11);
+});
+
+test('retained action history exposes only known action types and finite safe integer movement destinations', async () => {
+  const t = convexTest(schema, modules);
+  await t.run(async ctx => {
+    const engineId = await ctx.db.insert('engines', { generationNumber: 0, running: false });
+    const inputId = await ctx.db.insert('inputs', { engineId, number: 0, name: 'federationAction', args: {}, received: 1 });
+    const actions = [
+      { type: 'moveTo', destination: { x: 4, y: 7, text: 'PRIVATE TARGET' } },
+      { type: 'moveTo', destination: { x: Infinity, y: 7 } },
+      { type: 'moveTo', destination: { x: 4, y: NaN } },
+      { type: 'moveTo', destination: { x: 4.5, y: 7 } },
+      { type: 'moveTo', destination: { x: Number.MAX_SAFE_INTEGER + 1, y: 7 } },
+      { type: 'moveTo', destination: { x: 'SECRET X', y: 7 } },
+      { type: 'PRIVATE UNKNOWN TYPE', destination: { x: 4, y: 7 } },
+      { type: 'say', text: 'PRIVATE SAY', destination: { x: 4, y: 7 } },
+    ];
+    for (const [i, action] of actions.entries()) await ctx.db.insert('federationPendingActions', {
+      actionId: `move-${i}`, visitId: 'movement', turnId: `turn-${i}`, basedOnEventId: `event-${i}`,
+      agentAuthorityEpoch: 2, visitLeaseVersion: 3, inputId, state: 'COMMITTED', createdAt: i,
+      action, result: { kind: 'ok', value: { text: 'PRIVATE RESULT', apiKey: 'SECRET KEY' } },
+    });
+  });
+  const result = await t.query(history, { adminToken, source: 'ACTIONS', visitId: 'movement', cursor: null });
+  const valid = result.page.find((row: any) => row.next.actionId === 'move-0');
+  expect(valid.next).toMatchObject({ actionType: 'moveTo', destination: { x: 4, y: 7 },
+    turnId: 'turn-0', basedOnEventId: 'event-0', agentAuthorityEpoch: 2, visitLeaseVersion: 3, accepted: true });
+  expect(result.page.filter((row: any) => row.next.destination !== undefined)).toHaveLength(1);
+  expect(result.page.find((row: any) => row.next.actionId === 'move-6').next.actionType).toBeUndefined();
+  expect(JSON.stringify(result)).not.toMatch(/PRIVATE|SECRET|apiKey|NaN|Infinity/);
 });
 
 test('retained audit summaries cannot return imported arbitrary payload fields', async () => {

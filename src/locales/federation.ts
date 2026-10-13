@@ -1,4 +1,6 @@
 export const federationMessages: Record<string, string> = {
+  'Action type': '动作类型',
+  'Movement destination': '移动目标坐标',
   "Privacy page index": "删除证据页索引",
   "Privacy pages use their own zero-based index and are separate from town data chunks.": "删除证据页使用独立的索引，从 0 开始，与小镇数据分块分开。",
   "Downloading privacy evidence page": "正在下载删除证据页",
