@@ -82,6 +82,12 @@ async function engineStep(t: ReturnType<typeof convexTest<typeof schema.tables>>
     await Game.saveDiff(ctx, worldId, game.takeDiff());
   });
 }
+async function runEngineStep(t: ReturnType<typeof convexTest<typeof schema.tables>>, worldId: Id<'worlds'>) {
+  const engine = (await t.query(ctx => ctx.db.query('engines').unique()))!;
+  const loaded = await t.query(ctx => Game.load(ctx.db, worldId, engine.generationNumber));
+  const game = new Game(loaded.engine, worldId, loaded.gameState);
+  await t.action(ctx => game.runStep(ctx, Date.now()));
+}
 beforeEach(() => jest.useFakeTimers());
 afterEach(() => jest.useRealTimers());
 
@@ -91,7 +97,7 @@ test.each([
   { role: 'host', state: 'CREATING', operation: 'createHostPresence', input: 'federationCreateVisitor', result: 'ACTIVE' },
 ] as const)('a stalled running engine processes persisted $input after one fenced recovery kick', async scenario => {
   const { t, worldId } = await setup(scenario.role, scenario.state);
-  const stalledAt = Date.now() - ENGINE_ACTION_DURATION * 2 - 1000;
+  const stalledAt = Date.now() - 24 * 60 * 60 * 1000;
   await t.run(async ctx => {
     const status = (await ctx.db.query('worldStatus').unique())!;
     await ctx.db.patch(status.engineId, { currentTime: stalledAt, generationNumber: 7 });
@@ -109,13 +115,15 @@ test.each([
   await t.mutation(mutationRef(`runtime/${scenario.operation}`), { visitId: 'visit-1' });
   const engine = (await t.run(ctx => ctx.db.query('engines').unique()))!;
   expect(engine.generationNumber).toBe(8);
-  expect(engine.currentTime).toBe(stalledAt);
+  expect(engine.currentTime).toBe(Date.now());
+  expect(engine.lastStepTs).toBe(stalledAt);
   expect(engine.lastRecoveryAt).toBe(Date.now());
   const scheduled = await t.run(ctx => ctx.db.system.query('_scheduled_functions').collect());
   expect(scheduled.filter(row => row.name.includes('runStep'))).toHaveLength(1);
   const inputs = await t.run(ctx => ctx.db.query('inputs').collect());
   expect(inputs.map(input => input.name)).toEqual([scenario.input]);
-  await engineStep(t, worldId);
+  await runEngineStep(t, worldId);
+  expect((await t.run(ctx => ctx.db.get(inputs[0]._id)))?.returnValue?.kind).toBe('ok');
   expect((await t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe(scenario.result);
   expect((await t.run(ctx => ctx.db.query('federationPresenceJobs').unique()))?.state).toBe('COMMITTED');
   const world = (await t.run(ctx => ctx.db.get(worldId)))!;
@@ -141,13 +149,18 @@ test('retrying a persisted pending freeze wakes a stalled engine and fences an e
     await ctx.db.patch(engine._id, { currentTime: Date.now() - ENGINE_ACTION_DURATION * 2 - 1 });
   });
   const earlier = await prepareEngineCommit(t, worldId);
+  const queuedBeforeRecovery = await t.run(ctx => ctx.db.query('inputs').unique());
+  const engineBeforeRecovery = (await t.run(ctx => ctx.db.query('engines').unique()))!;
   await t.mutation(mutationRef('runtime/freezeHome'), { visitId: 'visit-1' });
   const recovered = (await t.run(ctx => ctx.db.query('engines').unique()))!;
+  expect(recovered.currentTime).toBe(Date.now());
+  expect(recovered.processedInputNumber).toBe(engineBeforeRecovery.processedInputNumber);
+  expect(await t.run(ctx => ctx.db.query('inputs').unique())).toEqual(queuedBeforeRecovery);
   await expect(t.mutation(makeFunctionReference<'mutation'>('aiTown/game:saveWorld'), earlier)).rejects.toThrow('Generation number mismatch');
   expect(await t.run(ctx => ctx.db.query('engines').unique())).toEqual(recovered);
   expect((await t.run(ctx => ctx.db.get(worldId)))?.players[0].id).toBe('p:0');
   expect((await t.run(ctx => ctx.db.query('inputs').unique()))?.returnValue).toBeUndefined();
-  await engineStep(t, worldId);
+  await runEngineStep(t, worldId);
   expect((await t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe('CONFIRMING');
   expect((await t.run(ctx => ctx.db.query('engines').unique()))?.lastRecoveryAt).toBe(recovered.lastRecoveryAt);
 });

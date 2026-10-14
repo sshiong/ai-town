@@ -73,8 +73,15 @@ export async function kickEngine(ctx: MutationCtx, worldId: Id<'worlds'>) {
   if (!engine.running) {
     throw new Error(`Engine ${engineId} isn't currently running`);
   }
+  const now = Date.now();
   const generationNumber = engine.generationNumber + 1;
-  await ctx.db.patch(engineId, { generationNumber, lastRecoveryAt: Date.now() });
+  await ctx.db.patch(engineId, {
+    // Skip the stalled window so newly received inputs can run immediately.
+    lastStepTs: engine.currentTime,
+    currentTime: now,
+    generationNumber,
+    lastRecoveryAt: now,
+  });
   await ctx.scheduler.runAfter(0, internal.aiTown.main.runStep, {
     worldId: worldId,
     generationNumber,
