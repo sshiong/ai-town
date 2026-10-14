@@ -106,7 +106,7 @@ export default function Home() {
         </Unauthenticated>
       </div> */}
 
-      <div className="w-full lg:h-screen min-h-screen relative isolate overflow-hidden lg:p-8 shadow-2xl flex flex-col justify-start">
+      <div className="w-full min-h-screen relative isolate lg:p-8 shadow-2xl flex flex-col justify-start">
         <h1 className="mx-auto text-4xl p-3 sm:text-8xl lg:text-9xl font-bold font-display leading-none tracking-wide game-title w-full text-left sm:text-center sm:w-auto">
           {t('AI Town')}
         </h1>
@@ -120,9 +120,7 @@ export default function Home() {
           </Unauthenticated> */}
         </div>
 
-        <Game />
-
-        <footer className="justify-end bottom-0 left-0 w-full flex items-center mt-4 gap-3 p-6 flex-wrap pointer-events-none">
+        <div className="justify-end w-full flex items-center mb-4 gap-3 px-6 py-2 flex-wrap pointer-events-none">
           <div className="flex flex-wrap gap-4 flex-grow pointer-events-none">
             <button
               type="button"
@@ -154,7 +152,8 @@ export default function Home() {
           <a href="https://convex.dev/c/ai-town">
             <img className="w-20 h-8 pointer-events-auto" src={convexImg} alt="Convex" />
           </a>
-        </footer>
+        </div>
+        <Game />
         <ToastContainer position="bottom-right" autoClose={2000} closeOnClick theme="dark" />
       </div>
     </main>
