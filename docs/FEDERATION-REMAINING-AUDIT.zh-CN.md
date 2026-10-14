@@ -505,3 +505,14 @@ V08 仍开放：独立目标后端的显式映射、全部数据/证据暂存、
 现存场景须沿原prefix使用独立签名身份纠正回执，分页CAS核对原44回执、原COMPLETE清理任务以及精确旧→新ID与before/after摘要；合法缺失的旅行行不重建，旧墓碑同key仅精确投影owner且保留历史证明。原错误manifest及分块、原清理任务和原seed回执均保留。修正后的source需新建正式export并重新验证，这属于原场景记录清楚的修复续验，不能将原错误归档报告为成功导入。纠正模块与回执/cleanup衔接仍在开发，跨镇恢复验收保持开放。
 
 正式 SELECTIVE createImport 的源Home格式校验已提前到清单storage.store之前，内部createImportJob仍复用相同校验，避免已知无效身份留下未发布清单；未知发布ACK的保留/重试策略不变。新增真实convex-test以有效来源签名但错误owner ID验证拒绝前后_storage完全一致、无import job或维护锁。该例及超过1000-message有效克隆2/2通过（112.458秒）；另定向未知job/chunk响应恢复与脱敏clone/merge/restore四例4/4通过（9.866秒），未运行该文件其余43例。Convex TypeScript检查和生产构建通过，保留既有大包提示。L/M实机既有失败存储对象不能据此修复追溯声称已删除，仍保留exact收尾回执。
+
+## 用户优先目标：实际联通、交谈与导入复原（2026-10-14）
+
+按用户纠正优先级，停止大型夹具身份纠正和额外哈希审计，直接用正常游戏入口创建的居民跑可用链路。本轮四项已实际成功：
+
+- 独立 M/N 正式双向配对 TRUSTED，保持 TLS 校验，通过本机精确私网地址和测试 CA 通信。
+- M 的 Lucky 访问 N，visit 929d35f0-c512-4719-90be-df6193b58cf5、会话 c:29，4 条真实模型消息，访客与当地居民各 2 条。模型保持 qwen3.5:4b；原25秒超时后改90秒，并显式建立同模型 reasoningEffort:none Profile、probe和绑定。没有注入消息或伪造动作。消息送回Home并完成摘要，访客返乡，双端COMPLETED。
+- 正式 exportTown→落盘JSON→独立 N preflight/importBackup merge，恢复 Lucky/Bob 两名居民。通过正常居民查询确认人物介绍及像素角色一致，目标拥有独立Home身份。此初始快照无记忆，不把它单独算作记忆恢复。
+- 交谈结束并关闭准入、暂停世界后，正式 exportResident 导出 Lucky，再从实际落盘文件调用 N preflight/importBackup merge。importId k974kjqc0ccy3fd5ka7ntcszrs8g8paq，来源13条、目标13条记忆；正常 agent/social:history 分页读取，逐条比较原文和类型均保留，人物介绍/角色一致，目标为独立Home。没有额外哈希循环。最初history页大小50被拒，改用正式允许的20后成功，未产生错误导入。
+
+复原方式明确为独立镇内的新居民 merge，不声称恢复原镇私钥或同Home身份。M/N准入关闭、世界暂停，无有效pendingLLM；保留测试镇和文件供继续使用。此次实际链路覆盖用户当前四项优先目标，原全方案的长期/故障/大规模验收仍是后续工作，不再阻塞本轮可用性结论。
