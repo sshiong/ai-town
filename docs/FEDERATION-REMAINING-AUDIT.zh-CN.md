@@ -467,3 +467,8 @@ SELECTIVE 刷新续传已补齐：直接选择已有 STAGING 任务即可选择�
 L 真实浏览器已以原合成选中居民创建正式 agent-one 分项导出，原任务 `kn73wmwdawp3pk2v5mm13jm0218g90w8` 经 Continue all pages 实际完成：1015 records、64 chunks、1 selected owner、includeVectors=false。浏览器实际下载 manifest 和31个分块，文件内部index均与落盘编号一致，已保存部分包含500 memory rows；不把这一部分等同完整502 memories或64文件下载。另33个分块（31–63）尚未保存，未开始清理已有归档或目标导入。
 
 批次下载实际发生download事件超时；后端任务保持COMPLETE且没有alert。并发批次不能作为可靠浏览器下载方式，后续改为单任务顺序复核。Chromium隔离context不支持chrome://settings自动下载设置；Page.setDownloadBehavior指定目录后原Playwright saveAs临时路径不一致，实际文件按内部index复制入私有baseline目录，仍是原浏览器下载字节，未用API重构归档。这些观察不足以判定产品或浏览器限制的完整根因，后续需继续定位并补齐实际文件。保留同job、签名回执、分块文件和未完成状态；V08整链路仍开放。
+
+
+同一原任务的浏览器文件已补齐：64/64分块+manifest共65文件。顺序点击间隔约1.1秒后32–63及早先遗漏31均实际下载，逐块canonical SHA-256、UTF8 bytes、count/table/index全部与签名manifest一致，原来源Ed25519签名独立验证通过。完整计数502 memory rows、501 messages、1015总记录；1 selected owner，另一control global ID不出现在任何下载文件中，includeVectors=false。早先31/64部分下载结论由此实际证据补全，不推断高频超时根因已全部解决。
+
+真实浏览器提交原synthetic visit的SENSITIVE预检，记录任务zx79cgdx5kgt5s9bp7614xyr658g8128。权威scan检查点已扫描64物理分块、1015行、selectedRows4、blockers0，进入CLOSURE，revision2370；父任务CHUNK_CHECK/revision326仍INSPECTING，无archiveError。未点击Clear按钮，未开始native或archive删除，不能将此检查点写成清理完成。保留同任务继续观察调度，不重复创建预检。浏览器AES重导和目标恢复仍未执行；临时L模块、seed、回执及归档仍待最终精确清理和正式代码恢复。
