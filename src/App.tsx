@@ -25,7 +25,7 @@ export default function Home() {
   const [helpModalOpen, setHelpModalOpen] = useState(false);
   const [adminModalOpen, setAdminModalOpen] = useState(false);
   return (
-    <main className="relative flex min-h-screen flex-col items-center justify-between font-body game-background">
+    <main className="town-shell relative flex min-h-screen flex-col items-center justify-between font-body game-background">
       <PoweredByConvex />
       <ReactModal
         isOpen={settingsOpen}
@@ -106,12 +106,12 @@ export default function Home() {
         </Unauthenticated>
       </div> */}
 
-      <div className="w-full min-h-screen relative isolate lg:p-8 shadow-2xl flex flex-col justify-start">
-        <h1 className="mx-auto text-4xl p-3 sm:text-8xl lg:text-9xl font-bold font-display leading-none tracking-wide game-title w-full text-left sm:text-center sm:w-auto">
+      <div className="town-layout w-full relative isolate shadow-2xl flex flex-col justify-start">
+        <h1 className="town-heading mx-auto font-bold font-display leading-none tracking-wide game-title text-center">
           {t('AI Town')}
         </h1>
 
-        <div className="max-w-xs md:max-w-xl lg:max-w-none mx-auto my-4 text-center text-base sm:text-xl md:text-2xl text-white leading-tight shadow-solid">
+        <div className="town-intro mx-auto text-center text-white leading-tight shadow-solid">
           {t('A virtual town where AI characters live, chat and socialize.')}
           {/* <Unauthenticated>
             <div className="my-1.5 sm:my-0" />
@@ -120,8 +120,8 @@ export default function Home() {
           </Unauthenticated> */}
         </div>
 
-        <div className="justify-end w-full flex items-center mb-4 gap-3 px-6 py-2 flex-wrap pointer-events-none">
-          <div className="flex flex-wrap gap-4 flex-grow pointer-events-none">
+        <div className="town-controls justify-end w-full flex items-center gap-2 flex-wrap pointer-events-none">
+          <div className="flex flex-wrap gap-2 flex-grow pointer-events-none">
             <button
               type="button"
               className="button text-white shadow-solid text-xl pointer-events-auto"

@@ -76,16 +76,30 @@ body {
 }
 
 @media screen and (min-width: 1024px) {
-  .game-frame {
-    height: clamp(360px, calc(100dvh - 320px), 720px);
+  .town-layout .game-frame {
+    height: auto;
     min-height: 0;
-    flex: none;
+    flex: 1;
     overflow: hidden;
   }
 
   .game-details {
     max-height: none;
   }
+}
+
+.town-shell > .shape-top-left-corner { display: none; }
+.town-layout { padding: 12px; gap: 8px; }
+.town-heading { font-size: clamp(32px, 5dvh, 56px); padding: 0; }
+.town-intro { font-size: 16px; margin: 0; }
+.town-controls { flex-shrink: 0; }
+.town-controls .button { font-size: 16px; border-width: 10px; min-height: 44px; }
+.town-controls .button img { width: 20px; height: 20px; }
+.town-controls .button .gap-4 { gap: 8px; }
+.town-layout .game-frame { border-width: 24px; }
+
+@media screen and (min-width: 1024px) {
+  .town-layout { height: 100dvh; min-height: 0; overflow: hidden; }
 }
 
 .game-progress-bar {

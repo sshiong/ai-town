@@ -22,6 +22,7 @@ export default function Game() {
     kind: 'player';
     id: GameId<'players'>;
   }>();
+  const [fitRequest, setFitRequest] = useState(0);
   const [gameWrapperRef, { width, height }] = useElementSize();
 
   const worldStatus = useQuery(api.world.defaultWorldStatus);
@@ -48,6 +49,10 @@ export default function Game() {
       <div className="mx-auto w-full max-w grid grid-rows-[240px_1fr] lg:grid-rows-[1fr] lg:grid-cols-[1fr_auto] lg:grow max-w-[1400px] min-h-[480px] game-frame">
         {/* Game area */}
         <div className="relative overflow-hidden bg-brown-900" ref={gameWrapperRef}>
+          <button type="button" className="absolute left-2 top-2 z-10 admin-button"
+            onClick={() => setFitRequest(value => value + 1)}>
+            {t('Show whole town')}
+          </button>
           <div className="absolute inset-0">
             <div className="container">
               <Stage width={width} height={height} options={{ backgroundColor: 0x7ab5ff }}>
@@ -61,6 +66,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
                     engineId={engineId}
                     width={width}
                     height={height}
+                    fitRequest={fitRequest}
                     historicalTime={historicalTime}
                     setSelectedElement={setSelectedElement}
                   />

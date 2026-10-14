@@ -17,6 +17,7 @@ import { DebugPath } from './DebugPath.tsx';
 import { PositionIndicator } from './PositionIndicator.tsx';
 import { SHOW_DEBUG_UI } from './Game.tsx';
 import { ServerGame } from '../hooks/serverGame.ts';
+import { resizeViewport } from './viewportSizing';
 
 export const PixiGame = (props: {
   worldId: Id<'worlds'>;
@@ -25,6 +26,7 @@ export const PixiGame = (props: {
   historicalTime: number | undefined;
   width: number;
   height: number;
+  fitRequest: number;
   setSelectedElement: SelectElement;
   travelingPlayerIds?: string[];
 }) => {
@@ -84,6 +86,17 @@ export const PixiGame = (props: {
     await toastOnError(moveTo({ playerId: humanPlayerId, destination: roundedTiles }));
   };
   const { width, height, tileDim } = props.game.worldMap;
+  const lastFitRequest = useRef(0);
+  useEffect(() => {
+    if (lastFitRequest.current === props.fitRequest || !viewportRef.current ||
+      props.width <= 0 || props.height <= 0) return;
+    lastFitRequest.current = props.fitRequest;
+    viewportRef.current.plugins.remove('animate');
+    resizeViewport(viewportRef.current, {
+      screenWidth: props.width, screenHeight: props.height,
+      worldWidth: width * tileDim, worldHeight: height * tileDim,
+    });
+  }, [props.fitRequest, props.width, props.height, width, height, tileDim]);
   const players = [...props.game.world.players.values()];
   const reducedMotion = useReducedMotion();
   const previous = useRef<{ worldId: string; players: TravelPresence[]; away: Set<string> }>();

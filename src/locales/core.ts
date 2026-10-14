@@ -1,5 +1,6 @@
 export const coreMessages: Record<string, string> = {
   'AI Town': 'AI 小镇',
+  'Show whole town': '完整地图',
   'View original text': '查看英文原文',
   'Translation unavailable. Original text shown.': '翻译暂不可用，当前显示原文。',
   'Translating… Original text shown.': '正在翻译…当前显示原文。',
