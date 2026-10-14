@@ -462,3 +462,8 @@ SELECTIVE 刷新续传已补齐：直接选择已有 STAGING 任务即可选择�
 实机 seed+verify 成功：prefix v08-browser-57662d3387efe2e8，1019条合成记录全部存在、摘要匹配、缺失0；含501条选中居民conversation memories、501条messages、3条另一居民control memories及14条setup记录。均分页≤25，44条持久回执仅存ID/摘要/归属；不生成向量或模型正文请求。完整导出→清理已有归档→同job脱敏重导→AES浏览器真实文件→映射/预检/应用尚未执行，不能据seed计数关闭V08。
 
 期间Docker全部测试容器在相近FinishedAt退出255，L/K/A均OOM=false，不能冒称OOM或数据丢失；仅恢复专用L，旧卷与其它实例保留。L最新临时overlay部署成功，验收完成后必须按签名exact IDs退役seed、journal及派生artifact并恢复pristine正式代码；当前合成数据与临时入口仍存在，不宣称已清理。
+
+
+L 真实浏览器已以原合成选中居民创建正式 agent-one 分项导出，原任务 `kn73wmwdawp3pk2v5mm13jm0218g90w8` 经 Continue all pages 实际完成：1015 records、64 chunks、1 selected owner、includeVectors=false。浏览器实际下载 manifest 和31个分块，文件内部index均与落盘编号一致，已保存部分包含500 memory rows；不把这一部分等同完整502 memories或64文件下载。另33个分块（31–63）尚未保存，未开始清理已有归档或目标导入。
+
+批次下载实际发生download事件超时；后端任务保持COMPLETE且没有alert。并发批次不能作为可靠浏览器下载方式，后续改为单任务顺序复核。Chromium隔离context不支持chrome://settings自动下载设置；Page.setDownloadBehavior指定目录后原Playwright saveAs临时路径不一致，实际文件按内部index复制入私有baseline目录，仍是原浏览器下载字节，未用API重构归档。这些观察不足以判定产品或浏览器限制的完整根因，后续需继续定位并补齐实际文件。保留同job、签名回执、分块文件和未完成状态；V08整链路仍开放。
