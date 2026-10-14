@@ -61,6 +61,11 @@ export const agentInputs = {
       }
       delete agent.inProgressOperation;
       const player = game.world.players.get(agent.playerId)!;
+      // The invitation may arrive before the next agent tick invalidates this
+      // idle operation. Its result must not move a participant away again.
+      if (game.world.playerConversation(player)) {
+        return null;
+      }
       if (args.invitee) {
         const inviteeId = parseGameId('players', args.invitee);
         const invitee = game.world.players.get(inviteeId);

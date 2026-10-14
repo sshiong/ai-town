@@ -5,8 +5,11 @@ import type { Game } from './game';
 import { Id } from '../_generated/dataModel';
 import { parseGameId } from './ids';
 import { agentInputs } from './agentInputs';
-import { Conversation } from './conversation';
+import { Conversation, conversationInputs } from './conversation';
 import { ACTION_TIMEOUT } from '../constants';
+import { Player } from './player';
+import { blocked } from './movement';
+import type { GenericId } from 'convex/values';
 
 function fixture() {
   const agent = new Agent({ id: 'a:1', playerId: 'p:0', toRemember: 'c:3' });
@@ -109,4 +112,161 @@ test('a newer ended conversation queues once while empty conversations do not er
   expect(agent.toRemember).toBe('c:3');
   expect(agent.queuedConversations).toEqual(['c:4']);
   expect(new Agent(agent.serialize()).queuedConversations).toEqual(['c:4']);
+});
+
+function invitationFixture() {
+  const fixtureValue = fixture();
+  const { agent, game } = fixtureValue;
+  const human = new Player({
+    id: 'p:1',
+    human: 'test-human',
+    lastInput: 1000,
+    position: { x: 7, y: 1 },
+    facing: { dx: -1, dy: 0 },
+    speed: 0,
+  });
+  game.world.players.set(human.id, human);
+  const conversation = new Conversation({
+    id: 'c:10',
+    creator: agent.playerId,
+    created: 1000,
+    numMessages: 0,
+    participants: [
+      { playerId: agent.playerId, invited: 1000, status: { kind: 'walkingOver' } },
+      { playerId: human.id, invited: 1000, status: { kind: 'invited' } },
+    ],
+  });
+  game.world.conversations.set(conversation.id, conversation);
+  Object.assign(game.worldMap, {
+    width: 10,
+    height: 8,
+    objectTiles: [Array.from({ length: 10 }, () => Array(8).fill(-1))],
+  });
+  return { ...fixtureValue, human, conversation, player: game.world.players.get(agent.playerId)! };
+}
+
+test('an unaccepted human invitation does not start moving the human', () => {
+  const { game, human, conversation } = invitationFixture();
+  conversation.tick(game, 1000);
+  expect(human.pathfinding).toBeUndefined();
+  expect(conversation.participants.get(human.id)!.status.kind).toBe('invited');
+});
+
+test.each(['pending', 'inProgress'] as const)(
+  'accepted human invitation approaches without waiting for %s memory',
+  (memoryState) => {
+    const { agent, game, human, conversation, player, scheduleOperation } = invitationFixture();
+    if (memoryState === 'inProgress') {
+      agent.inProgressOperation = {
+        name: 'agentRememberConversation',
+        operationId: 'o:old',
+        started: 999,
+        conversationId: agent.toRemember,
+      };
+    }
+    player.pathfinding = {
+      destination: { x: 0, y: 7 },
+      started: 999,
+      state: { kind: 'needsPath' },
+    };
+    human.pathfinding = {
+      destination: { x: 9, y: 7 },
+      started: 999,
+      state: { kind: 'needsPath' },
+    };
+    conversationInputs.acceptInvite.handler(game, 1000, {
+      playerId: human.id,
+      conversationId: conversation.id,
+    });
+    expect(player.pathfinding).toBeUndefined();
+    expect(human.pathfinding).toBeUndefined();
+    conversation.tick(game, 1000);
+    agent.tick(game, 1000);
+    expect(player.pathfinding?.destination).toEqual({ x: 4, y: 1 });
+    expect(human.pathfinding?.destination).toEqual({ x: 1, y: 1 });
+    expect(agent.toRemember).toBe('c:3');
+    expect(scheduleOperation).not.toHaveBeenCalled();
+    if (memoryState === 'inProgress') expect(agent.inProgressOperation?.operationId).toBe('o:old');
+  },
+);
+
+test('agent accepts a human invitation even while an earlier memory operation is running', () => {
+  const { agent, game, human, conversation } = invitationFixture();
+  conversation.creator = human.id;
+  conversation.participants.get(human.id)!.status = { kind: 'walkingOver' };
+  conversation.participants.get(agent.playerId)!.status = { kind: 'invited' };
+  agent.inProgressOperation = { name: 'agentRememberConversation', operationId: 'o:old', started: 999 };
+  agent.tick(game, 1000);
+  expect(conversation.participants.get(agent.playerId)!.status.kind).toBe('walkingOver');
+  expect(agent.inProgressOperation?.operationId).toBe('o:old');
+  expect(agent.toRemember).toBe('c:3');
+});
+
+test('memory completion while approaching preserves the new conversation and queued memory', () => {
+  const { agent, game, human, conversation, player } = invitationFixture();
+  agent.queuedConversations = [parseGameId('conversations', 'c:4')];
+  agent.inProgressOperation = {
+    name: 'agentRememberConversation', operationId: 'o:old', started: 999, conversationId: agent.toRemember,
+  };
+  conversation.acceptInvite(game, human);
+  agent.tick(game, 1000);
+  const pathfinding = player.pathfinding;
+  agentInputs.finishRememberConversation.handler(game, 1001, {
+    agentId: agent.id, operationId: 'o:old', conversationId: 'c:3',
+  });
+  agent.tick(game, 1002);
+  expect(player.pathfinding).toBe(pathfinding);
+  expect(agent.toRemember).toBe('c:4');
+  expect(agent.inProgressOperation).toBeUndefined();
+  expect(conversation.participants.get(agent.playerId)!.status.kind).toBe('walkingOver');
+});
+
+test.each(['before', 'after'] as const)(
+  'old idle callback %s the first conversation tick cannot replace its movement or activity',
+  (timing) => {
+    const { agent, game, human, conversation, player } = invitationFixture();
+    agent.inProgressOperation = { name: 'agentDoSomething', operationId: 'o:old', started: 999 };
+    conversation.acceptInvite(game, human);
+    if (timing === 'after') agent.tick(game, 1000);
+    const pathfinding = player.pathfinding;
+    agentInputs.finishDoSomething.handler(game, 1001, {
+      agentId: String(agent.id) as GenericId<'agents'>,
+      operationId: 'o:old',
+      destination: { x: 0, y: 7 },
+      invitee: String(human.id) as GenericId<'players'>,
+      activity: { description: 'Old activity', until: 10000 },
+    });
+    expect(player.pathfinding).toBe(pathfinding);
+    expect(player.activity).toBeUndefined();
+    expect(agent.inProgressOperation).toBeUndefined();
+    expect(game.world.conversations.get(conversation.id)).toBe(conversation);
+  },
+);
+
+test('accepted human invitation follows collision-safe paths around obstacles and starts the conversation during memory', () => {
+  const { agent, game, human, conversation, player } = invitationFixture();
+  // The midpoint is blocked; reaching the other side requires going around the wall.
+  for (let y = 0; y < 3; y++) game.worldMap.objectTiles[0][4][y] = 1;
+  agent.inProgressOperation = { name: 'agentRememberConversation', operationId: 'o:old', started: 999 };
+  conversation.acceptInvite(game, human);
+  const random = jest.spyOn(Math, 'random').mockReturnValue(0);
+  try {
+    for (let now = 1000; now < 21000; now += 16) {
+      game.numPathfinds = 0;
+      for (const participant of [player, human]) participant.tickPathfinding(game, now);
+      for (const participant of [player, human]) participant.tickPosition(game, now);
+      for (const participant of [player, human]) {
+        expect(blocked(game, now, participant.position, participant.id)).toBeNull();
+      }
+      conversation.tick(game, now);
+      agent.tick(game, now);
+      if (conversation.participants.get(human.id)!.status.kind === 'participating') break;
+    }
+  } finally {
+    random.mockRestore();
+  }
+  expect(conversation.participants.get(human.id)!.status.kind).toBe('participating');
+  expect(conversation.participants.get(agent.playerId)!.status.kind).toBe('participating');
+  expect(agent.inProgressOperation?.operationId).toBe('o:old');
+  expect(agent.toRemember).toBe('c:3');
 });

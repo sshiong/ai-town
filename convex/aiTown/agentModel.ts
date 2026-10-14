@@ -60,16 +60,24 @@ export class Agent {
     if (!player) {
       throw new Error(`Invalid player ID ${this.playerId}`);
     }
-    if (this.inProgressOperation) {
-      if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
-        // Wait on the operation to finish.
-        return;
-      }
-      console.log(`Timing out ${JSON.stringify(this.inProgressOperation)}`);
-      delete this.inProgressOperation;
-    }
     const conversation = game.world.playerConversation(player);
     const member = conversation?.participants.get(player.id);
+    // A new conversation supersedes an idle decision made before the invitation.
+    if (conversation && this.inProgressOperation?.name === 'agentDoSomething') {
+      delete this.inProgressOperation;
+    }
+    if (this.inProgressOperation) {
+      if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
+        // Accepting and walking do not need a brain operation. Let these proceed
+        // while an earlier conversation is being remembered.
+        if (member?.status.kind !== 'invited' && member?.status.kind !== 'walkingOver') {
+          return;
+        }
+      } else {
+        console.log(`Timing out ${JSON.stringify(this.inProgressOperation)}`);
+        delete this.inProgressOperation;
+      }
+    }
     if (
       conversation?.federationTurn &&
       conversation.federationTurn.deadline > now &&
@@ -78,7 +86,7 @@ export class Agent {
       return;
 
     // Check to see if we have a conversation we need to remember.
-    if (this.toRemember) {
+    if (this.toRemember && !conversation) {
       // Fire off the action to remember the conversation.
       console.log(`Agent ${this.id} remembering conversation ${this.toRemember}`);
       this.startOperation(game, now, 'agentRememberConversation', {

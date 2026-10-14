@@ -78,6 +78,19 @@ export class Conversation {
     // If the players are both in the "walkingOver" state and they're sufficiently close, transition both
     // of them to "participating" and stop their paths.
     if (member1.status.kind === 'walkingOver' && member2.status.kind === 'walkingOver') {
+      if (playerDistance >= CONVERSATION_DISTANCE) {
+        // Humans have no agent tick to walk them towards an accepted invitation.
+        for (const [player, otherPlayer] of [
+          [player1, player2],
+          [player2, player1],
+        ]) {
+          if (!player.human || player.pathfinding) continue;
+          movePlayer(game, now, player, {
+            x: Math.floor(otherPlayer.position.x),
+            y: Math.floor(otherPlayer.position.y),
+          });
+        }
+      }
       if (playerDistance < CONVERSATION_DISTANCE) {
         console.log(`Starting conversation between ${player1.id} and ${player2.id}`);
 
@@ -185,6 +198,12 @@ export class Conversation {
       );
     }
     member.status = { kind: 'walkingOver' };
+    // Discard destinations chosen before the invitation, so both participants
+    // can start approaching each other on their next tick.
+    for (const playerId of this.participants.keys()) {
+      const participant = game.world.players.get(playerId);
+      if (participant) stopPlayer(participant);
+    }
   }
 
   rejectInvite(game: Game, now: number, player: Player) {
