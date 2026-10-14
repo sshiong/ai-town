@@ -270,6 +270,20 @@ export const status = query({
     return job ? publicJob(job) : null;
   },
 });
+export const savedTasks = query({
+  args: { adminToken: v.string(), visitId: v.string(), scope: v.union(v.literal('CACHE'), v.literal('SENSITIVE')),
+    history: v.optional(v.object({ importId: v.id('backupImports'), worldId: v.id('worlds'), ownerGlobalId: v.string() })),
+    paginationOpts: paginationOptsValidator },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    if (!args.visitId.trim() || args.visitId.length > 256) throw new Error('INVALID_VISIT_ID');
+    const page = await ctx.db.query('travelPrivacyJobs').withIndex('visit', q => q.eq('visitId', args.visitId))
+      .order('desc').paginate({ ...args.paginationOpts, numItems: 5, maximumRowsRead: 5, maximumBytesRead: 256000 });
+    return { ...page, page: page.page.filter(job => job.scope === args.scope &&
+      (args.history ? job.history?.importId === args.history.importId && job.history.worldId === args.history.worldId &&
+        job.history.ownerGlobalId === args.history.ownerGlobalId : !job.history)).map(publicJob) };
+  },
+});
 export const historicalCandidates = query({
   args: { adminToken: v.string(), visitId: v.string(), paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {

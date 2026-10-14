@@ -1152,3 +1152,30 @@ test('a running cache-only job cannot hide a concurrent sensitive job from the c
   expect(result).toEqual([]);
   expect(await t.run(ctx => ctx.db.query('embeddingsCache').collect())).toHaveLength(0);
 });
+
+test('saved previews page the exact visit and scope without exposing deletion identifiers or changing checkpoints', async () => {
+  const t = convexTest(schema, modules); await fixture(t);
+  const jobId: Id<'travelPrivacyJobs'> = await t.mutation(mutationRef('travelPrivacy/inspect'), { adminToken, visitId: 'selected', scope: 'CACHE' });
+  await t.run(async ctx => {
+    const original = (await ctx.db.get(jobId))!;
+    const { _id, _creationTime, ...copy } = original;
+    for (let index = 0; index < 7; index++) await ctx.db.insert('travelPrivacyJobs', {
+      ...copy, scope: index === 0 ? 'SENSITIVE' : 'CACHE', createdAt: original.createdAt + index,
+      textHashes: ['private-evidence-hash'], transcriptIds: ['private-transcript-id'],
+    });
+    await ctx.db.insert('travelPrivacyJobs', { ...copy, visitId: 'other-visit' });
+  });
+  const before = await t.run(ctx => ctx.db.get(jobId));
+  const args = { adminToken, visitId: 'selected', scope: 'CACHE' as const, paginationOpts: { cursor: null, numItems: 100 } };
+  await expect(t.query(queryRef('travelPrivacy/savedTasks'), { ...args, adminToken: 'wrong-token' })).rejects.toThrow();
+  const first = await t.query(queryRef('travelPrivacy/savedTasks'), args);
+  expect(first.page.length).toBeLessThanOrEqual(5); expect(first.isDone).toBe(false);
+  const second = await t.query(queryRef('travelPrivacy/savedTasks'), { ...args, paginationOpts: { cursor: first.continueCursor, numItems: 100 } });
+  const result = [...first.page, ...second.page];
+  expect(result).toHaveLength(7);
+  expect(result.every((row: any) => row.visitId === 'selected' && row.scope === 'CACHE')).toBe(true);
+  expect(JSON.stringify(result)).not.toContain('private-evidence-hash');
+  expect(JSON.stringify(result)).not.toContain('private-transcript-id');
+  expect(result.every((row: any) => !('memoryIds' in row) && !('history' in row))).toBe(true);
+  expect(await t.run(ctx => ctx.db.get(jobId))).toEqual(before);
+});

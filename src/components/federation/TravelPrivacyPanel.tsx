@@ -48,6 +48,9 @@ const statusRef = makeFunctionReference<
   { adminToken: string; jobId: Id<'travelPrivacyJobs'> },
   Report | null
 >('federation/travelPrivacy:status');
+const savedTasksRef = makeFunctionReference<'query',
+  { adminToken: string; visitId: string; scope: 'CACHE' | 'SENSITIVE'; history?: HistorySource; paginationOpts: PaginationOptions },
+  PaginationResult<Report>>('federation/travelPrivacy:savedTasks');
 export default function TravelPrivacyPanel({ adminToken }: { adminToken: string }) {
   const { t } = useLocale(),
     task = useAdminTask();
@@ -59,6 +62,9 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
     source === 'IMPORTED' && visitId.trim() ? { adminToken, visitId: visitId.trim() } : 'skip',
     { initialNumItems: 5 });
   const choice = history.results.find(item => JSON.stringify(item.history) === selectedHistory);
+  const saved = usePaginatedQuery(savedTasksRef, visitId.trim() && (source === 'CURRENT' || choice)
+    ? { adminToken, visitId: visitId.trim(), scope, ...(source === 'IMPORTED' && choice ? { history: choice.history } : {}) } : 'skip',
+    { initialNumItems: 5 });
   const inspect = useMutation(inspectRef),
     start = useMutation(startRef),
     retry = useMutation(retryRef);
@@ -162,6 +168,18 @@ export default function TravelPrivacyPanel({ adminToken }: { adminToken: string 
           </AdminButton>
         </div>
       </form>
+      <Field label={t('Saved travel privacy tasks')}>
+        <select value={jobId ?? ''} disabled={!!task.pending} onChange={event =>
+          setJobId(saved.results.find(item => item.jobId === event.target.value)?.jobId)}>
+          <option value="">{t('Select a saved task')}</option>
+          {saved.results.map(item => <option key={item.jobId} value={item.jobId}>
+            {t(item.state)} · {t(item.scope)} · {item.jobId}
+          </option>)}
+        </select>
+      </Field>
+      {saved.status === 'CanLoadMore' && <AdminButton onClick={() => saved.loadMore(5)}>
+        {t('Load more saved privacy tasks')}
+      </AdminButton>}
       {report && (
         <div className="admin-card">
           <p>

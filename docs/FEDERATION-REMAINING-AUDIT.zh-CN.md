@@ -472,3 +472,10 @@ L 真实浏览器已以原合成选中居民创建正式 agent-one 分项导出�
 同一原任务的浏览器文件已补齐：64/64分块+manifest共65文件。顺序点击间隔约1.1秒后32–63及早先遗漏31均实际下载，逐块canonical SHA-256、UTF8 bytes、count/table/index全部与签名manifest一致，原来源Ed25519签名独立验证通过。完整计数502 memory rows、501 messages、1015总记录；1 selected owner，另一control global ID不出现在任何下载文件中，includeVectors=false。早先31/64部分下载结论由此实际证据补全，不推断高频超时根因已全部解决。
 
 真实浏览器提交原synthetic visit的SENSITIVE预检，记录任务zx79cgdx5kgt5s9bp7614xyr658g8128。权威scan检查点已扫描64物理分块、1015行、selectedRows4、blockers0，进入CLOSURE，revision2370；父任务CHUNK_CHECK/revision326仍INSPECTING，无archiveError。未点击Clear按钮，未开始native或archive删除，不能将此检查点写成清理完成。保留同任务继续观察调度，不重复创建预检。浏览器AES重导和目标恢复仍未执行；临时L模块、seed、回执及归档仍待最终精确清理和正式代码恢复。
+
+
+原SENSITIVE预检已READY且两类归档coverage=READY/blockers0。浏览器AES导出实际原manifest文件并通过文件input+密码解密加载，来源Town ID匹配、Inspect chunks locally入口出现、无alert；自动化曾等待错误按钮标签超时，之后按实际按钮验证，不能将timeout解释为解密失败。这里只证明真实manifest加解密和加载，不代表全部64块AES或apply。
+
+切换Data/Travel页面后原清理preview选择丢失，主代理通过正式API启动同一已READY任务zx79cgdx5kgt5s9bp7614xyr658g8128，未重新创建preview；phase=CHUNK_REWRITE/stateRUNNING、processedRows0、无archiveError。此启动明确不是浏览器点击Clear验收，native清理未确认。
+
+已补产品续作入口：输入同visit和scope后，按visit索引每次最多读5条保存任务，精确区分current/imported history来源，只返回public状态/计数，不暴露memory/transcript/hash标识。管理面板可明确选择已保存任务并按原状态继续；不会自动启动清理。完整travelPrivacy+locale两套61项通过（11.042秒），包含鉴权、分页、scope/visit隔离、无private identifiers和不变检查点。修正新增测试jobId类型后重新Convex检查和生产构建通过，仍有既有大包提示。此新入口尚待L浏览器复核，不代替整链路验收。
