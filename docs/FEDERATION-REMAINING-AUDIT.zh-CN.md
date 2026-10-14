@@ -479,3 +479,16 @@ L 真实浏览器已以原合成选中居民创建正式 agent-one 分项导出�
 切换Data/Travel页面后原清理preview选择丢失，主代理通过正式API启动同一已READY任务zx79cgdx5kgt5s9bp7614xyr658g8128，未重新创建preview；phase=CHUNK_REWRITE/stateRUNNING、processedRows0、无archiveError。此启动明确不是浏览器点击Clear验收，native清理未确认。
 
 已补产品续作入口：输入同visit和scope后，按visit索引每次最多读5条保存任务，精确区分current/imported history来源，只返回public状态/计数，不暴露memory/transcript/hash标识。管理面板可明确选择已保存任务并按原状态继续；不会自动启动清理。完整travelPrivacy+locale两套61项通过（11.042秒），包含鉴权、分页、scope/visit隔离、无private identifiers和不变检查点。修正新增测试jobId类型后重新Convex检查和生产构建通过，仍有既有大包提示。此新入口尚待L浏览器复核，不代替整链路验收。
+
+
+## V08 同任务脱敏终态与完整 AES 文件复核（2026-10-14）
+
+原 SENSITIVE 任务 zx79cgdx5kgt5s9bp7614xyr658g8128 已由正式公开 status 核实 COMPLETE/PURGE、processedRows=5、blockers=0、externalCopies=0；ordinaryBundles/largeChunks 均 COMPLETE，orphanObjects 仍 NOT_VERIFIED。这只证明已选择范围的归档及 native 清理达到终态，不证明所有本地孤立存储对象消失。未重新创建 preview 或 export。
+
+原 export job kn73wmwdawp3pk2v5mm13jm0218g90w8 已产生 local-sanitized v2 清单，64 个数据分块及 1 个独立证据分块。真实 Chromium 逐次点击下载，重新填写每次自动清空的口令，落盘 66 个 AES-256-GCM 文件（清单、64 数据块、1 证据块），间隔约 1.1 秒。独立 Node crypto 对原浏览器文件完成 PBKDF2/AES 解密，逐块验证 canonical SHA-256、JSON UTF8 bytes、count/table/index；1012 条数据中包含 501 memories 和 501 messages，证据页 2 条且页链/总数匹配。所有数据分块均不含合成敏感旅行正文或另一 control owner。原来源清单保持与 baseline 一致，来源证据 Ed25519 签名有效；当前清单的 local proof 摘要与签名有效，签署公钥与此前独立验证的来源公钥一致。原来源签名仍只认证来源证据，不能冒称认证当前脱敏文件。
+
+真实浏览器通过 file input 加载该加密派生清单，手动填写经 baseline 验证的可信签署指纹，选择全部 64 个实际 AES 数据文件及 1 个实际证据文件，点击 Inspect chunks locally 后显示 Local inspection complete 和居民/Chat Profile 映射入口，无导入 alert。证据文件目前只是选入，尚未正式暂存或服务器校验；不把本地检查等同预检、应用或负状态恢复验证。检查完成后已清空口令框。
+
+35180ee 的正式续作代码已部署 L overlay。部署期间热更新使管理面板重置，重新加载和登录后零控制台错误、22 条既有警告；先前等待不完整段落标签的自动化超时不代表任务失效。最终真实浏览器离开 Data 页面返回 Travel，输入同 visit、选择 SENSITIVE，再选原保存任务，确实显示 Large chunk backup files: Archive cleanup complete 与 Known external mirrors: 0 · Cleared rows: 5；未再启动清理。
+
+V08 仍开放：独立目标后端的显式映射、全部数据/证据暂存、预检、应用报告、索引重建及跨 500 条边界检索、真实刷新续传/取消矩阵、测试 exact-ID 退役与 pristine 正式代码恢复。L 内 clone 只生成该镇的新居民身份，不能替代独立目标实例或 CloneAsNewTown 验收。私有 L 夹具、seed、journal 和归档仍保留，未声称清理完毕。
