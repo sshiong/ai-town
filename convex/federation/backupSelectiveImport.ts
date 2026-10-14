@@ -98,6 +98,11 @@ type Metadata = {
 const metadata = (j: Job) => j.metadata as Metadata;
 const table = (s: string) => s as TableNames;
 const args = { adminToken: v.string(), jobId: v.id('backupLargeJobs') };
+function assertSourceHomeIdentity(manifest: SelectiveManifest) {
+  if (manifest.selection.owners.some(owner =>
+    owner.agentGlobalId !== `${manifest.source.townId as string}/agent:${owner.worldId}:${owner.agentId}`))
+    throw new Error('SELECTIVE_IMPORT_SOURCE_HOME_IDENTITY_MISMATCH');
+}
 const qref = (s: string) => makeFunctionReference<'query'>(`federation/backupSelectiveImport:${s}`);
 const mref = (s: string) =>
   makeFunctionReference<'mutation'>(`federation/backupSelectiveImport:${s}`);
@@ -341,13 +346,7 @@ export const createImportJob = internalMutation({
       reason: a.reason.trim(),
     };
     validateOptions(options, manifest.selection);
-    if (
-      manifest.selection.owners.some(
-        (o) =>
-          o.agentGlobalId !== `${manifest.source.townId as string}/agent:${o.worldId}:${o.agentId}`,
-      )
-    )
-      throw new Error('SELECTIVE_IMPORT_SOURCE_HOME_IDENTITY_MISMATCH');
+    assertSourceHomeIdentity(manifest);
     if (
       options.mode === 'restore' &&
       (!options.sourceStopped ||
@@ -485,7 +484,8 @@ export const createImport = action({
   args: { adminToken: v.string(), manifest: v.any(), signature: v.string(), localProof: v.optional(v.any()), expectedLocalProofFingerprint: v.optional(v.string()), ...importOptions },
   handler: async (ctx, a): Promise<{ jobId: Id<'backupLargeJobs'> }> => {
     requireAdmin(a.adminToken);
-    await validateSelectiveImportManifest(a.manifest, a.signature, a.localProof, undefined, a.expectedLocalProofFingerprint);
+    const plan = await validateSelectiveImportManifest(a.manifest, a.signature, a.localProof, undefined, a.expectedLocalProofFingerprint);
+    assertSourceHomeIdentity(plan.manifest);
     const manifestStorageId = await ctx.storage.store(
       new Blob([JSON.stringify(a.manifest)], { type: 'application/json' }),
     );

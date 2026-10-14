@@ -503,3 +503,5 @@ V08 仍开放：独立目标后端的显式映射、全部数据/证据暂存、
 根因属于合成夹具：原 setup 生成 `${townId}/agent:${prefix}-${i}`，而正式选择性导入要求 `${townId}/agent:${worldId}:${agentId}`。该安全门禁正确，不放宽生产校验，也不将新镇居民复制冒作原Home恢复。已修正私有源码中未来 setup 的生成公式，新增断言覆盖所有有global ID的setup表；原5项ACK丢失/重放/防篡改/精确退役测试全部通过（5.331秒）。此源码修正未覆盖 L 现存行或原回执，也未重新seed。
 
 现存场景须沿原prefix使用独立签名身份纠正回执，分页CAS核对原44回执、原COMPLETE清理任务以及精确旧→新ID与before/after摘要；合法缺失的旅行行不重建，旧墓碑同key仅精确投影owner且保留历史证明。原错误manifest及分块、原清理任务和原seed回执均保留。修正后的source需新建正式export并重新验证，这属于原场景记录清楚的修复续验，不能将原错误归档报告为成功导入。纠正模块与回执/cleanup衔接仍在开发，跨镇恢复验收保持开放。
+
+正式 SELECTIVE createImport 的源Home格式校验已提前到清单storage.store之前，内部createImportJob仍复用相同校验，避免已知无效身份留下未发布清单；未知发布ACK的保留/重试策略不变。新增真实convex-test以有效来源签名但错误owner ID验证拒绝前后_storage完全一致、无import job或维护锁。该例及超过1000-message有效克隆2/2通过（112.458秒）；另定向未知job/chunk响应恢复与脱敏clone/merge/restore四例4/4通过（9.866秒），未运行该文件其余43例。Convex TypeScript检查和生产构建通过，保留既有大包提示。L/M实机既有失败存储对象不能据此修复追溯声称已删除，仍保留exact收尾回执。

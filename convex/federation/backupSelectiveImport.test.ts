@@ -217,6 +217,19 @@ async function archive(f: Fixture, overrides: Record<string, unknown> = {}) {
   return { manifest, signature: result.signature as string, chunks };
 }
 type Archive = Awaited<ReturnType<typeof archive>>;
+test('signed malformed source Home identity is rejected before any manifest upload or import job', async () => {
+  const original = await fixture(), target = await fixture('target');
+  const source = await archive(original);
+  source.manifest.selection.owners[0].agentGlobalId = 'town:source/agent:invalid-fixture-id';
+  await resign(original, source);
+  const storageBefore = await target.t.run(ctx => ctx.db.system.query('_storage').collect());
+  await expect(target.t.action(aa('createImport'), {
+    adminToken, manifest: source.manifest, signature: source.signature, ...options(target, source),
+  })).rejects.toThrow('SELECTIVE_IMPORT_SOURCE_HOME_IDENTITY_MISMATCH');
+  expect(await target.t.run(ctx => ctx.db.system.query('_storage').collect())).toEqual(storageBefore);
+  expect(await target.t.query(aq('listJobs'), { adminToken })).toEqual([]);
+  expect(await target.t.run(ctx => ctx.db.query('backupMaintenanceLocks').collect())).toEqual([]);
+});
 async function formalChunkPlan(t: Fixture['t'], jobId: Id<'travelPrivacyJobs'>) {
   const scanId = await t.mutation(ref('travelPrivacyChunkArchives', 'startInspection', 'mutation'), { jobId });
   for (let page = 0; page < 5000; page++) {
