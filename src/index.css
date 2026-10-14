@@ -298,3 +298,10 @@ p[contenteditable='true']:empty::before {
   font-family: 'Upheaval Pro', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 .language-settings { max-width: 36rem; }
+.language-settings .admin-panel { min-height: 240px; }
+.language-picker { position: relative; }
+.language-trigger { width: 100%; min-height: 44px; display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: #171421; color: #f5e6cc; border: 2px solid #715258; }
+.language-trigger:focus-visible { outline: 2px solid #fec742; outline-offset: 2px; }
+.language-options { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20; border: 2px solid #987458; background: #171421; box-shadow: 0 4px 0 #12111c; }
+.language-option { width: 100%; min-height: 44px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; text-align: left; color: #f5e6cc; }
+.language-option.is-active, .language-option:hover { background: #3a4466; }
