@@ -142,6 +142,7 @@ const measuredTables: Array<[TableNames, Category]> = [
   ['federationDisclosureAudit', 'history'],
   ['embeddingsCache', 'cache'],
   ['messageTranslations', 'cache'],
+  ['playerTextTranslations', 'cache'],
   ['messageTranslationPreferences', 'operational'],
   ['messageTranslationWorker', 'operational'],
   ['federationInbox', 'operational'],

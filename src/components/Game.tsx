@@ -71,7 +71,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
         </div>
         {/* Right column area */}
         <div
-          className="flex flex-col overflow-y-auto shrink-0 px-4 py-6 sm:px-6 lg:w-96 xl:pr-6 border-t-8 sm:border-t-0 sm:border-l-8 border-brown-900  bg-brown-800 text-brown-100"
+          className="game-details flex flex-col overflow-y-auto shrink-0 px-4 py-6 sm:px-6 lg:w-96 xl:pr-6 border-t-8 sm:border-t-0 sm:border-l-8 border-brown-900 bg-brown-800 text-brown-100"
           ref={scrollViewRef}
         >
           {!!presence?.travelers.length && <section className="admin-map-presence" aria-label={t("Traveling residents")}><h3>{t("Residents away")}</h3><ul>{presence.travelers.map(resident => <li key={resident.agentGlobalId}><button type="button" className="underline underline-offset-2" onClick={() => setSelectedElement({ kind: 'player', id: parseGameId('players', resident.playerId) })}><strong>{resident.name}</strong></button> · {t(resident.state)}{resident.hostTownId && <small> {t("· Traveling in {town}", { town: resident.hostTownId })}</small>}</li>)}</ul></section>}

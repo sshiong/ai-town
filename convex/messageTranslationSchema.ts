@@ -1,6 +1,6 @@
 import { defineTable } from 'convex/server';
 import { v } from 'convex/values';
-import { conversationId } from './aiTown/ids';
+import { conversationId, playerId } from './aiTown/ids';
 
 export const messageTranslationState = v.union(
   v.literal('QUEUED'),
@@ -9,6 +9,21 @@ export const messageTranslationState = v.union(
   v.literal('FAILED'),
 );
 export const messageTranslationTables = {
+  playerTextTranslations: defineTable({
+    worldId: v.id('worlds'),
+    playerId,
+    field: v.union(v.literal('description'), v.literal('activity')),
+    targetLanguage: v.literal('zh-CN'),
+    sourceText: v.string(),
+    state: messageTranslationState,
+    attempts: v.number(),
+    generation: v.number(),
+    updatedAt: v.number(),
+    translatedText: v.optional(v.string()),
+    errorCode: v.optional(v.string()),
+    retryAt: v.optional(v.number()),
+    leaseUntil: v.optional(v.number()),
+  }).index('player_field', ['worldId', 'playerId', 'field', 'targetLanguage']),
   messageTranslations: defineTable({
     messageId: v.id('messages'),
     worldId: v.id('worlds'),

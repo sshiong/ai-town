@@ -69,6 +69,25 @@ body {
   border-image-slice: 25%;
 }
 
+.game-details {
+  min-height: 0;
+  max-height: 60dvh;
+  overscroll-behavior-y: contain;
+}
+
+@media screen and (min-width: 1024px) {
+  .game-frame {
+    height: clamp(360px, calc(100dvh - 320px), 720px);
+    min-height: 0;
+    flex: none;
+    overflow: hidden;
+  }
+
+  .game-details {
+    max-height: none;
+  }
+}
+
 .game-progress-bar {
   border: 5px solid rgb(23, 20, 33);
 }

@@ -137,6 +137,7 @@ import type * as init from "../init.js";
 import type * as maintenanceFunctions from "../maintenanceFunctions.js";
 import type * as messageTranslationScheduling from "../messageTranslationScheduling.js";
 import type * as messageTranslationSchema from "../messageTranslationSchema.js";
+import type * as playerTextTranslations from "../playerTextTranslations.js";
 import type * as messageTranslations from "../messageTranslations.js";
 import type * as messages from "../messages.js";
 import type * as models_compatibility from "../models/compatibility.js";
@@ -298,6 +299,7 @@ declare const fullApi: ApiFromModules<{
   maintenanceFunctions: typeof maintenanceFunctions;
   messageTranslationScheduling: typeof messageTranslationScheduling;
   messageTranslationSchema: typeof messageTranslationSchema;
+  playerTextTranslations: typeof playerTextTranslations;
   messageTranslations: typeof messageTranslations;
   messages: typeof messages;
   "models/compatibility": typeof models_compatibility;

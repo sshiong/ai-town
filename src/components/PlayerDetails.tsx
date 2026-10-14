@@ -5,6 +5,7 @@ import { Id } from '../../convex/_generated/dataModel';
 import closeImg from '../../assets/close.svg';
 import { SelectElement } from './Player';
 import { Messages } from './Messages';
+import { PlayerTextTranslation } from './PlayerTextTranslation';
 import { toastOnError } from '../toasts';
 import { useSendInput } from '../hooks/sendInput';
 import { Player } from '../../convex/aiTown/player';
@@ -69,7 +70,9 @@ export default function PlayerDetails({
       <h2 className="font-display text-2xl">{awayResident.name}</h2>
       <span className="admin-badge">{t(awayResident.state)}</span>
       <p>{awayResident.hostTownId ? t("Traveling in {town}", { town: awayResident.hostTownId }) : t("Preparing or returning from a visit.")}</p>
-      {playerDescription?.description && <p>{playerDescription.description}</p>}
+      {playerDescription?.description && <div><PlayerTextTranslation
+        worldId={worldId} playerId={playerId} field="description" text={playerDescription.description}
+      /></div>}
       <p className="admin-muted">{t("Their home identity remains here. Local map presence resumes after safe return.")}</p>
       {previousConversation && <>
         <h3 className="font-display text-xl">{t("Previous local conversation")}</h3>
@@ -238,14 +241,17 @@ export default function PlayerDetails({
       )}
       {!playerConversation && player.activity && player.activity.until > Date.now() && (
         <div className="box flex-grow mt-6">
-          <h2 className="bg-brown-700 text-base sm:text-lg text-center">
-            {player.activity.description}
-          </h2>
+          <div className="bg-brown-700 text-base sm:text-lg text-center">
+            <PlayerTextTranslation worldId={worldId} playerId={playerId}
+              field="activity" text={player.activity.description} />
+          </div>
         </div>
       )}
       <div className="desc my-6">
-        <p className="leading-tight -m-4 bg-brown-700 text-base sm:text-sm">
-          {!isMe && playerDescription?.description}
+        <div className="leading-tight -m-4 bg-brown-700 text-base sm:text-sm">
+          {!isMe && playerDescription?.description && <PlayerTextTranslation
+            worldId={worldId} playerId={playerId} field="description" text={playerDescription.description}
+          />}
           {isMe && <i>{t("This is you!")}</i>}
           {!isMe && inConversationWithMe && (
             <>
@@ -253,7 +259,7 @@ export default function PlayerDetails({
               <br />(<i>{t("Conversing with you!")}</i>)
             </>
           )}
-        </p>
+        </div>
       </div>
       {!isMe && playerConversation && playerStatus?.kind === 'participating' && (
         <Messages

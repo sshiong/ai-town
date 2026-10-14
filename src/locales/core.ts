@@ -1,5 +1,8 @@
 export const coreMessages: Record<string, string> = {
   'AI Town': 'AI 小镇',
+  'View original text': '查看英文原文',
+  'Translation unavailable. Original text shown.': '翻译暂不可用，当前显示原文。',
+  'Translating… Original text shown.': '正在翻译…当前显示原文。',
   'A virtual town where AI characters live, chat and socialize.':
     '一个让 AI 居民生活、聊天和交朋友的虚拟小镇。',
   Help: '帮助',
