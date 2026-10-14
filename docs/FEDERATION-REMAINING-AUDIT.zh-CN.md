@@ -451,3 +451,14 @@ RAW 与 SELECTIVE 导入需明确确认可信本地签署指纹，上传全部�
 SELECTIVE 刷新续传已补齐：直接选择已有 STAGING 任务即可选择剩余数据与独立证据文件，服务器保存的已认证清单和映射继续生效；任务选中期间不允许重载清单。支持数据已齐时仅补传加密证据页，两个独立上传数量都齐才启用预检。公开任务只新增证据页期望数和上传数，不返回负状态正文。
 
 主代理复核实际组件事件处理器、参数策略和中文文案三套 10 项通过；正式派生 clone/merge/restore 三例及公开计数断言 3/3 通过（7.461 秒），此次定向未执行其余 45 项。Convex 类型检查与生产构建通过，仍有既有大包提示。组件 harness 明确使用 ES2022 迭代语义，验证两类文件的实际上传 handler、AES 解密、原 jobId/映射保持及不重新创建任务；该 harness 没有真实 DOM，不冒称 V08 浏览器恢复整链路完成。
+
+
+## V08 隔离实机数据准备（2026-10-14，尚未完成浏览器恢复）
+
+独立 L 环境使用保留卷和 3GiB 容器内存上限，正式 `a84c427` 部署成功，原镇未重置。空默认世界通过正常 init(numAgents=0) 创建并暂停，关闭联邦准入。Chat qwen3.5:4b 与 Embedding qwen3-embedding:0.6b /1024 的正式 probe 均成功（约5.069秒/2.892秒）；容器最初 loopback 路由拒绝连接，未绑定的错误草稿已停用并通过 host bridge 新建相同模型配置。
+
+夹具仅在私有 L overlay 部署，不进入仓库。事务签名回执 journal 与原 prefix/page 请求支持未知 ACK 恢复；主代理复跑5项真实convex-test通过，完整私有overlay TypeScript通过。实机发现管理员令牌并非Base64密钥导致最初setup事务拒绝，改为带域标记的摘要派生HMAC密钥，并用非Base64测试令牌重新5/5通过，沿同一原回执继续，未换prefix。
+
+实机 seed+verify 成功：prefix v08-browser-57662d3387efe2e8，1019条合成记录全部存在、摘要匹配、缺失0；含501条选中居民conversation memories、501条messages、3条另一居民control memories及14条setup记录。均分页≤25，44条持久回执仅存ID/摘要/归属；不生成向量或模型正文请求。完整导出→清理已有归档→同job脱敏重导→AES浏览器真实文件→映射/预检/应用尚未执行，不能据seed计数关闭V08。
+
+期间Docker全部测试容器在相近FinishedAt退出255，L/K/A均OOM=false，不能冒称OOM或数据丢失；仅恢复专用L，旧卷与其它实例保留。L最新临时overlay部署成功，验收完成后必须按签名exact IDs退役seed、journal及派生artifact并恢复pristine正式代码；当前合成数据与临时入口仍存在，不宣称已清理。
