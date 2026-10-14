@@ -492,3 +492,14 @@ L 真实浏览器已以原合成选中居民创建正式 agent-one 分项导出�
 35180ee 的正式续作代码已部署 L overlay。部署期间热更新使管理面板重置，重新加载和登录后零控制台错误、22 条既有警告；先前等待不完整段落标签的自动化超时不代表任务失效。最终真实浏览器离开 Data 页面返回 Travel，输入同 visit、选择 SENSITIVE，再选原保存任务，确实显示 Large chunk backup files: Archive cleanup complete 与 Known external mirrors: 0 · Cleared rows: 5；未再启动清理。
 
 V08 仍开放：独立目标后端的显式映射、全部数据/证据暂存、预检、应用报告、索引重建及跨 500 条边界检索、真实刷新续传/取消矩阵、测试 exact-ID 退役与 pristine 正式代码恢复。L 内 clone 只生成该镇的新居民身份，不能替代独立目标实例或 CloneAsNewTown 验收。私有 L 夹具、seed、journal 和归档仍保留，未声称清理完毕。
+
+
+## V08 独立目标 M 与夹具身份校验失败（2026-10-14）
+
+新建独立 M 后端（3422/3423，独立卷、3GiB 上限），部署 pristine e184cae 正式代码，未部署私有夹具。正常 initialize 生成不同于 L 的 Town/deployment 身份，init(numAgents=0) 后暂停默认世界，关闭联邦准入。正式 Chat/Embedding Profile 使用本机 host bridge；probeChat 实际成功（qwen3.5:4b，约8.83秒），probeEmbedding 成功（qwen3-embedding:0.6b /1024）。指定该 Embedding Profile 的空空间经 startRebuild→READY→validateSpace/scanProgress DONE→activateSpace 正式激活。空空间验证不证明导入后的501条记忆索引覆盖。
+
+真实 M 浏览器加载原 L 的66个AES文件中的清单和64数据块，选择独立证据文件、本地验证的来源指纹、clone owner、M暂停世界与M自己的已验证Chat Profile，点击 Save import plan。正式 createImport 拒绝 SELECTIVE_IMPORT_SOURCE_HOME_IDENTITY_MISMATCH；公开 listJobs 确认0个导入任务，未暂存、未预检、未应用。创建失败先前存入的1个未发布清单存储对象已记录 exact ID/size/sha256 私有回执，未盲删。浏览器口令框已清空。
+
+根因属于合成夹具：原 setup 生成 `${townId}/agent:${prefix}-${i}`，而正式选择性导入要求 `${townId}/agent:${worldId}:${agentId}`。该安全门禁正确，不放宽生产校验，也不将新镇居民复制冒作原Home恢复。已修正私有源码中未来 setup 的生成公式，新增断言覆盖所有有global ID的setup表；原5项ACK丢失/重放/防篡改/精确退役测试全部通过（5.331秒）。此源码修正未覆盖 L 现存行或原回执，也未重新seed。
+
+现存场景须沿原prefix使用独立签名身份纠正回执，分页CAS核对原44回执、原COMPLETE清理任务以及精确旧→新ID与before/after摘要；合法缺失的旅行行不重建，旧墓碑同key仅精确投影owner且保留历史证明。原错误manifest及分块、原清理任务和原seed回执均保留。修正后的source需新建正式export并重新验证，这属于原场景记录清楚的修复续验，不能将原错误归档报告为成功导入。纠正模块与回执/cleanup衔接仍在开发，跨镇恢复验收保持开放。
