@@ -31,6 +31,11 @@ import {
 } from './archiveFiles';
 import { VectorExportOption } from './EmbeddingPanel';
 import ColdArchivePanel from './ColdArchivePanel';
+import {
+  assertArchiveBundleParts,
+  createArchiveBundleBuilder,
+  readArchiveBundle,
+} from './archiveBundle';
 
 const getPrivacyChunk = makeFunctionReference<
   'action',
@@ -52,7 +57,10 @@ const stagePrivacyChunk = makeFunctionReference<
   void
 >('federation/backupPrivacyChunks:stageChunk');
 
-export default function ArchivePanel({ adminToken, headingRef }: {
+export default function ArchivePanel({
+  adminToken,
+  headingRef,
+}: {
   adminToken: string;
   headingRef?: Ref<HTMLHeadingElement>;
 }) {
@@ -77,6 +85,7 @@ export default function ArchivePanel({ adminToken, headingRef }: {
   const [progress, setProgress] = useState<string>();
   const [chunkIndex, setChunkIndex] = useState(0);
   const pauseRequested = useRef(false);
+  const bundleCancelled = useRef(false);
   const [advancing, setAdvancing] = useState(false);
   const [encryptDownloads, setEncryptDownloads] = useState(false);
   const [includeVectors, setIncludeVectors] = useState(false);
@@ -86,6 +95,7 @@ export default function ArchivePanel({ adminToken, headingRef }: {
   const [operator, setOperator] = useState('');
   const [exportReason, setExportReason] = useState('');
   const [manifestFile, setManifestFile] = useState<File>();
+  const [bundleFile, setBundleFile] = useState<File>();
   const canDownload =
     !encryptDownloads ||
     (validBackupPassphrase(exportPassphrase) && exportPassphrase === exportConfirmation);
@@ -102,24 +112,86 @@ export default function ArchivePanel({ adminToken, headingRef }: {
       ? text
       : encryptBackupText(text, secret, purpose, purpose === 'manifest' ? 5_000_000 : 1024 * 1024);
   }
-  async function loadManifest(file: File) {
+  function clearImportSelection() {
+    setJobId(undefined);
+    setManifest(undefined);
+    setManifestName('');
     setExpectedLocalProofFingerprint('');
+    setSourceStopped(false);
+    setReviewed(false);
+    setFiles([]);
+    setPrivacyFiles([]);
+  }
+  async function loadManifest(file: File) {
+    clearImportSelection();
+    setBundleFile(undefined);
     const secret = importPassphrase;
     setImportPassphrase('');
-    const value: unknown = JSON.parse(
-      await readBackupText(file, 5_000_000, 'manifest', secret),
-    );
+    const value: unknown = JSON.parse(await readBackupText(file, 5_000_000, 'manifest', secret));
     try {
       setManifest(await loadLargeArchiveManifest(value));
     } catch (error) {
-      throw new Error(t(error instanceof Error ? error.message : 'The archive manifest metadata is invalid.'));
+      throw new Error(
+        t(error instanceof Error ? error.message : 'The archive manifest metadata is invalid.'),
+      );
     }
     setManifestName(file.name);
     setManifestFile(undefined);
   }
+  async function bundleOperation(operation: () => Promise<void>) {
+    try {
+      await operation();
+    } catch (error) {
+      throw new Error(
+        t(
+          error instanceof Error
+            ? error.message
+            : 'The archive bundle metadata is invalid or unsupported.',
+        ),
+      );
+    }
+  }
+  async function loadBundle(file: File) {
+    return bundleOperation(async () => {
+      clearImportSelection();
+      setManifestFile(undefined);
+      const secret = importPassphrase;
+      setImportPassphrase('');
+      const bundle = await readArchiveBundle(file);
+      const loaded = await loadLargeArchiveManifest(
+        JSON.parse(
+          await readBackupText(
+            new File([bundle.manifest], 'manifest.json', { type: 'application/json' }),
+            5_000_000,
+            'manifest',
+            secret,
+          ),
+        ),
+      );
+      assertArchiveBundleParts(bundle, loaded.archive.manifest);
+      const chunkFiles = bundle.chunks.map(
+        (part) =>
+          new File([part.text], `chunk-${String(part.index).padStart(6, '0')}.json`, {
+            type: 'application/json',
+          }),
+      );
+      const pageFiles = bundle.privacyChunks.map(
+        (part) =>
+          new File([part.text], `privacy-${String(part.index).padStart(6, '0')}.json`, {
+            type: 'application/json',
+          }),
+      );
+      setManifest(loaded);
+      setManifestName(file.name);
+      setFiles(chunkFiles);
+      setPrivacyFiles(pageFiles);
+      setBundleFile(undefined);
+    });
+  }
   useEffect(
     () => () => {
       pauseRequested.current = true;
+      bundleCancelled.current = true;
     },
     [],
   );
@@ -502,6 +574,82 @@ export default function ArchivePanel({ adminToken, headingRef }: {
                   {t('Download manifest')}
                 </AdminButton>
                 <AdminButton
+                  disabled={!!task.pending || !canDownload}
+                  onClick={() =>
+                    void task.run(
+                      t('Downloading archive bundle'),
+                      () =>
+                        bundleOperation(async () => {
+                          bundleCancelled.current = false;
+                          const secret = takeExportPassphrase();
+                          const header = await convex.action(
+                            api.federation.backupLarge.getManifest,
+                            {
+                              adminToken,
+                              jobId: job.jobId,
+                            },
+                          );
+                          if (bundleCancelled.current) return;
+                          const loaded = await loadLargeArchiveManifest(header);
+                          const builder = createArchiveBundleBuilder(
+                            await protectedPart(JSON.stringify(header), 'manifest', secret),
+                          );
+                          const descriptors = loaded.archive.manifest.chunks;
+                          for (let index = 0; index < descriptors.length; index++) {
+                            if (bundleCancelled.current) return;
+                            const descriptor = descriptors[index];
+                            setProgress(
+                              t('Collecting chunk {index} / {count}', {
+                                index: index + 1,
+                                count: descriptors.length,
+                              }),
+                            );
+                            builder.addChunk(
+                              descriptor.index,
+                              await protectedPart(
+                                await convex.action(api.federation.backupLarge.getChunk, {
+                                  adminToken,
+                                  jobId: job.jobId,
+                                  index: descriptor.index,
+                                }),
+                                'chunk',
+                                secret,
+                              ),
+                            );
+                          }
+                          const pages =
+                            loaded.archive.manifest.format === 'ai-town-local-sanitized-chunks'
+                              ? (loaded.archive.manifest.privacyChunks ?? [])
+                              : [];
+                          for (let index = 0; index < pages.length; index++) {
+                            if (bundleCancelled.current) return;
+                            const descriptor = pages[index];
+                            setProgress(
+                              t('Collecting privacy page {index} / {count}', {
+                                index: index + 1,
+                                count: pages.length,
+                              }),
+                            );
+                            const chunk = await convex.action(getPrivacyChunk, {
+                              adminToken,
+                              jobId: job.jobId,
+                              pageNumber: descriptor.index,
+                            });
+                            builder.addPrivacyChunk(
+                              descriptor.index,
+                              await protectedPart(JSON.stringify(chunk), 'chunk', secret),
+                            );
+                          }
+                          if (bundleCancelled.current) return;
+                          downloadJsonText(builder.encode(), `ai-town-archive-${job.jobId}.json`);
+                        }),
+                      t('Archive bundle downloaded with every referenced part.'),
+                    )
+                  }
+                >
+                  {t('Download entire archive as one file')}
+                </AdminButton>
+                <AdminButton
                   disabled={!!task.pending || !canDownload || !supportsArchiveDirectory()}
                   onClick={() => {
                     void selectArchiveDirectory()
@@ -577,7 +725,7 @@ export default function ArchivePanel({ adminToken, headingRef }: {
               </div>
               <p className="admin-muted">
                 {t(
-                  'Folder saving writes one chunk at a time without loading the whole town into browser memory. Where folder access is unavailable, download each chunk separately.',
+                  'Single-file bundles are limited to 64 MiB and assembled in browser memory. For larger archives, save to a folder or download each chunk separately.',
                 )}
               </p>
               <div className="admin-inline-form">
@@ -699,11 +847,8 @@ export default function ArchivePanel({ adminToken, headingRef }: {
             disabled={!!task.pending}
             onChange={(event) => {
               const file = event.target.files?.[0];
-              setManifest(undefined);
-              setExpectedLocalProofFingerprint('');
-              setManifestName('');
-              setSourceStopped(false);
-              setReviewed(false);
+              clearImportSelection();
+              setBundleFile(undefined);
               setManifestFile(file);
               if (!file) return;
               void task.run(
@@ -716,6 +861,50 @@ export default function ArchivePanel({ adminToken, headingRef }: {
             }}
           />
         </Field>
+        <Field
+          label={t('Single-file RAW archive bundle')}
+          hint={t(
+            'Choose a bundle up to 64 MiB. Its manifest and parts remain unverified until server preflight. Encrypted parts require the passphrase again when staging.',
+          )}
+        >
+          <input
+            type="file"
+            accept=".json,application/json"
+            disabled={!!task.pending}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              clearImportSelection();
+              setManifestFile(undefined);
+              setBundleFile(file);
+              if (!file) return;
+              void task.run(
+                t('Reading archive bundle'),
+                () => loadBundle(file),
+                t(
+                  'Bundle loaded. Review the source and create a staging task, then stage the selected parts.',
+                ),
+              );
+            }}
+          />
+        </Field>
+        {bundleFile && (
+          <div className="admin-toolbar">
+            <AdminButton
+              disabled={!!task.pending}
+              onClick={() =>
+                void task.run(
+                  t('Reading archive bundle'),
+                  () => loadBundle(bundleFile),
+                  t(
+                    'Bundle loaded. Review the source and create a staging task, then stage the selected parts.',
+                  ),
+                )
+              }
+            >
+              {t('Load selected bundle')}
+            </AdminButton>
+          </div>
+        )}
         <Field
           label={t('Encrypted archive passphrase')}
           hint={t(
@@ -858,7 +1047,9 @@ export default function ArchivePanel({ adminToken, headingRef }: {
                     !confirmedLargeArchiveSigner(manifest, expectedLocalProofFingerprint)
                   )
                     throw new Error(
-                      t('Confirm the trusted local signer fingerprint before creating this import task.'),
+                      t(
+                        'Confirm the trusted local signer fingerprint before creating this import task.',
+                      ),
                     );
                   const created = await convex.action(api.federation.backupLarge.createImport, {
                     adminToken,
@@ -900,6 +1091,11 @@ export default function ArchivePanel({ adminToken, headingRef }: {
             onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
           />
         </Field>
+        {files.length > 0 && (
+          <p className="admin-muted">
+            {t('{count} data chunks selected for staging.', { count: files.length })}
+          </p>
+        )}
         <div className="admin-toolbar">
           <AdminButton
             disabled={
@@ -956,6 +1152,11 @@ export default function ArchivePanel({ adminToken, headingRef }: {
             onChange={(event) => setPrivacyFiles(Array.from(event.target.files ?? []))}
           />
         </Field>
+        {privacyFiles.length > 0 && (
+          <p className="admin-muted">
+            {t('{count} privacy pages selected for staging.', { count: privacyFiles.length })}
+          </p>
+        )}
         <div className="admin-toolbar">
           <AdminButton
             disabled={
