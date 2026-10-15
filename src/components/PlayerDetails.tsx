@@ -30,7 +30,7 @@ export default function PlayerDetails({
   awayResident?: { name: string; state: string; hostTownId?: string };
 }) {
   const { t } = useLocale();
-  const humanTokenIdentifier = useQuery(api.world.userStatus, { worldId });
+  const humanTokenIdentifier = useQuery(api.world.userStatus, { worldId }) ?? null;
 
   const players = [...game.world.players.values()];
   const humanPlayer = players.find((p) => p.human === humanTokenIdentifier);
@@ -136,7 +136,7 @@ export default function PlayerDetails({
     );
   };
   const onLeaveConversation = async () => {
-    if (!humanPlayer || !inConversationWithMe || !humanConversation) {
+    if (!humanPlayer || !sameConversation || !humanConversation) {
       return;
     }
     await toastOnError(
@@ -199,6 +199,15 @@ export default function PlayerDetails({
             <span>{t("Walking over...")}</span>
           </div>
         </a>
+      )}
+      {(waitingForAccept || waitingForNearby) && (
+        <button
+          type="button"
+          className="mt-3 button text-white shadow-solid text-xl cursor-pointer pointer-events-auto"
+          onClick={onLeaveConversation}
+        >
+          <span className="block bg-clay-700 text-center">{t("Cancel conversation")}</span>
+        </button>
       )}
       {inConversationWithMe && (
         <a

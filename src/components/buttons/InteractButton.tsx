@@ -17,7 +17,7 @@ export default function InteractButton() {
   const worldStatus = useQuery(api.world.defaultWorldStatus);
   const worldId = worldStatus?.maintenance ? undefined : worldStatus?.worldId;
   const game = useServerGame(worldId);
-  const humanTokenIdentifier = useQuery(api.world.userStatus, worldId ? { worldId } : 'skip');
+  const humanTokenIdentifier = useQuery(api.world.userStatus, worldId ? { worldId } : 'skip') ?? null;
   const userPlayerId =
     game && [...game.world.players.values()].find((p) => p.human === humanTokenIdentifier)?.id;
   const join = useMutation(api.world.joinWorld);

@@ -224,6 +224,12 @@ export class Conversation {
   stop(game: Game, now: number) {
     delete this.isTyping;
     for (const [playerId, member] of this.participants.entries()) {
+      // Cancel the approach with the invitation; otherwise a human keeps walking
+      // toward someone after cancelling or after the invitation times out.
+      if (member.status.kind === 'walkingOver') {
+        const player = game.world.players.get(playerId);
+        if (player) stopPlayer(player);
+      }
       const agent = [...game.world.agents.values()].find((a) => a.playerId === playerId);
       if (agent) {
         agent.lastConversation = now;

@@ -181,6 +181,7 @@ export const gameModelMessages: Record<string, string> = {
   "Waiting for accept...": "等待接受邀请…",
   "Walking over...": "正在走近…",
   "Leave conversation": "离开对话",
+  "Cancel conversation": "取消交谈",
   "Accept": "接受",
   "Reject": "拒绝",
   "This is you!": "这就是你！",

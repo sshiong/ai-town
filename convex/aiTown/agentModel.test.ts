@@ -270,3 +270,64 @@ test('accepted human invitation follows collision-safe paths around obstacles an
   expect(agent.inProgressOperation?.operationId).toBe('o:old');
   expect(agent.toRemember).toBe('c:3');
 });
+
+test('two residents route around a wide blocked midpoint and meet without crossing terrain', () => {
+  const { agent, game, human: otherPlayer, conversation, player } = invitationFixture();
+  delete otherPlayer.human;
+  otherPlayer.position = { x: 12, y: 1 };
+  const otherAgent = new Agent({ id: 'a:2', playerId: otherPlayer.id });
+  game.world.agents.set(otherAgent.id, otherAgent);
+  Object.assign(game.worldMap, { width: 14, height: 8,
+    objectTiles: [Array.from({ length: 14 }, () => Array(8).fill(-1))] });
+  // A wide river leaves the two nearest banks farther apart than the direct
+  // approach threshold. The only crossing is at the bottom of the map.
+  for (let x = 3; x <= 8; x++)
+    for (let y = 0; y < 7; y++) game.worldMap.objectTiles[0][x][y] = 1;
+  conversation.acceptInvite(game, otherPlayer);
+  const random = jest.spyOn(Math, 'random').mockReturnValue(0);
+  try {
+    for (let now = 1000; now < 51000; now += 16) {
+      game.numPathfinds = 0;
+      for (const participant of [player, otherPlayer]) participant.tickPathfinding(game, now);
+      for (const participant of [player, otherPlayer]) participant.tickPosition(game, now);
+      for (const participant of [player, otherPlayer])
+        expect(blocked(game, now, participant.position, participant.id)).toBeNull();
+      conversation.tick(game, now);
+      if (conversation.participants.get(player.id)!.status.kind === 'participating') break;
+      agent.tick(game, now);
+      otherAgent.tick(game, now);
+    }
+  } finally { random.mockRestore(); }
+  expect(conversation.participants.get(player.id)!.status.kind).toBe('participating');
+  expect(conversation.participants.get(otherPlayer.id)!.status.kind).toBe('participating');
+});
+
+test('cancelling an accepted invitation stops both approach paths and preserves pending memories', () => {
+  const { agent, game, human, conversation, player } = invitationFixture();
+  conversation.acceptInvite(game, human);
+  conversation.tick(game, 1000);
+  agent.tick(game, 1000);
+  expect(player.pathfinding).toBeDefined();
+  expect(human.pathfinding).toBeDefined();
+  conversationInputs.leaveConversation.handler(game, 1001, { playerId: human.id, conversationId: conversation.id });
+  expect(game.world.conversations.has(conversation.id)).toBe(false);
+  expect(player.pathfinding).toBeUndefined();
+  expect(human.pathfinding).toBeUndefined();
+  expect(player.speed).toBe(0);
+  expect(human.speed).toBe(0);
+  expect(agent.toRemember).toBe('c:3');
+});
+
+test('cancelling an outgoing invitation stops the caller but preserves the unaccepted invitee movement', () => {
+  const { game, human, conversation, player } = invitationFixture();
+  conversation.creator = human.id;
+  conversation.participants.get(human.id)!.status = { kind: 'walkingOver' };
+  conversation.participants.get(player.id)!.status = { kind: 'invited' };
+  const wander = { destination: { x: 3, y: 5 }, started: 1000, state: { kind: 'needsPath' as const } };
+  player.pathfinding = wander;
+  human.pathfinding = { destination: { x: 1, y: 1 }, started: 1000, state: { kind: 'needsPath' } };
+  conversationInputs.leaveConversation.handler(game, 1001, { playerId: human.id, conversationId: conversation.id });
+  expect(game.world.conversations.has(conversation.id)).toBe(false);
+  expect(human.pathfinding).toBeUndefined();
+  expect(player.pathfinding).toBe(wander);
+});
