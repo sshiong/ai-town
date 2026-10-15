@@ -11,7 +11,7 @@ export function useWorldHeartbeat() {
   const heartbeat = useMutation(api.world.heartbeatWorld);
   useEffect(() => {
     const sendHeartBeat = () => {
-      if (!worldStatus || worldStatus.status === 'stoppedByDeveloper') {
+      if (!worldStatus || worldStatus.maintenance || worldStatus.status === 'stoppedByDeveloper') {
         return;
       }
       // Don't send a heartbeat if we've observed one sufficiently close
@@ -25,5 +25,5 @@ export function useWorldHeartbeat() {
     const id = setInterval(sendHeartBeat, WORLD_HEARTBEAT_INTERVAL);
     return () => clearInterval(id);
     // Restart the timer on presence or pause changes, without resending for every view timestamp.
-  }, [worldId, worldStatus?.status, heartbeat]);
+  }, [worldId, worldStatus?.status, worldStatus?.maintenance, heartbeat]);
 }

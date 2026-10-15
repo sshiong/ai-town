@@ -139,7 +139,7 @@ export default function ArchivePanel({ adminToken, headingRef }: {
             ? await convex.action(api.federation.backupLarge.advanceExport, { adminToken, jobId })
             : await convex.action(api.federation.backupLarge.advanceImport, { adminToken, jobId });
         setProgress(
-          t('{state} · {phase} · {count} chunks processed', {
+          t('{state} · {phase} · current phase progress: {count}', {
             state: t(next.state),
             phase: t(next.phase),
             count: next.processedChunks,
@@ -322,10 +322,10 @@ export default function ArchivePanel({ adminToken, headingRef }: {
             </dd>
             <dt>{t('Current table')}</dt>
             <dd>{job.table ?? '—'}</dd>
-            <dt>{t('Chunks')}</dt>
+            <dt>{t('Current phase progress')}</dt>
+            <dd>{job.processedChunks}</dd>
+            <dt>{t('Archive chunks')}</dt>
             <dd>
-              {job.processedChunks}
-              {t(' processed · ')}
               {job.chunkCount}
               {t(' expected')}
               {job.kind === 'import' ? t(' · {count} uploaded', { count: job.uploadedChunks }) : ''}

@@ -20,7 +20,7 @@ export const defaultWorldStatus = query({
       .query('worldStatus')
       .filter((q) => q.eq(q.field('isDefault'), true))
       .first();
-    return worldStatus;
+    return worldStatus ? { ...worldStatus, maintenance: !!(await townMaintenanceLock(ctx)) } : null;
   },
 });
 

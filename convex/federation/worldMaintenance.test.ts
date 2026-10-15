@@ -107,6 +107,14 @@ test.each(['backup', 'cold'] as const)(
       status: await ctx.db.get(ids.statusId),
       engine: await ctx.db.get(ids.engineId),
     }));
+    const visibleStatus = await t.query(makeFunctionReference<'query'>('world:defaultWorldStatus'), {});
+    expect(visibleStatus).toEqual({ ...before.status, maintenance: true });
+    expect(visibleStatus).not.toHaveProperty('jobId');
+    // A clone can publish world/status before its map. Keep the missing-map
+    // invariant intact; the UI must skip this query while maintenance is active.
+    await expect(t.query(makeFunctionReference<'query'>('world:gameDescriptions'), {
+      worldId: ids.worldId,
+    })).rejects.toThrow('No map for world');
     await t.mutation(makeFunctionReference<'mutation'>('world:heartbeatWorld'), {
       worldId: ids.worldId,
     });
@@ -119,5 +127,12 @@ test.each(['backup', 'cold'] as const)(
     await expect(t.mutation(makeFunctionReference<'mutation'>('testing:stop'), {})).rejects.toThrow(
       kind === 'backup' ? 'TOWN_BACKUP_MAINTENANCE_LOCKED' : 'TOWN_COLD_HISTORY_MAINTENANCE_LOCKED',
     );
+    await t.run(async ctx => {
+      for (const lock of await ctx.db.query(kind === 'backup' ? 'backupMaintenanceLocks' : 'coldHistoryLocks').collect())
+        await ctx.db.delete(lock._id);
+    });
+    expect(await t.query(makeFunctionReference<'query'>('world:defaultWorldStatus'), {})).toEqual({
+      ...before.status, maintenance: false,
+    });
   },
 );

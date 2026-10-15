@@ -15,7 +15,7 @@ export default function InteractButton() {
   const { t } = useLocale();
   // const { isAuthenticated } = useConvexAuth();
   const worldStatus = useQuery(api.world.defaultWorldStatus);
-  const worldId = worldStatus?.worldId;
+  const worldId = worldStatus?.maintenance ? undefined : worldStatus?.worldId;
   const game = useServerGame(worldId);
   const humanTokenIdentifier = useQuery(api.world.userStatus, worldId ? { worldId } : 'skip');
   const userPlayerId =

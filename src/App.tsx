@@ -1,5 +1,6 @@
 import { LanguageSetting, useLocale } from './i18n';
 import Game from './components/Game.tsx';
+import { TownErrorBoundary } from './components/ConvexClientProvider.tsx';
 
 import { ToastContainer } from 'react-toastify';
 import a16zImg from '../assets/a16z.png';
@@ -134,7 +135,7 @@ export default function Home() {
             <Button href="https://github.com/a16z-infra/ai-town" imgUrl={starImg}>
               {t('Star')}
             </Button>
-            <InteractButton />
+            <TownErrorBoundary><InteractButton /></TownErrorBoundary>
             <Button imgUrl={helpImg} onClick={() => setHelpModalOpen(true)}>
               {t('Help')}
             </Button>
@@ -153,7 +154,7 @@ export default function Home() {
             <img className="w-20 h-8 pointer-events-auto" src={convexImg} alt="Convex" />
           </a>
         </div>
-        <Game />
+        <TownErrorBoundary><Game /></TownErrorBoundary>
         <ToastContainer position="bottom-right" autoClose={2000} closeOnClick theme="dark" />
       </div>
     </main>

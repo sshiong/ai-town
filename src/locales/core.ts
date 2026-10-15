@@ -1,4 +1,6 @@
 export const coreMessages: Record<string, string> = {
+  'Town maintenance is in progress. The map will return when maintenance finishes. You can continue in Town admin.':
+    '小镇维护正在进行。维护完成后地图会恢复，您可以继续使用“小镇管理”。',
   'AI Town': 'AI 小镇',
   'Show whole town': '完整地图',
   'View original text': '查看英文原文',

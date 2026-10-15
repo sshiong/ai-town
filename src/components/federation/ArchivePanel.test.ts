@@ -5,6 +5,8 @@ import ts from 'typescript';
 import { loadLargeArchiveManifest, confirmedLargeArchiveSigner } from './archiveFiles';
 import { encryptBackupText, readBackupText } from './backupEncryption';
 import { translate } from '../../locale';
+import { dataMessages } from '../../locales/data';
+import { makeFunctionReference } from 'convex/server';
 
 // Execute actual handlers with isolated hook state; no DOM or browser acceptance is implied.
 const compiled = ts.transpileModule(readFileSync(new URL('./ArchivePanel.tsx', import.meta.url), 'utf8'), {
@@ -29,12 +31,14 @@ function panel() {
   const state: any[] = [], effects: any[][] = [], calls: { name: string; args: any }[] = [];
   let cursor = 0, effectCursor = 0, work: Promise<unknown> = Promise.resolve();
   let job: any;
+  let nextProgress: any;
+  let language: 'en' | 'zh-CN' = 'en';
   let lastError: unknown;
   const task = { pending: undefined, run: (_label: string, run: () => Promise<unknown>) => {
     work = run().catch(error => { lastError = error; }); return work;
   } };
   const api = { world: { defaultWorldStatus: 'world' }, federation: { admin: { status: 'admin' },
-    backupLarge: { listJobs: 'jobs', status: 'job', createImport: 'createImport', stageChunk: 'stageChunk' } } };
+    backupLarge: { listJobs: 'jobs', status: 'job', createImport: 'createImport', stageChunk: 'stageChunk', advanceImport: 'advanceImport' } } };
   const module = { exports: {} as { default: (props: any) => Element } };
   runInNewContext(compiled, { exports: module.exports, module, require: (name: string) => {
     if (name === 'react/jsx-runtime') return { jsx: (type: any, props: any) => ({ type, props }),
@@ -48,14 +52,16 @@ function panel() {
           effects[index] = deps; effect();
         } },
     };
-    if (name === '../../i18n') return { useLocale: () => ({ t: (message: string, values?: Record<string, string | number>) => translate('en', {}, message, values) }) };
+    if (name === '../../i18n') return { useLocale: () => ({ t: (message: string, values?: Record<string, string | number>) => translate(language, dataMessages, message, values) }) };
     if (name === '../../../convex/_generated/api') return { api };
+    if (name === 'convex/server') return { makeFunctionReference };
     if (name === 'convex/react') return { useQuery: (name: string, args: any) => name === 'world' ?
       { worldId: 'target-world', status: 'stoppedByDeveloper' } : name === 'admin' ?
         { settings: { enabled: false }, identity: { townId: 'original-town' } } : name === 'job' ?
-          args === 'skip' ? undefined : job : [],
+          args === 'skip' ? undefined : job : name === 'jobs' && job ? [job] : [],
     useConvex: () => ({ action: (name: string, args: any) => {
       calls.push({ name, args });
+      if (name === 'advanceImport') return Promise.resolve(nextProgress);
       if (name === 'createImport') { job = { jobId: 'staging-job', kind: 'import', state: 'STAGING', phase: 'STAGING',
         sourceTownId: 'original-town', chunkCount: 1, processedChunks: 0, uploadedChunks: 0 };
         return Promise.resolve({ jobId: 'staging-job' }); }
@@ -76,11 +82,23 @@ function panel() {
   }
   function render() { cursor = 0; effectCursor = 0;
     return elements(module.exports.default({ adminToken: 'synthetic-admin' })); }
-  function button(label: string) { return render().find(element => element.type === 'AdminButton' && element.props.children === label)!; }
+  function text(value: any): string {
+    if (value === undefined || value === null) return '';
+    if (Array.isArray(value)) return value.map(text).join('');
+    if (typeof value === 'object') return text(value.props?.children);
+    return String(value);
+  }
+  function button(label: string) { return render().find(element => element.type === 'AdminButton' && text(element.props.children) === label)!; }
   function change(match: (element: Element) => boolean, target: any) {
     const element = render().find(match)!; expect(element).toBeDefined(); element.props.onChange({ target });
   }
-  return { calls, button, render, lastError: () => lastError,
+  return { calls, button, render, text, lastError: () => lastError,
+    selectJob: (value: any) => {
+      job = value;
+      change(element => element.type === 'select' && element.props.value === '', { value: job.jobId });
+    },
+    nextProgress: (value: any) => { nextProgress = value; },
+    setLanguage: () => { language = 'zh-CN'; },
     load: async (input: ReturnType<typeof file>) => { change(element => element.props.type === 'file' && !element.props.multiple,
       { files: [input] }); await work; },
     change, click: async (label: string) => { const element = button(label); expect(element).toBeDefined();
@@ -91,6 +109,33 @@ function panel() {
   };
 }
 beforeAll(() => Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true }));
+
+test.each(['VALIDATING', 'EXPORTING', 'ALLOCATE', 'DERIVED_PRIVACY'])('archive %s progress keeps the phase counter separate from chunk totals', phase => {
+  const ui = panel();
+  ui.selectJob({ jobId: 'progress-job', kind: 'import', state: 'VALIDATING', phase,
+    chunkCount: 784, uploadedChunks: 784, processedChunks: 4060, recordCount: 24000 });
+  function fact(label: string) {
+    const elements = ui.render(), index = elements.findIndex(element => element.type === 'dt' && ui.text(element) === label);
+    expect(index).toBeGreaterThan(-1);
+    return ui.text(elements[index + 1]);
+  }
+  expect(fact('Current phase progress')).toBe('4060');
+  expect(fact('Archive chunks')).toBe('784 expected · 784 uploaded');
+  expect(ui.render().some(element => element.type === 'dt' && ui.text(element) === 'Chunks')).toBe(false);
+  ui.setLanguage();
+  expect(fact('当前阶段进度')).toBe('4060');
+  expect(fact('归档分块')).not.toContain('4060');
+});
+
+test('batch progress message never labels a validation record count as chunks', async () => {
+  const ui = panel();
+  ui.selectJob({ jobId: 'progress-job', kind: 'import', state: 'VALIDATING', phase: 'VALIDATING',
+    chunkCount: 784, uploadedChunks: 784, processedChunks: 4040 });
+  ui.nextProgress({ state: 'READY', phase: 'READY', processedChunks: 4060 });
+  await ui.click('Continue import');
+  expect(ui.render().filter(element => element.type === 'p').map(ui.text)).toContain('READY · READY · current phase progress: 4060');
+  expect(ui.render().filter(element => element.type === 'p').map(ui.text).some(value => value.includes('4060 chunks'))).toBe(false);
+});
 
 test('derived UI never auto-confirms its declared signer and sends only the operator-confirmed pin with its proof', async () => {
   const ui = panel(), header = derived();

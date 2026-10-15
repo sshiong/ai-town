@@ -26,7 +26,7 @@ export default function Game() {
   const [gameWrapperRef, { width, height }] = useElementSize();
 
   const worldStatus = useQuery(api.world.defaultWorldStatus);
-  const worldId = worldStatus?.worldId;
+  const worldId = worldStatus?.maintenance ? undefined : worldStatus?.worldId;
   const engineId = worldStatus?.engineId;
   const presence = useQuery(api.federation.runtime.worldPresence, worldId ? { worldId } : 'skip');
 
@@ -40,6 +40,9 @@ export default function Game() {
 
   const scrollViewRef = useRef<HTMLDivElement>(null);
 
+  if (worldStatus?.maintenance) {
+    return <div className="admin-panel font-body text-brown-100" role="status">{t('Town maintenance is in progress. The map will return when maintenance finishes. You can continue in Town admin.')}</div>;
+  }
   if (!worldId || !engineId || !game) {
     return <div className="admin-panel font-body text-brown-100" role="status">{worldStatus === null ? t("No world exists yet. Initialize the town backend to open the map.") : t("Loading the town map…")}</div>;
   }
