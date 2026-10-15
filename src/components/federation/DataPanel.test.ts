@@ -5,6 +5,7 @@ import ts from 'typescript';
 import { backupImportSupportsRetry, newBackupUploadAttemptKey } from './uiPolicy';
 import { translate } from '../../locale';
 import { federationMessages } from '../../locales/federation';
+import { dataMessages } from '../../locales/data';
 
 // Exercise the real panel's handlers and hook state without adding a DOM/test-renderer dependency.
 const compiled = ts.transpileModule(readFileSync(new URL('./DataPanel.tsx', import.meta.url), 'utf8'), {
@@ -13,6 +14,11 @@ const compiled = ts.transpileModule(readFileSync(new URL('./DataPanel.tsx', impo
 type Element = { type: any; props: Record<string, any> };
 function panel() {
   const state: any[] = [], effects: any[][] = [], calls: { name: string; args: any }[] = [];
+  const archiveNavigation: { action: string; options: any }[] = [];
+  const archiveHeading = {
+    scrollIntoView: (options: any) => archiveNavigation.push({ action: 'scroll', options }),
+    focus: (options: any) => archiveNavigation.push({ action: 'focus', options }),
+  };
   let cursor = 0, effectCursor = 0, work: Promise<unknown> = Promise.resolve();
   let world: any = { worldId: 'target-world', status: 'stoppedByDeveloper' };
   let identity: any;
@@ -37,6 +43,11 @@ function panel() {
       if (name === 'react/jsx-runtime') return { jsx: (type: any, props: any) => ({ type, props }),
         jsxs: (type: any, props: any) => ({ type, props }), Fragment: 'Fragment' };
       if (name === 'react') return {
+        useRef: (initial: any) => {
+          const index = cursor++;
+          if (!(index in state)) state[index] = { current: initial };
+          return state[index];
+        },
         useState: (initial: any) => {
           const index = cursor++;
           if (!(index in state)) state[index] = initial;
@@ -51,7 +62,7 @@ function panel() {
         },
       };
       if (name === '../../i18n') return { useLocale: () => ({
-        t: (message: string) => translate(language, federationMessages, message),
+        t: (message: string) => translate(language, { ...dataMessages, ...federationMessages }, message),
       }) };
       if (name === 'convex/react') return {
         useQuery: (name: string) => name === 'world' ? world : name === 'status' ? { identity } : [],
@@ -86,10 +97,13 @@ function panel() {
     cursor = 0; effectCursor = 0;
     module.exports.default({ adminToken: 'test-admin-token' });
     cursor = 0; effectCursor = 0;
-    return elements(module.exports.default({ adminToken: 'test-admin-token' }));
+    const tree = elements(module.exports.default({ adminToken: 'test-admin-token' }));
+    tree.find(element => element.type === './ArchivePanel')!.props.headingRef.current = archiveHeading;
+    return tree;
   }
   function button(label: string) {
-    return render().find(element => element.type === 'AdminButton' && element.props.children === label);
+    return render().find(element => (element.type === 'AdminButton' && element.props.children === label) ||
+      (element.type === 'button' && element.props.children?.props.children === label));
   }
   async function click(label: string) {
     const target = button(label);
@@ -103,7 +117,7 @@ function panel() {
     expect(target).toBeDefined();
     target!.props.onChange({ target: value });
   }
-  return { calls, button, click, change,
+  return { calls, archiveNavigation, button, click, change,
     load: async (vectors = true) => {
       change(element => element.props.type === 'file', { files: [{ name: 'backup.json',
         text: async () => JSON.stringify({ manifest: { includeVectors: vectors }, sections: { modelMemoryVectors: vectors ? ['vector'] : [] } }) }] });
@@ -126,6 +140,19 @@ function panel() {
 }
 
 beforeAll(() => Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true }));
+
+test('chunked archive shortcut works without export fields and scrolls before focusing the existing heading', async () => {
+  const ui = panel();
+  expect(ui.button('Download full town')!.props.disabled).toBe(true);
+  await ui.click('Open chunked archives');
+  expect(ui.archiveNavigation).toEqual([
+    { action: 'scroll', options: { block: 'start' } },
+    { action: 'focus', options: { preventScroll: true } },
+  ]);
+  expect(ui.calls).toEqual([]);
+  ui.setLanguage();
+  expect(ui.button('打开分块归档')!.props.type).toBe('button');
+});
 
 test('ordinary import retries preserve exact bytes, target, mode and key after world updates and lost ACK', async () => {
   const ui = panel();

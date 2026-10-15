@@ -91,6 +91,7 @@ export const dataMessages: Record<string, string> = {
   'Town snapshot downloaded. Store it securely; resident memories may contain private information.':
     '小镇快照已下载。请安全保存；居民记忆可能包含隐私信息。',
   'Download full town': '下载完整小镇',
+  'Open chunked archives': '打开分块归档',
   "Register residents in Travel to export an individual resident's story and memory.":
     '在“旅行”中注册居民，即可导出单个居民的故事和记忆。',
   'Exporting resident': '正在导出居民',

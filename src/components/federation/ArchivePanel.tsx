@@ -1,5 +1,5 @@
 import { useLocale } from '../../i18n';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type Ref } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import { makeFunctionReference } from 'convex/server';
 import type { LargeChunk } from '../../../convex/federation/backupLargeHelpers';
@@ -52,7 +52,10 @@ const stagePrivacyChunk = makeFunctionReference<
   void
 >('federation/backupPrivacyChunks:stageChunk');
 
-export default function ArchivePanel({ adminToken }: { adminToken: string }) {
+export default function ArchivePanel({ adminToken, headingRef }: {
+  adminToken: string;
+  headingRef?: Ref<HTMLHeadingElement>;
+}) {
   const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
@@ -150,7 +153,9 @@ export default function ArchivePanel({ adminToken }: { adminToken: string }) {
   }
   return (
     <section aria-label={t('Chunked town archives')}>
-      <h3>{t('Chunked archives for large towns')}</h3>
+      <h3 ref={headingRef} tabIndex={-1}>
+        {t('Chunked archives for large towns')}
+      </h3>
       <p className="admin-muted">
         {t(
           'Exports and imports run one bounded batch at a time with persistent checkpoints. The manifest and data chunks stay separate from the encrypted identity package. Disable federation admission and pause the target before starting maintenance.',

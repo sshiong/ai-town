@@ -1,5 +1,5 @@
 import { useLocale } from '../../i18n';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import type { FunctionArgs, FunctionReturnType } from 'convex/server';
 import {
@@ -62,6 +62,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
   const { t } = useLocale();
   const convex = useConvex();
   const task = useAdminTask();
+  const archiveHeading = useRef<HTMLHeadingElement>(null);
   const world = useQuery(api.world.defaultWorldStatus);
   const residents = useQuery(api.federation.runtime.listResidents, { adminToken });
   const status = useQuery(api.federation.admin.status, { adminToken });
@@ -264,6 +265,16 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
         >
           {t('Download full town')}
         </AdminButton>
+        <button
+          type="button"
+          className="admin-button button shadow-solid"
+          onClick={() => {
+            archiveHeading.current?.scrollIntoView({ block: 'start' });
+            archiveHeading.current?.focus({ preventScroll: true });
+          }}
+        >
+          <span>{t('Open chunked archives')}</span>
+        </button>
       </div>
       {!residents?.length ? (
         <EmptyState>
@@ -791,7 +802,7 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
           </ul>
         )}
       </details>
-      <ArchivePanel adminToken={adminToken} />
+      <ArchivePanel adminToken={adminToken} headingRef={archiveHeading} />
       <EmbeddingPanel adminToken={adminToken} initialImportId={result?.importId} />
       <IdentityRecoveryPanel adminToken={adminToken} />
       <MigrationPanel adminToken={adminToken} />
