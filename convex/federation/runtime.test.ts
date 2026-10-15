@@ -66,6 +66,7 @@ async function engineStep(t: ReturnType<typeof convexTest<typeof schema.tables>>
     return (await ctx.db.get(status.engineId))!;
   });
   const checkedInputs = await t.query(makeFunctionReference<'query'>('engine/abstractGame:loadInputs'), { engineId: currentEngine._id, processedInputNumber: currentEngine.processedInputNumber, max: maxInputs }) as any[];
+  await t.mutation(makeFunctionReference<'mutation'>('aiTown/game:observeEngineClock'), {});
   await t.run(async ctx => {
     const status = (await ctx.db.query('worldStatus').withIndex('worldId', q => q.eq('worldId', worldId)).unique())!;
     const engine = (await ctx.db.get(status.engineId))!;
@@ -92,6 +93,38 @@ async function runEngineStep(t: ReturnType<typeof convexTest<typeof schema.table
 }
 beforeEach(() => jest.useFakeTimers());
 afterEach(() => jest.useRealTimers());
+
+test('ordinary local world commits do not read or write the shared clock row', async () => {
+  const { t, worldId } = await setup('home', 'COMPLETED');
+  const engine = (await t.run(ctx => ctx.db.query('engines').unique()))!;
+  const loaded = await t.run(ctx => Game.load(ctx.db, worldId, engine.generationNumber));
+  const game = new Game(loaded.engine, worldId, loaded.gameState);
+  jest.setSystemTime(Date.now() + 1);
+  await t.run(async ctx => {
+    const query = jest.spyOn(ctx.db, 'query');
+    await Game.saveDiff(ctx, worldId, game.takeDiff());
+    expect(query.mock.calls.some(([table]) => table === 'federationClock')).toBe(false);
+    query.mockRestore();
+  });
+  expect((await t.run(ctx => ctx.db.query('federationClock').unique()))?.observedAt).toBe(Date.now() - 1);
+});
+
+test.each(['backward', 'gap'])('engine %s clock evidence survives a rejected world commit', async kind => {
+  const { t, worldId } = await setup('home', 'COMPLETED');
+  const engine = (await t.run(ctx => ctx.db.query('engines').unique()))!;
+  const loaded = await t.run(ctx => Game.load(ctx.db, worldId, engine.generationNumber));
+  const game = new Game(loaded.engine, worldId, loaded.gameState);
+  const { _id, _creationTime, ...engineData } = engine;
+  const start = Date.now();
+  jest.setSystemTime(kind === 'backward' ? start - 1 : start + 120001);
+  await expect(t.action(ctx => game.saveStep(ctx, {
+    engine: engineData, expectedGenerationNumber: engine.generationNumber + 1, completedInputs: [],
+  }))).rejects.toThrow('Generation number mismatch');
+  expect(await t.run(ctx => ctx.db.query('federationClock').unique())).toMatchObject({
+    uncertain: true, reason: kind === 'backward' ? 'CLOCK_MOVED_BACKWARDS' : 'CLOCK_OBSERVATION_GAP',
+  });
+  expect((await t.run(ctx => ctx.db.get(engine._id)))?.generationNumber).toBe(engine.generationNumber);
+});
 
 test.each([
   { role: 'home', state: 'FREEZING', operation: 'freezeHome', input: 'federationSuspend', result: 'CONFIRMING' },

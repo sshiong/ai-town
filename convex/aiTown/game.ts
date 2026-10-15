@@ -245,6 +245,11 @@ export class Game extends AbstractGame {
 
   async saveStep(ctx: ActionCtx, engineUpdate: EngineUpdate): Promise<void> {
     const diff = this.takeDiff();
+    // Persist every observation in a small transaction. Keeping this shared
+    // write outside saveWorld keeps local commits independent of clock writers,
+    // and a rejected commit cannot roll back clock evidence. Visitor/return
+    // commits still check clock health inside their world transaction.
+    await ctx.runMutation(internal.aiTown.game.observeEngineClock, {});
     await ctx.runMutation(internal.aiTown.game.saveWorld, {
       engineId: this.engine._id,
       engineUpdate,
@@ -294,7 +299,6 @@ export class Game extends AbstractGame {
     }
     const newWorld = diff.world;
     const local = await ctx.db.query('federationIdentity').unique();
-    if (local) await observeClock(ctx, local);
     // The action may have loaded before a clock jump, lease revocation or renewal.
     // Re-check before any world state, conversation fact or engine result commits.
     for (const player of newWorld.players) {
@@ -419,7 +423,8 @@ export class Game extends AbstractGame {
       await syncResidentRuntimes(ctx, worldId);
     await commitPresenceJobs(ctx);
     await commitRemoteActions(ctx);
-    await collectObservations(ctx, worldId);
+    if (newWorld.players.some(player => player.remoteVisitor))
+      await collectObservations(ctx, worldId);
     // Start the desired agent operations.
     for (const operation of diff.agentOperations) {
       await runAgentOperation(ctx, operation.name, operation.args);
@@ -434,6 +439,14 @@ export const loadWorld = internalQuery({
   },
   handler: async (ctx, args) => {
     return await Game.load(ctx.db, args.worldId, args.generationNumber);
+  },
+});
+
+export const observeEngineClock = internalMutation({
+  args: {},
+  handler: async ctx => {
+    const local = await ctx.db.query('federationIdentity').unique();
+    if (local) await observeClock(ctx, local);
   },
 });
 
