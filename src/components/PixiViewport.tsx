@@ -3,7 +3,7 @@
 
 import { PixiComponent } from '@pixi/react';
 import { Viewport } from 'pixi-viewport';
-import { Application } from 'pixi.js';
+import { Application, type EventSystem } from 'pixi.js';
 import { MutableRefObject, ReactNode } from 'react';
 import { resizeViewport } from './viewportSizing';
 
@@ -22,9 +22,14 @@ export type ViewportProps = {
 export default PixiComponent('Viewport', {
   create(props: ViewportProps) {
     const { app, children: _children, viewportRef, ...viewportProps } = props;
+    const rendererEvents = app.renderer.events;
+    // Stage can destroy its renderer before React finishes unmounting the viewport.
+    // Retain the canvas that owns our wheel listener while keeping coordinate mapping live.
+    const events = Object.create(rendererEvents) as EventSystem;
+    events.domElement = rendererEvents.domElement;
+    events.mapPositionToPoint = rendererEvents.mapPositionToPoint.bind(rendererEvents);
     const viewport = new Viewport({
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-      events: app.renderer.events,
+      events,
       passiveWheel: false,
       ...Object.fromEntries(
         Object.entries(viewportProps).map(([key, value]) => [

@@ -16,7 +16,15 @@ function LoadingTown() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+// Reuse the entry root when a non-component dependency invalidates this module in development.
+const hotData = import.meta.hot?.data as { root?: ReactDOM.Root } | undefined;
+const root = hotData?.root ?? ReactDOM.createRoot(document.getElementById('root')!);
+if (import.meta.hot && hotData) {
+  hotData.root = root;
+  import.meta.hot.accept();
+}
+
+root.render(
   <React.StrictMode>
     <LocaleProvider>
       <ConvexClientProvider>
