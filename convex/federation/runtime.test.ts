@@ -5,7 +5,9 @@ import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import { makeFunctionReference } from 'convex/server';
 import schema from '../schema';
-import { dispatchRuntimeMessage } from './runtime';
+import { collectObservations, dispatchRuntimeMessage } from './runtime';
+import { blockedWithPositions } from '../aiTown/movement';
+import { WorldMap } from '../aiTown/worldMap';
 import { Game } from '../aiTown/game';
 import { applyEngineUpdate } from '../engine/abstractGame';
 import { mutationRef } from './refs';
@@ -610,4 +612,67 @@ test('departure guard ignores terminal history but blocks every nonterminal rang
     await t.run(ctx => ctx.db.delete(id));
   }
   expect(await t.run(ctx => hasNonterminalVisit(ctx, agentGlobalId))).toBe(false);
+});
+
+
+test('Host observations expose bounded public navigation hints with collision and map bounds checks', async () => {
+  const { t, worldId } = await setup('host', 'ACTIVE');
+  for (const [index, position] of [{ x: 3, y: 3 }, { x: 0, y: 0 }, { x: 3.4, y: 3.2 }].entries()) {
+    const eventId = `navigation-event-${index}`;
+    const turnId = `navigation-turn-${index}`;
+    const mapDoc = await t.run(async ctx => {
+      const mapDoc = (await ctx.db.query('maps').withIndex('worldId', q => q.eq('worldId', worldId)).unique())!;
+      const objectTiles = [Array.from({ length: 8 }, () => Array(8).fill(-1))];
+      objectTiles[0][2][2] = 1;
+      await ctx.db.patch(mapDoc._id, { objectTiles });
+      await ctx.db.patch(worldId, { players: [
+        { id: 'p:0', lastInput: Date.now(), position, facing: { dx: 1, dy: 0 }, speed: 0,
+          ...(index === 0 ? { pathfinding: { destination: { x: 5, y: 5 }, started: Date.now(), state: { kind: 'needsPath' as const } } } : {}),
+          remoteVisitor: { visitId: 'visit-1', agentGlobalId: 'home/agent:alice', homeTownId: 'home', homeTownName: 'Home',
+            agentAuthorityEpoch: 2, visitLeaseVersion: 1, leaseExpiry: Date.now() + 300000, lastObservationAt: Date.now(),
+            pendingTurn: { eventId, turnId, deadline: Date.now() + 20000 } } },
+        { id: 'p:1', lastInput: Date.now(), position: { x: 4, y: 3 }, facing: { dx: 1, dy: 0 }, speed: 0 },
+      ] });
+      await collectObservations(ctx, worldId);
+      return { ...mapDoc, objectTiles };
+    });
+    const envelope = (await t.run(ctx => ctx.db.query('federationOutbox').collect()))
+      .find(row => row.envelope.payload.eventId === eventId)!.envelope;
+    const navigation = envelope.payload.navigation;
+    expect(navigation.mapBounds).toEqual({ width: 8, height: 8 });
+    expect(navigation.moving).toBe(index === 0);
+    expect(navigation.destination).toEqual(index === 0 ? { x: 5, y: 5 } : undefined);
+    expect(navigation.candidates.length).toBeGreaterThan(0);
+    expect(navigation.candidates.length).toBeLessThanOrEqual(8);
+    expect(new Set(navigation.candidates.map((point: { x: number; y: number }) => `${point.x},${point.y}`)).size)
+      .toBe(navigation.candidates.length);
+    for (const point of navigation.candidates) {
+      expect(Number.isSafeInteger(point.x) && Number.isSafeInteger(point.y)).toBe(true);
+      expect(blockedWithPositions(point, [{ x: 4, y: 3 }], new WorldMap(mapDoc))).toBeNull();
+    }
+    if (index === 0) {
+      expect(navigation.candidates).not.toContainEqual({ x: 2, y: 2 });
+      expect(navigation.candidates).not.toContainEqual({ x: 4, y: 3 });
+      expect(navigation.candidates).toHaveLength(6);
+    }
+  }
+});
+
+test.each([false, true])('Home accepts observations with optional navigation: %s', async withNavigation => {
+  const { t } = await setup('home', 'ACTIVE');
+  const observation = {
+    eventId: 'compatible-event', turnId: 'compatible-turn', deadline: Date.now() + 20000,
+    position: { x: 2, y: 2 }, conversation: null, nearby: [], participants: [], observedAt: Date.now(),
+    ...(withNavigation ? { navigation: { mapBounds: { width: 8, height: 8 }, moving: false, candidates: [{ x: 2, y: 3 }] } } : {}),
+  };
+  await t.run(ctx => dispatchRuntimeMessage(ctx, {
+    protocol: 'ai-town-federation/1', messageId: 'compatible-observation', fromTownId: 'host', toTownId: 'home',
+    senderDeploymentInstanceId: 'host-instance', senderDeploymentEpoch: 1, expectedRecipientDeploymentEpoch: 1,
+    credentialId: 'pair-credential', nonce: 'compatible-nonce', sentAt: Date.now(), expiresAt: Date.now() + 30000,
+    type: 'OBSERVATION', visitId: 'visit-1', agentGlobalId: 'home/agent:alice', agentAuthorityEpoch: 2, visitLeaseVersion: 1,
+    payload: observation,
+  }));
+  const job = await t.run(ctx => ctx.db.query('federationDecisionJobs').unique());
+  expect(job?.state).toBe('PENDING');
+  expect(job?.observation).toEqual(observation);
 });

@@ -19,6 +19,8 @@ import { receiveConversationEnded } from '../agent/travelTranscript';
 import { homeFrozen, hostCreated, hostRemoved, homeResumed } from './ledger';
 import type { InputNames, InputArgs } from '../aiTown/inputs';
 import { ENGINE_ACTION_DURATION } from '../constants';
+import { WorldMap } from '../aiTown/worldMap';
+import { blockedWithPositions } from '../aiTown/movement';
 
 export async function syncResidentRuntimes(ctx: MutationCtx, worldId: Id<'worlds'>) {
   const local = await identity(ctx);
@@ -341,6 +343,7 @@ export async function collectObservations(ctx: MutationCtx, worldId: Id<'worlds'
   const now = Date.now();
   const limits = await configuredResourceLimits(ctx.db);
   let pendingCount = await pendingDecisionCount(ctx.db, now);
+  let worldMap: WorldMap | undefined;
   for (const player of world.players.filter((p) => p.remoteVisitor)) {
     const visitor = player.remoteVisitor!;
     const ledger = await visit(ctx, visitor.visitId);
@@ -388,6 +391,24 @@ export async function collectObservations(ctx: MutationCtx, worldId: Id<'worlds'
           `${local!.townId}/human:${worldId}:${d.playerId}`,
         homeTownId: d.originTownId ?? local!.townId,
       }));
+    // Load the public map once, only when an observation will be emitted. Keep
+    // navigation hints bounded; authoritative routing remains in federationAction.
+    if (!worldMap) {
+      const map = await ctx.db.query('maps').withIndex('worldId', (q) => q.eq('worldId', worldId)).unique();
+      if (!map) throw new Error(`No map found for world ${worldId}`);
+      worldMap = new WorldMap(map);
+    }
+    const otherPositions = world.players.filter((p) => p.id !== player.id).map((p) => p.position);
+    const candidates = [];
+    const center = { x: Math.round(player.position.x), y: Math.round(player.position.y) };
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const point = { x: center.x + dx, y: center.y + dy };
+        if (!blockedWithPositions(point, otherPositions, worldMap)) candidates.push(point);
+      }
+    }
+    const destination = player.pathfinding?.destination;
     const observation = {
       eventId,
       turnId,
@@ -396,6 +417,13 @@ export async function collectObservations(ctx: MutationCtx, worldId: Id<'worlds'
         ? `${local!.townId}/${worldId}/${conversation.id}`
         : undefined,
       position: player.position,
+      navigation: {
+        mapBounds: { width: worldMap.width, height: worldMap.height },
+        moving: !!player.pathfinding,
+        ...(destination && Number.isSafeInteger(destination.x) && Number.isSafeInteger(destination.y)
+          ? { destination } : {}),
+        candidates,
+      },
       conversation: conversation
         ? {
             id: conversation.id,

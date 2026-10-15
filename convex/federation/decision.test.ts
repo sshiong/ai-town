@@ -60,6 +60,15 @@ test('observed membership gates speech and invitation responses without inventin
   ).toThrow();
 });
 
+test('movement requires leaving an active conversation and remains compatible with old observations', () => {
+  const move = { type: 'moveTo' as const, destination: { x: 1, y: 2 } };
+  expect(() => validateObservedDecision(move, { conversation: { status: 'participating' } }))
+    .toThrow('ACTION_NOT_ALLOWED:moveTo:participating');
+  for (const observation of [{}, { conversation: null }, invited, { conversation: { status: 'walkingOver' } }]) {
+    expect(validateObservedDecision(move, observation)).toEqual(move);
+  }
+});
+
 test('invitations only target observed available players; Host still checks movement', () => {
   const observation = {
     conversation: null,
