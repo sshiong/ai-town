@@ -586,3 +586,11 @@ GPT-6.1-sol medium 子代理完成后端，主代理完成前端并独立运行�
 真实日志仍显示 saveWorld 与 observeMaintenanceClock/reconcile 竞争共享 federationClock，导致耗时世界事务重试。现 Game.saveStep 先调用独立轻量 observeEngineClock，再提交 saveWorld；每次时间观测仍完整持久化，未用阈值节流而遗漏1ms回拨。异常证据不会随随后世界提交失败回滚。没有访客时不再执行空的 collectObservations，普通本地 saveDiff 不读取/写入 clock；访客动作提交与返乡仍保留事务内 assertClock/canResume。总clock写次数未减少，减少的是大事务的共享行竞争。
 
 主代理独立运行6套151项相关测试通过，Convex类型检查、ESLint错误检查及diff检查通过；未声称全部警告为零。M/N/O已部署。真实约31秒采样，M/N/O引擎分别推进31136/31664/31280ms，完成29/26/30次generation更新；后续日志检查仍有轻量clock观察事务重试，未再见本地saveWorld因clock行冲突而重试。此短时证据不能替代长期稳定性验证。O浏览器验收的测试人类p:12492已正常Leave、会话结束、专用浏览器关闭；另出现非本次测试的人类p:12511，未干预或声称全部人类为零。
+
+### 2026-10-15 当前代码下再次完成跨镇严格交谈与记忆回传
+
+当前代码实际 M→N 访问67c8049e-1827-418d-b5b0-d476e0cc081b，会话c:25623完成访客与当地居民各2条真实消息。原有严格harness确认Home/Host原始持久记录逐条一致、COMPLETE transcript、DONE摘要及签名ACK；认证清理后双方账本COMPLETED，同一Home居民和Agent恢复且Host无该访客。正式agent/social:history另读取到本次访问8条旅行记忆（只将ID/数量留在脱敏回执），证明事实和结束摘要回传。Chat绑定与Embedding配置保持，连续捕获104条位置状态、订阅错误0。此轮未发生独立moveTo动作，不能与上一轮7次到达拼接成一次Home moveTo完整演示。
+
+该次仅用正式配置接口将旅行上限临时延长至15分钟，观察窗口10分钟；成功后两镇均恢复原5分钟上限。lease仍按原策略正常续约，没有绕过Host租约验证。N前次OOM引起的观察gap在无活跃访问且UTC与宿主/后端一致后经正式时钟恢复处理。
+
+同时修复严格交谈harness自身：原来lease已等于tripDeadline时仍提前60秒renew，会因正常LEASE_NOT_EXTENDED误中断观察。现仅在未过期且min(now+leaseMs,tripDeadline)>当前lease时续约，达到cap后观察至明确期限，慢probe后复查时间。legacy status未公开createdAt/tripDeadline时保守观察到已授lease、不猜可延长期限；这可能较早结束本可续约的旧访问，但不改变产品租约或严格双方各两条标准。原finally认证返乡保留。7项确定性观察器测试及语法/diff检查通过；模拟测试不替代本段真实交谈证据。

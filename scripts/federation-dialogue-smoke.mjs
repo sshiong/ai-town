@@ -236,14 +236,39 @@ async function observeDialogue(home, host, resident, hostWorldId, identities, at
     }
     const ledger = homeStatus.visits.find((v) => v.visitId === attempt.visitId);
     assert.ok(ledger, 'Home visit ledger disappeared');
+    // Legacy status has no createdAt from which to reconstruct its trip cap.
+    // Observe only its granted lease instead of attempting an unprovable extension.
+    const tripDeadline = ledger.tripDeadline ?? ledger.leaseExpiry;
+    const observationDeadline = Math.min(deadline, tripDeadline);
+    const assertObservationTime = () => {
+      if (Date.now() >= tripDeadline) {
+        throw new Error(
+          `Natural NPC dialogue ${ledger.tripDeadline === undefined ? 'legacy lease' : 'trip deadline'} elapsed without two utterances each`,
+        );
+      }
+      if (Date.now() >= deadline) {
+        throw new Error('Natural NPC dialogue deadline elapsed without two utterances each');
+      }
+    };
+    assertObservationTime();
     if (ledger.state !== 'ACTIVE') {
       throw new Error(`Natural dialogue ended before two utterances each (visit ${ledger.state})`);
     }
-    if (Date.now() - lastProbeAt >= 60_000 || ledger.leaseExpiry - Date.now() < 60_000) {
+    const leaseMs =
+      homeStatus.settings.timePolicy?.leaseMs ?? homeStatus.settings.maxVisitDurationMs;
+    const canRenew = () =>
+      ledger.tripDeadline !== undefined &&
+      ledger.leaseExpiry > Date.now() &&
+      Math.min(Date.now() + leaseMs, ledger.tripDeadline) > ledger.leaseExpiry;
+    if (
+      Date.now() - lastProbeAt >= 60_000 ||
+      (ledger.leaseExpiry - Date.now() < 60_000 && canRenew())
+    ) {
       await probePair(identities);
       lastProbeAt = Date.now();
     }
-    if (ledger.leaseExpiry - Date.now() < 60_000) {
+    assertObservationTime();
+    if (ledger.leaseExpiry - Date.now() < 60_000 && canRenew()) {
       assert.ok(
         homeStatus.settings.maxVisitDurationMs >= 90_000,
         'Visit duration is too short for bounded natural dialogue',
@@ -253,7 +278,7 @@ async function observeDialogue(home, host, resident, hostWorldId, identities, at
         visitId: attempt.visitId,
       });
     }
-    await pause(POLL_MS);
+    await pause(Math.min(POLL_MS, Math.max(0, observationDeadline - Date.now())));
   }
   throw new Error('Natural NPC dialogue deadline elapsed without two utterances each');
 }
