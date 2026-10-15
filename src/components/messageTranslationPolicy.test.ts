@@ -14,11 +14,14 @@ const messages = Array.from({ length: 67 }, (_, index) => ({
 }));
 
 describe('chat translation selection', () => {
-  it('makes no English-mode requests and leaves Chinese and non-language messages alone', () => {
+  it('makes no English-mode requests and translates Latin fragments even when Chinese is present', () => {
     expect(latestTranslationIds(messages, 'en')).toEqual([]);
     expect(needsChineseTranslation('Hello there!')).toBe(true);
     expect(needsChineseTranslation('你好')).toBe(false);
-    expect(needsChineseTranslation('你好 Alice')).toBe(false);
+    expect(needsChineseTranslation('你好 Alice')).toBe(true);
+    expect(needsChineseTranslation('Hello, 张三. How are you?')).toBe(true);
+    expect(needsChineseTranslation('我们可以 meet at the bakery。')).toBe(true);
+    expect(needsChineseTranslation('你好，张三。')).toBe(false);
     expect(needsChineseTranslation('😊 123')).toBe(false);
   });
 
@@ -96,4 +99,12 @@ describe('chat translation selection', () => {
       subscribedTranslationIds(messages, latest, latest, new Set(), cached, new Set()),
     ).toContain(allIds[3]);
   });
+});
+
+
+it('selects mixed-language new messages and older history for Chinese translation', () => {
+  const mixed = [{ _id: 'mixed', text: 'Hello, 张三. How are you?' }];
+  expect(latestTranslationIds(mixed, 'zh-CN')).toEqual(['mixed']);
+  expect(latestTranslationIds(mixed, 'en')).toEqual([]);
+  expect(nextHistoryTranslationIds(mixed, [])).toEqual(['mixed']);
 });

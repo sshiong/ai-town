@@ -3,7 +3,8 @@ import type { Locale } from '../locale';
 export const translationBatchSize = 20;
 
 export function needsChineseTranslation(text: string): boolean {
-  return /[A-Za-z]/.test(text) && !/[\u3400-\u9fff]/.test(text);
+  // Chinese names or fragments do not prove the rest of a message is translated.
+  return /[A-Za-z]/.test(text);
 }
 
 export function latestTranslationIds<T extends { _id: string; text: string }>(

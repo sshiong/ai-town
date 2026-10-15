@@ -18,6 +18,7 @@ import { residentChatCompletion } from './federation/resources';
 import { cacheWritesAllowed, defaultStoragePolicy } from './federation/storagePolicy';
 
 const LANGUAGE = 'zh-CN' as const;
+export const LANGUAGE_POLICY_VERSION = 2;
 const MAX_SOURCE_BYTES = 8192,
   MAX_OUTPUT_BYTES = 8192,
   MAX_CACHE_ROWS = 5000;
@@ -36,8 +37,22 @@ const requestArgs = {
 };
 type RequestArgs = { worldId: Id<'worlds'>; conversationId: string; messageIds: Id<'messages'>[] };
 const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
-export const needsChineseTranslation = (text: string) =>
-  /[A-Za-z]/.test(text) && !/[\u3400-\u9fff]/.test(text);
+export const needsChineseTranslation = (text: string) => /[A-Za-z]/.test(text);
+
+// Old policy treated any Han text as Chinese, including untranslated mixed-language text.
+export function isLegacyTranslationPassthrough(row: {
+  state: string;
+  sourceText: string;
+  translatedText?: string;
+  languagePolicyVersion?: number;
+}) {
+  return (
+    row.state === 'READY' &&
+    (row.languagePolicyVersion ?? 1) < LANGUAGE_POLICY_VERSION &&
+    row.translatedText === row.sourceText &&
+    needsChineseTranslation(row.sourceText)
+  );
+}
 export async function translationSourceDigest(text: string) {
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -158,6 +173,7 @@ async function enqueue(ctx: MutationCtx, messages: Doc<'messages'>[]) {
     const current = existing?.sourceDigest === sourceDigest && existing.sourceText === message.text;
     if (
       current &&
+      !isLegacyTranslationPassthrough(existing) &&
       (existing.state !== 'FAILED' ||
         existing.retryAt === undefined ||
         existing.retryAt > Date.now())
@@ -189,6 +205,7 @@ async function enqueue(ctx: MutationCtx, messages: Doc<'messages'>[]) {
       worldId: message.worldId!,
       conversationId: message.conversationId,
       targetLanguage: LANGUAGE,
+      languagePolicyVersion: LANGUAGE_POLICY_VERSION,
       sourceDigest,
       // Oversized input is never retained in the derived cache.
       sourceText: sourceTooLarge ? '' : message.text,
@@ -260,6 +277,7 @@ export const list = query({
       const row = await cached(ctx.db, message._id);
       const valid =
         row &&
+        !isLegacyTranslationPassthrough(row) &&
         row.sourceDigest === (await translationSourceDigest(message.text)) &&
         (row.sourceText === message.text || row.errorCode === 'TRANSLATION_SOURCE_TOO_LARGE');
       if (valid)
@@ -418,6 +436,7 @@ export const finish = internalMutation({
     if (!errorCode && !(await cacheWritesAllowed(ctx))) errorCode = 'CACHE_LIMIT_REACHED';
     await ctx.db.patch(row._id, {
       state: errorCode ? 'FAILED' : 'READY',
+      languagePolicyVersion: LANGUAGE_POLICY_VERSION,
       translatedText: errorCode ? undefined : args.translatedText!.trim(),
       errorCode,
       retryAt:

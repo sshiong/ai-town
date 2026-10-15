@@ -6,6 +6,7 @@ import schema from './schema';
 import type { Doc } from './_generated/dataModel';
 import type { CreateChatCompletionRequest } from './util/llm';
 import {
+  needsChineseTranslation,
   scheduleNewMessageTranslation,
   translationSourceDigest,
   validateTranslationOutput,
@@ -127,7 +128,7 @@ test('translation uses the current main model, shared queue and usage; cache hit
   expect((await t.run((ctx) => ctx.db.get(profileId)))?.reasoningEffort).toBeUndefined();
 });
 test('Chinese text and punctuation are ready without a provider; oversized source is a permanent explicit failure', async () => {
-  for (const text of ['Alice，你好。', '🙂!', 'x'.repeat(8193)]) {
+  for (const text of ['你好。', '123🙂!', 'x'.repeat(8193)]) {
     const { t, args, rows } = await setup(text);
     const fetch = mockCompletion('不应调用');
     await t.mutation(mutation('request'), args);
@@ -401,3 +402,63 @@ test('source deletion gives an explicit non-retryable display failure without di
     'TRANSLATION_MESSAGE_MISMATCH',
   );
 });
+
+test.each([
+  ['小明 says hello.', true],
+  ['你好，Alice。', true],
+  ['Hello, Alice.', true],
+  ['你好。', false],
+  ['123🙂!', false],
+])('translation policy handles mixed-language source: %s', (text, expected) => {
+  expect(needsChineseTranslation(text)).toBe(expected);
+});
+
+test.each(['小明 says hello.', '你好，Alice。'])(
+  'legacy passthrough is translated once while the canonical mixed text stays intact: %s',
+  async (text) => {
+    const { t, args, messageId, rows, pump } = await setup(text);
+    const original = await t.run((ctx) => ctx.db.get(messageId));
+    await t.mutation(mutation('request'), args);
+    const queued = (await rows())[0];
+    await t.run((ctx) =>
+      ctx.db.patch(queued._id, {
+        state: 'READY',
+        translatedText: text,
+        languagePolicyVersion: undefined,
+      }),
+    );
+    expect(await t.query(listRef, args)).toEqual([]);
+    await t.mutation(mutation('request'), args);
+    expect((await rows())[0]).toMatchObject({ state: 'QUEUED', languagePolicyVersion: 2 });
+    await t.mutation(mutation('request'), args);
+    const fetch = mockCompletion(text.includes('says') ? '小明说你好。' : text);
+    await pump();
+    expect(await t.query(listRef, args)).toMatchObject([{ status: 'READY' }]);
+    await t.mutation(mutation('request'), args);
+    await pump();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await rows())[0]).toMatchObject({ state: 'READY', languagePolicyVersion: 2 });
+    expect(await t.run((ctx) => ctx.db.get(messageId))).toEqual(original);
+  },
+);
+
+test.each(['READY', 'QUEUED', 'TRANSLATING', 'FAILED'] as const)(
+  'legacy %s cache preserves translated results, active jobs and retry cooldown',
+  async (state) => {
+    const { t, args, rows } = await setup('小明 says hello.');
+    await t.mutation(mutation('request'), args);
+    const initial = (await rows())[0];
+    await t.run((ctx) =>
+      ctx.db.patch(initial._id, {
+        state,
+        languagePolicyVersion: undefined,
+        translatedText: state === 'READY' ? '小明说你好。' : undefined,
+        retryAt: state === 'FAILED' ? Date.now() + 30_000 : undefined,
+      }),
+    );
+    const before = (await rows())[0];
+    expect(await t.query(listRef, args)).toMatchObject([{ status: state }]);
+    await t.mutation(mutation('request'), args);
+    expect((await rows())[0]).toEqual(before);
+  },
+);

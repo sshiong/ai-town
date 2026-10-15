@@ -190,3 +190,57 @@ test('already Chinese descriptions do not call provider; invalid output remains 
     errorCode: 'TRANSLATION_NOT_CHINESE',
   });
 });
+
+test.each(['小明 enjoys reading.', 'Alice喜欢阅读。'])(
+  'mixed description replaces legacy passthrough once and preserves source: %s',
+  async (text) => {
+    const { t, args, descriptionId, row } = await setup();
+    await t.run((ctx) => ctx.db.patch(descriptionId, { description: text }));
+    const original = await t.run((ctx) => ctx.db.get(descriptionId));
+    await t.mutation(mutation('request'), args);
+    const initial = (await row())!;
+    await t.run((ctx) =>
+      ctx.db.patch(initial._id, {
+        state: 'READY',
+        translatedText: text,
+        languagePolicyVersion: undefined,
+      }),
+    );
+    expect(await t.query(get, args)).toBeNull();
+    await t.mutation(mutation('request'), args);
+    const queued = (await row())!;
+    expect(queued).toMatchObject({ state: 'QUEUED', languagePolicyVersion: 2 });
+    expect(queued.generation).toBe(initial.generation + 1);
+    await t.mutation(mutation('request'), args);
+    expect((await row())!.generation).toBe(queued.generation);
+    const fetch = mockCompletion(text.includes('enjoys') ? '小明喜欢阅读。' : text);
+    await t.action(translate, { id: queued._id, generation: queued.generation });
+    expect(await t.query(get, args)).toMatchObject({ status: 'READY' });
+    await t.mutation(mutation('request'), args);
+    expect((await row())!.generation).toBe(queued.generation);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(await t.run((ctx) => ctx.db.get(descriptionId))).toEqual(original);
+  },
+);
+
+test.each(['READY', 'QUEUED', 'TRANSLATING', 'FAILED'] as const)(
+  'legacy %s description preserves translated results, active jobs and retry cooldown',
+  async (state) => {
+    const { t, args, descriptionId, row } = await setup();
+    await t.run((ctx) => ctx.db.patch(descriptionId, { description: '小明 enjoys reading.' }));
+    await t.mutation(mutation('request'), args);
+    const initial = (await row())!;
+    await t.run((ctx) =>
+      ctx.db.patch(initial._id, {
+        state,
+        languagePolicyVersion: undefined,
+        translatedText: state === 'READY' ? '小明喜欢阅读。' : undefined,
+        retryAt: state === 'FAILED' ? Date.now() + 30_000 : undefined,
+      }),
+    );
+    const before = await row();
+    expect(await t.query(get, args)).toMatchObject({ status: state });
+    await t.mutation(mutation('request'), args);
+    expect(await row()).toEqual(before);
+  },
+);

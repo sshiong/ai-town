@@ -5,7 +5,12 @@ import type { Doc, Id } from './_generated/dataModel';
 import { internalAction, internalMutation, mutation, query } from './maintenanceFunctions';
 import type { DatabaseReader } from './maintenanceFunctions';
 import { playerId } from './aiTown/ids';
-import { needsChineseTranslation, validateTranslationOutput } from './messageTranslations';
+import {
+  isLegacyTranslationPassthrough,
+  LANGUAGE_POLICY_VERSION,
+  needsChineseTranslation,
+  validateTranslationOutput,
+} from './messageTranslations';
 import { profileChatConfig } from './models/profiles';
 import { getChatConfig } from './util/llm';
 import { residentChatCompletion } from './federation/resources';
@@ -54,7 +59,8 @@ export const get = query({
   handler: async (ctx, args) => {
     const text = await source(ctx.db, args);
     const row = await cached(ctx.db, args);
-    if (text === undefined || row?.sourceText !== text) return null;
+    if (text === undefined || row?.sourceText !== text || isLegacyTranslationPassthrough(row))
+      return null;
     return {
       sourceText: text,
       status: row.state,
@@ -72,6 +78,7 @@ export const request = mutation({
     const row = await cached(ctx.db, args);
     if (
       row?.sourceText === text &&
+      !isLegacyTranslationPassthrough(row) &&
       (row.state !== 'FAILED' || row.retryAt === undefined || row.retryAt > Date.now())
     )
       return { queued: true };
@@ -82,6 +89,7 @@ export const request = mutation({
     const data = {
       ...args,
       targetLanguage: 'zh-CN' as const,
+      languagePolicyVersion: LANGUAGE_POLICY_VERSION,
       sourceText: text,
       state: oversized
         ? ('FAILED' as const)
@@ -139,6 +147,7 @@ export const finish = internalMutation({
     if (!errorCode && !(await cacheWritesAllowed(ctx))) errorCode = 'CACHE_LIMIT_REACHED';
     await ctx.db.patch(row._id, {
       state: errorCode ? 'FAILED' : 'READY',
+      languagePolicyVersion: LANGUAGE_POLICY_VERSION,
       updatedAt: Date.now(),
       leaseUntil: undefined,
       translatedText: errorCode ? undefined : args.translatedText!.trim(),
