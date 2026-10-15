@@ -394,20 +394,23 @@ export const reconcile = internalMutation({
   handler: async (ctx, args) => {
   if (args.state && !RECONCILE_STATES.includes(args.state)) throw new Error('INVALID_RECONCILE_STATE');
   if (!args.state && args.cursor) throw new Error('INVALID_RECONCILE_CURSOR');
+  // Empty state workers make no lease or admission decisions and need no
+  // clock evidence. Avoid eight shared-clock writers for an idle root sweep.
+  const state = args.state ?? 'RETURN_PENDING';
+  const page = await ctx.db.query('visitLedger').withIndex('state', q => q.eq('state', state))
+    .paginate({ cursor: args.cursor ?? null, numItems: RECONCILE_PAGE_SIZE });
+  if (args.state && page.page.length === 0 && page.isDone) return { processed: 0, continuations: 0 };
   const now = Date.now(), local = await identity(ctx);
   const clock = await observeClock(ctx, local, now);
   let processed = 0, continuations = 0;
   // Convex permits one paginated query per function. Start safe returns here
   // and give every other active state its own independent scheduled worker.
-  const state = args.state ?? 'RETURN_PENDING';
   if (!args.state) {
     for (const nextState of RECONCILE_STATES.filter(value => value !== state)) {
       await ctx.scheduler.runAfter(0, mutationRef('ledger/reconcile'), { state: nextState, cursor: null });
       continuations++;
     }
   }
-  const page = await ctx.db.query('visitLedger').withIndex('state', q => q.eq('state', state))
-    .paginate({ cursor: args.cursor ?? null, numItems: RECONCILE_PAGE_SIZE });
   for (const ledger of page.page) {
     processed++;
     const connection = await session(ctx, visitPeer(ledger));

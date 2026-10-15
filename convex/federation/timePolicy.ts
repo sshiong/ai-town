@@ -69,7 +69,12 @@ export async function observeClock(ctx: MutationCtx, local?: Parameters<typeof c
   const fields = { observedAt: Math.max(record?.observedAt ?? now, now), uncertain: !health.healthy,
     ...(health.reason ? { reason: health.reason } : {}),
     ...(health.observationReason ? { returnClockConfirmedAt: undefined } : {}) };
-  if (record) await ctx.db.patch(record._id, fields); else await ctx.db.insert('federationClock', fields);
+  if (record) {
+    // Identical observations and already-latched anomalies do not need another
+    // write to the shared clock row. Still check every timestamp for anomalies.
+    if (Object.entries(fields).some(([key, value]) => record[key as keyof typeof record] !== value))
+      await ctx.db.patch(record._id, fields);
+  } else await ctx.db.insert('federationClock', fields);
   return health;
 }
 export async function assertClock(db: DatabaseReader, local?: Parameters<typeof configuredTimePolicy>[0]) {

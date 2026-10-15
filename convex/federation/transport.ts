@@ -420,9 +420,8 @@ async function recoverStreamGap(ctx: MutationCtx, messageId: string) {
   await ctx.db.patch(cursor._id, { gapSince: now() });
 }
 export const retryStreamGap = internalMutation({ args: { messageId: v.string() }, handler: async (ctx, { messageId }) => recoverStreamGap(ctx, messageId) });
-export const maintenance = internalMutation({ args: {}, handler: async ctx => {
+async function runMaintenanceWork(ctx: MutationCtx) {
   const local = await identity(ctx);
-  await observeClock(ctx, local);
   await maintainCredentialRotations(ctx);
   await maintainIdentityKeyRotations(ctx);
   const nonces = await ctx.db.query('federationReplayNonces').withIndex('expiry', q => q.lte('expiresAt', now())).take(500);
@@ -444,9 +443,20 @@ export const maintenance = internalMutation({ args: {}, handler: async ctx => {
     if (!recoveredInline) { await recoverStreamGap(ctx, item.messageId); recoveredInline = true; }
     else await ctx.scheduler.runAfter(0, mutationRef('transport/retryStreamGap'), { messageId: item.messageId });
   }
+}
+export const observeMaintenanceClock = internalMutation({ args: {}, handler: async ctx => {
+  await observeClock(ctx, await identity(ctx));
+} });
+export const maintenanceWork = internalMutation({ args: {}, handler: runMaintenanceWork });
+export const maintenance = internalMutation({ args: {}, handler: async ctx => {
+  await observeClock(ctx, await identity(ctx));
+  await runMaintenanceWork(ctx);
 } });
 export const tick = internalAction({ args: {}, handler: async ctx => {
-  await ctx.runMutation(mutationRef('transport/maintenance'), {});
+  // Keep the shared clock row out of the routine maintenance transaction, so
+  // engine observations cannot force its entire scan to retry.
+  await ctx.runMutation(mutationRef('transport/observeMaintenanceClock'), {});
+  await ctx.runMutation(mutationRef('transport/maintenanceWork'), {});
   await ctx.runMutation(mutationRef('ledger/reconcile'), {});
   const ids = await ctx.runQuery(queryRef('transport/pendingDeliveries'), {});
   for (let offset = 0; offset < ids.length; offset += 4) await Promise.all(ids.slice(offset, offset + 4).map((messageId: string) => ctx.runAction(actionRef('transport/deliver'), { messageId })));

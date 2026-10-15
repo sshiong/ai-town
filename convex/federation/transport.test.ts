@@ -8,6 +8,9 @@ import { FederationMessage, PROTOCOL, streamKey } from './protocol';
 import { homeFrozen, hostCreated, hostRemoved, homeResumed } from './ledger';
 import { enqueueMessage } from './queue';
 import { resourceMeasurements } from './resourceMonitoring';
+import { configuredTimePolicy } from './timePolicy';
+import { maintenanceWork, tick } from './transport';
+import { getFunctionName } from 'convex/server';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 const modules = {
@@ -891,6 +894,40 @@ test('an alternate host with an invalid identity proof receives no business mess
   const outbox = (await a.t.run(ctx => ctx.db.query('federationOutbox').first()))!;
   expect(outbox.ackedAt).toBeUndefined(); expect(outbox.lastError).toBe('ENDPOINT_IDENTITY_UNVERIFIED');
   expect(await b.t.run(ctx => ctx.db.query('federationInbox').collect())).toHaveLength(0);
+});
+
+test.each(['backward', 'gap'])('tick commits a %s clock lock in its short transaction even if subsequent maintenance fails', async kind => {
+  const { a } = await setup(), start = Date.now();
+  const abnormal = kind === 'backward' ? start - 1 : start + configuredTimePolicy().clockObservationGapMs + 1;
+  jest.setSystemTime(abnormal);
+  const calls: string[] = [];
+  await expect(a.t.action(async ctx => (tick as any)._handler({ ...ctx,
+    runMutation: async (reference: any, args: any) => {
+      const name = getFunctionName(reference);
+      calls.push(name);
+      if (name === 'federation/transport:maintenanceWork') throw new Error('MAINTENANCE_WORK_FAILED');
+      return ctx.runMutation(reference, args);
+    },
+  }, {}))).rejects.toThrow('MAINTENANCE_WORK_FAILED');
+  expect(calls).toEqual(['federation/transport:observeMaintenanceClock', 'federation/transport:maintenanceWork']);
+  expect(await a.t.run(ctx => ctx.db.query('federationClock').unique())).toMatchObject({
+    observedAt: Math.max(start, abnormal), uncertain: true,
+    reason: kind === 'backward' ? 'CLOCK_MOVED_BACKWARDS' : 'CLOCK_OBSERVATION_GAP',
+  });
+});
+
+test('routine maintenance work leaves clock evidence outside its transaction while tick refreshes it', async () => {
+  const { a } = await setup(), start = Date.now();
+  jest.setSystemTime(start + 1);
+  await a.t.run(async ctx => {
+    const query = jest.spyOn(ctx.db, 'query');
+    await (maintenanceWork as any)._handler(ctx, {});
+    expect(query.mock.calls.some(([table]) => table === 'federationClock')).toBe(false);
+    query.mockRestore();
+  });
+  expect((await a.t.run(ctx => ctx.db.query('federationClock').unique()))?.observedAt).toBe(start);
+  await a.t.action(actionRef('transport/tick'), {});
+  expect(await a.t.run(ctx => ctx.db.query('federationClock').unique())).toMatchObject({ observedAt: start + 1, uncertain: false });
 });
 
 test('maintenance stays within read limits and its scheduled pages reach the final session', async () => {

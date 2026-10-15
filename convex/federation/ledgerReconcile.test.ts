@@ -2,6 +2,8 @@ import { jest } from '@jest/globals';
 import { convexTest } from 'convex-test';
 import schema from '../schema';
 import { mutationRef } from './refs';
+import { reconcile } from './ledger';
+import { configuredTimePolicy } from './timePolicy';
 
 const modules = {
   '../_generated/server.ts': () => import('../_generated/server'),
@@ -9,6 +11,50 @@ const modules = {
 };
 beforeEach(() => jest.useFakeTimers());
 afterEach(() => jest.useRealTimers());
+
+test('empty state workers never read or write shared clock evidence', async () => {
+  const t = convexTest(schema, modules), start = Date.now();
+  await t.run(ctx => ctx.db.insert('federationClock', { observedAt: start, uncertain: false }));
+  jest.setSystemTime(start + configuredTimePolicy().clockObservationGapMs + 1);
+  for (const state of ['REQUESTED', 'FREEZING', 'CONFIRMING', 'QUEUED', 'RESERVED', 'CREATING', 'ACTIVE', 'REMOVING', 'RETURN_PENDING']) {
+    await t.run(async ctx => {
+      const query = jest.spyOn(ctx.db, 'query'), patch = jest.spyOn(ctx.db, 'patch');
+      expect(await (reconcile as any)._handler(ctx, { state, cursor: null })).toEqual({ processed: 0, continuations: 0 });
+      expect(query.mock.calls.some(([table]) => table === 'federationClock')).toBe(false);
+      expect(patch).not.toHaveBeenCalled();
+      query.mockRestore(); patch.mockRestore();
+    });
+  }
+  expect(await t.run(ctx => ctx.db.query('federationClock').unique())).toMatchObject({ observedAt: start, uncertain: false });
+  expect(await t.run(ctx => ctx.db.system.query('_scheduled_functions').collect())).toEqual([]);
+});
+
+test('empty root reconciliation still observes clock and schedules its state workers', async () => {
+  const t = convexTest(schema, modules), start = Date.now();
+  await t.run(ctx => ctx.db.insert('federationClock', { observedAt: start, uncertain: false }));
+  jest.setSystemTime(start + configuredTimePolicy().clockObservationGapMs + 1);
+  expect(await t.mutation(mutationRef('ledger/reconcile'), {})).toEqual({ processed: 0, continuations: 8 });
+  expect(await t.run(ctx => ctx.db.query('federationClock').unique())).toMatchObject({ uncertain: true, reason: 'CLOCK_OBSERVATION_GAP' });
+  expect(await t.run(ctx => ctx.db.system.query('_scheduled_functions').collect())).toHaveLength(8);
+});
+
+test.each(['backward', 'gap'])('a populated state worker still locks a %s clock anomaly and revokes return confirmation', async kind => {
+  const t = convexTest(schema, modules), start = Date.now();
+  await t.run(async ctx => {
+    await ctx.db.insert('federationClock', { observedAt: start, uncertain: true, reason: 'CLOCK_RECOVERY_DRAINING', returnClockConfirmedAt: start });
+    await ctx.db.insert('visitLedger', { visitId: 'pending', agentGlobalId: 'home/agent:pending',
+      homeTownId: 'home', hostTownId: 'host', homeDeploymentEpoch: 1, hostDeploymentEpoch: 1,
+      agentAuthorityEpoch: 1, visitLeaseVersion: 1, leaseExpiry: start - 1000000,
+      fencingToken: 'fixture-fencing-token', state: 'RETURN_PENDING', role: 'home', profile: {},
+      createdAt: start, updatedAt: start });
+  });
+  jest.setSystemTime(kind === 'backward' ? start - 1 : start + configuredTimePolicy().clockObservationGapMs + 1);
+  expect(await t.mutation(mutationRef('ledger/reconcile'), { state: 'RETURN_PENDING', cursor: null })).toEqual({ processed: 1, continuations: 0 });
+  const clock = (await t.run(ctx => ctx.db.query('federationClock').unique()))!;
+  expect(clock).toMatchObject({ uncertain: true, reason: kind === 'backward' ? 'CLOCK_MOVED_BACKWARDS' : 'CLOCK_OBSERVATION_GAP' });
+  expect(clock.returnClockConfirmedAt).toBeUndefined();
+  expect(await t.run(ctx => ctx.db.system.query('_scheduled_functions').collect())).toEqual([]);
+});
 
 test('safe-return reconciliation skips terminal history and continues every active page', async () => {
   const t = convexTest(schema, modules);

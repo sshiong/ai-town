@@ -29,3 +29,11 @@
 2026-10-15，`kickEngine` 与正常启动采用相同的时间接续方式：保存原 `currentTime` 为 `lastStepTs`，直接从当前时间恢复。runtime 的 29 项测试通过；恢复专项使用真实 `Game.runStep`，验证停机 24 小时后首步处理新输入、原 PENDING 输入保留以及旧 generation 提交被拒绝。类型检查与生产构建通过。
 
 本机 N 部署后实际触发恢复，加入输入在 633ms 内完成，移动输入在 870ms 内完成，三名原居民保持；临时测试玩家已退出。此证据证明该次本机恢复的响应，不构成所有负载下的时延保证。
+
+## 时钟热点事务隔离与空协调任务
+
+真实 M/N 联通后的日志显示 `federationClock` 在地图保存与维护/账本协调之间频繁发生 OCC 重试。修复将常规 transport tick 的时钟观察单独提交，再执行维护扫描；直接 maintenance 调用仍保留同步观察语义。指定状态的 reconciliation 末尾空页不作任何授权决策，直接返回，不再为每轮八个空任务读取和写入共享时钟。有记录页与 root 入口继续观察时钟；返乡的 canResume 检查保持。相同字段的重复观察跳过 patch，每个更新的时间戳仍立即记录，不采用可能遗漏倒拨的定时节流。
+
+ledgerReconcile、transport、timePolicy 82 项及 runtime 29 项通过，类型检查、生产构建和 diff 检查通过。测试覆盖 1ms 倒拨、观察间隙、UTC return 确认撤销、维护失败后的异常锁保留、空任务不读写 clock 以及有记录任务的安全门。
+
+两镇部署后约 67 秒、每镇 16 个采样和 4 次主动 transport retry 的短窗口内，M 最大引擎延迟 4070ms、结束 1462ms，N 最大 1784ms、结束 740ms。M 在采样前仍有旧停顿，已通过原 testing:kick 唤醒，因此该数据不能证明旧动作自行恢复；N 未手动 kick。此前仅拆分 transport 的采样曾出现 N 98 秒停顿，未记作通过。最终私有证明 `clock-contention-final-live-proof.json` 保存在工作树外；短窗口不代表长期或任意负载下无冲突。

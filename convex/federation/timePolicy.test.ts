@@ -36,6 +36,40 @@ test.each(['backward', 'gap'])('a %s clock anomaly remains persistently locked a
   expect(clockHealth({ observedAt: start, uncertain: true }, policy, start).healthy).toBe(false);
 });
 
+test('identical clock observations avoid writes but every newer timestamp remains the backwards baseline', async () => {
+  const t = convexTest(schema, modules), start = Date.now();
+  await t.run(ctx => observeClock(ctx, null, start));
+  for (const [now, expectedWrites, healthy] of [[start, 0, true], [start + 1, 1, true],
+    [start, 1, false], [start, 0, false]] as const) {
+    await t.run(async ctx => {
+      const patch = jest.spyOn(ctx.db, 'patch');
+      expect((await observeClock(ctx, null, now)).healthy).toBe(healthy);
+      expect(patch).toHaveBeenCalledTimes(expectedWrites);
+      patch.mockRestore();
+    });
+  }
+  expect(await t.run(ctx => ctx.db.query('federationClock').unique())).toMatchObject({
+    observedAt: start + 1, uncertain: true, reason: 'CLOCK_MOVED_BACKWARDS',
+  });
+});
+
+test('repeated observations retain UTC return confirmation until a new anomaly revokes it exactly once', async () => {
+  const t = convexTest(schema, modules), start = Date.now();
+  await t.mutation(mutationRef('admin/confirmReturnClock'), { adminToken: token, synchronizedUtcConfirmed: true });
+  for (const [now, expectedWrites, confirmed] of [[start, 0, true], [start + 1, 1, true],
+    [start, 1, false], [start, 0, false]] as const) {
+    await t.run(async ctx => {
+      const patch = jest.spyOn(ctx.db, 'patch');
+      await observeClock(ctx, null, now);
+      expect(patch).toHaveBeenCalledTimes(expectedWrites);
+      patch.mockRestore();
+    });
+    const record = (await t.run(ctx => ctx.db.query('federationClock').unique()))!;
+    expect(record.uncertain).toBe(true);
+    expect(record.returnClockConfirmedAt).toBe(confirmed ? start : undefined);
+  }
+});
+
 test('return uses the saved trip margin and signed cleanup alone bypasses an unsafe clock', () => {
   const ledger = { leaseExpiry: 10000, leaseSafetyMs: 180000 };
   expect(returnSafety(ledger, { healthy: true }, 189999).allowed).toBe(false);
