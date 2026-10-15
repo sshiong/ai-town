@@ -662,33 +662,35 @@ export default function ArchivePanel({
                               api.federation.backupLarge.getManifest,
                               { adminToken, jobId: job.jobId },
                             );
+                            const loaded = await loadLargeArchiveManifest(header);
                             await writeArchiveText(
                               directory,
                               'manifest.json',
                               await protectedPart(JSON.stringify(header), 'manifest', secret),
                             );
-                            for (let index = 0; index < job.chunkCount; index++) {
+                            const descriptors = loaded.archive.manifest.chunks;
+                            for (let index = 0; index < descriptors.length; index++) {
+                              const descriptor = descriptors[index];
                               setProgress(
                                 t('Saving chunk {index} / {count}', {
                                   index: index + 1,
-                                  count: job.chunkCount,
+                                  count: descriptors.length,
                                 }),
                               );
                               await writeArchiveText(
                                 directory,
-                                `chunk-${String(index).padStart(6, '0')}.json`,
+                                `chunk-${String(descriptor.index).padStart(6, '0')}.json`,
                                 await protectedPart(
                                   await convex.action(api.federation.backupLarge.getChunk, {
                                     adminToken,
                                     jobId: job.jobId,
-                                    index,
+                                    index: descriptor.index,
                                   }),
                                   'chunk',
                                   secret,
                                 ),
                               );
                             }
-                            const loaded = await loadLargeArchiveManifest(header);
                             const privacyChunks =
                               loaded.archive.manifest.format === 'ai-town-local-sanitized-chunks'
                                 ? (loaded.archive.manifest.privacyChunks ?? [])
@@ -733,7 +735,7 @@ export default function ArchivePanel({
                   <input
                     type="number"
                     min={0}
-                    max={Math.max(0, job.chunkCount - 1)}
+                    max={39999}
                     value={chunkIndex}
                     onChange={(event) => setChunkIndex(Number(event.target.value))}
                   />
@@ -743,7 +745,7 @@ export default function ArchivePanel({
                     !!task.pending ||
                     !canDownload ||
                     chunkIndex < 0 ||
-                    chunkIndex >= job.chunkCount ||
+                    chunkIndex > 39999 ||
                     !Number.isSafeInteger(chunkIndex)
                   }
                   onClick={() =>
@@ -751,6 +753,14 @@ export default function ArchivePanel({
                       t('Downloading archive chunk'),
                       async () => {
                         const secret = takeExportPassphrase();
+                        const loaded = await loadLargeArchiveManifest(
+                          await convex.action(api.federation.backupLarge.getManifest, {
+                            adminToken,
+                            jobId: job.jobId,
+                          }),
+                        );
+                        if (!loaded.archive.manifest.chunks.some((descriptor) => descriptor.index === chunkIndex))
+                          throw new Error(t('This archive has no chunk at the selected index.'));
                         downloadJsonText(
                           await protectedPart(
                             await convex.action(api.federation.backupLarge.getChunk, {

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
-import { loadLargeArchiveManifest, confirmedLargeArchiveSigner, archivePrivacyPageNumber } from './archiveFiles';
+import { loadLargeArchiveManifest, confirmedLargeArchiveSigner, archivePrivacyPageNumber, writeArchiveText } from './archiveFiles';
 import { encryptBackupText, readBackupText } from './backupEncryption';
 import { translate } from '../../locale';
 import { dataMessages } from '../../locales/data';
@@ -38,8 +38,29 @@ function panel() {
   let lastError: unknown;
   const replies = new Map<string, unknown>();
   const downloads: { text: string; name: string }[] = [];
-  const task = { pending: undefined, run: (_label: string, run: () => Promise<unknown>) => {
-    work = run().catch(error => { lastError = error; }); return work;
+  const folderFiles = new Map<string, string>();
+  const folderAttempts: string[] = [];
+  const successes: string[] = [];
+  let failingFilename: string | undefined;
+  let observeFolderWrite: (() => void) | undefined;
+  const directory = { getFileHandle: async (name: string) => {
+    folderAttempts.push(name);
+    return { createWritable: async () => {
+      let content: string;
+      return {
+        write: async (text: string) => {
+          observeFolderWrite?.();
+          if (name === failingFilename) throw new Error('Folder write failed');
+          content = text;
+        },
+        close: async () => { folderFiles.set(name, content); },
+        abort: async () => {},
+      };
+    } };
+  } };
+  const task = { pending: undefined, run: (_label: string, run: () => Promise<unknown>, success = 'Saved.') => {
+    lastError = undefined;
+    work = run().then(() => { successes.push(success); }).catch(error => { lastError = error; }); return work;
   } };
   const api = { world: { defaultWorldStatus: 'world' }, federation: { admin: { status: 'admin' },
     backupLarge: { getManifest: 'getManifest', getChunk: 'getChunk', listJobs: 'jobs', status: 'job', createImport: 'createImport', stageChunk: 'stageChunk', advanceImport: 'advanceImport' } } };
@@ -87,7 +108,7 @@ function panel() {
       TaskFeedback: 'TaskFeedback', useAdminTask: () => task, formatTime: () => '', downloadJsonText: (text: string, name: string) => downloads.push({ text, name }) };
     if (name === './archiveBundle') return archiveBundle;
     if (name === './archiveFiles') return { loadLargeArchiveManifest, confirmedLargeArchiveSigner, archivePrivacyPageNumber,
-      supportsArchiveDirectory: () => false };
+      supportsArchiveDirectory: () => true, selectArchiveDirectory: () => Promise.resolve(directory), writeArchiveText };
     if (name === './backupEncryption') return { encryptBackupText, readBackupText, validBackupPassphrase: () => true };
     return { __esModule: true, default: name, VectorExportOption: 'VectorExportOption' };
   } });
@@ -109,7 +130,10 @@ function panel() {
   function change(match: (element: Element) => boolean, target: any) {
     const element = render().find(match)!; expect(element).toBeDefined(); element.props.onChange({ target });
   }
-  return { calls, downloads, unmount: () => cleanups.forEach(cleanup => cleanup()), respond: (name: string, reply: unknown) => replies.set(name, reply), button, render, text, lastError: () => lastError,
+  return { calls, downloads, folderFiles, folderAttempts, successes,
+    failFolderWrite: (name?: string) => { failingFilename = name; },
+    observeFolderWrite: (observe: () => void) => { observeFolderWrite = observe; },
+    unmount: () => cleanups.forEach(cleanup => cleanup()), respond: (name: string, reply: unknown) => replies.set(name, reply), button, render, text, lastError: () => lastError,
     selectJob: (value: any) => {
       job = value;
       change(element => element.type === 'select' && element.props.value === '', { value: job.jobId });
@@ -123,7 +147,7 @@ function panel() {
       inputs[1].props.onChange({ target: { files: [input] } }); await work;
     },
     change, click: async (label: string) => { const element = button(label); expect(element).toBeDefined();
-      expect(element.props.disabled).toBeFalsy(); element.props.onClick(); await work; },
+      expect(element.props.disabled).toBeFalsy(); element.props.onClick(); await Promise.resolve(); await work; },
     password: (value: string) => change(element => element.props.type === 'password' && element.props.autoComplete === 'off', { value }),
     confirmSigner: (value: string) => change(element => element.props.maxLength === 100, { value }),
     selectChunks: (inputs: ReturnType<typeof file>[]) => change(element => element.props.type === 'file' && element.props.multiple, { files: inputs }),
@@ -240,6 +264,121 @@ function bundleText(header: unknown, chunks = [{ index: 0, text: '{"index":0,"ta
 function completeExport(ui: ReturnType<typeof panel>) {
   ui.selectJob({ jobId: 'export-job', kind: 'export', state: 'COMPLETE', phase: 'COMPLETE', chunkCount: 1, processedChunks: 1 });
 }
+
+function sparseArchive() {
+  const header = derived();
+  return { ...header, manifest: { ...header.manifest, version: 2,
+    chunks: [header.manifest.chunks[0], { ...header.manifest.chunks[0], index: 7 }],
+    privacyChunks: [{ index: 0, table: 'travelPrivacyTombstones', count: 1, bytes: 100, digest: 'privacy-digest' }],
+    privacyCount: 1, privacyChainDigest: 'privacy-chain' } };
+}
+
+test.each([false, true])('folder download preserves sparse chunk names, privacy namespace and original bytes (encrypted: %s)', async encrypted => {
+  const ui = panel(), header = sparseArchive(), password = 'synthetic archive passphrase';
+  const chunk = (index: number) => `{ "index": ${index}, "table": "memories", "rows": [] }`;
+  const privacy = { index: 0, table: 'travelPrivacyTombstones', rows: [] };
+  ui.respond('getManifest', header);
+  ui.respond('getChunk', ({ index }: { index: number }) => chunk(index));
+  ui.respond('federation/backupPrivacyChunks:getChunk', privacy);
+  ui.selectJob({ jobId: 'export-job', kind: 'export', state: 'COMPLETE', phase: 'COMPLETE', chunkCount: 2 });
+  if (encrypted) {
+    ui.render().filter(element => element.props.type === 'checkbox')[0].props.onChange({ target: { checked: true } });
+    for (const input of ui.render().filter(element => element.props.autoComplete === 'new-password'))
+      input.props.onChange({ target: { value: password } });
+  }
+  const progress: string[] = [];
+  ui.observeFolderWrite(() => { progress.push(...ui.render().filter(element => element.type === 'p').map(ui.text)); });
+  await ui.click('Save entire archive to folder');
+  expect(ui.lastError()).toBeUndefined();
+  expect(ui.calls.map(call => [call.name, call.args.index ?? call.args.pageNumber])).toEqual([
+    ['getManifest', undefined], ['getChunk', 0], ['getChunk', 7], ['federation/backupPrivacyChunks:getChunk', 0],
+  ]);
+  expect([...ui.folderFiles.keys()]).toEqual(['manifest.json', 'chunk-000000.json', 'chunk-000007.json', 'privacy-000000.json']);
+  const expected = [JSON.stringify(header), chunk(0), chunk(7), JSON.stringify(privacy)];
+  for (const [index, text] of [...ui.folderFiles.values()].entries()) {
+    if (encrypted) {
+      const purpose = index === 0 ? 'manifest' : 'chunk';
+      expect(JSON.parse(text)).toMatchObject({ cipher: 'AES-256-GCM', purpose });
+      expect(await readBackupText(file(text), index === 0 ? 5_000_000 : 1024 * 1024, purpose, password)).toBe(expected[index]);
+    } else expect(text).toBe(expected[index]);
+  }
+  expect(progress).toEqual(expect.arrayContaining(['Saving chunk 1 / 2', 'Saving chunk 2 / 2', 'Saving privacy page 1 / 1']));
+  expect(ui.successes).toEqual(['Manifest and every referenced chunk saved to the selected folder.']);
+  expect(ui.downloads).toHaveLength(0);
+});
+
+test('folder download retains consecutive snapshot chunks and the signed manifest', async () => {
+  const ui = panel(), header = raw();
+  header.manifest.chunks.push({ ...header.manifest.chunks[0], index: 1 });
+  ui.respond('getManifest', header);
+  ui.respond('getChunk', ({ index }: { index: number }) => `snapshot chunk ${index}`);
+  completeExport(ui);
+  await ui.click('Save entire archive to folder');
+  expect(ui.calls.filter(call => call.name === 'getChunk').map(call => call.args.index)).toEqual([0, 1]);
+  expect([...ui.folderFiles.entries()]).toEqual([
+    ['manifest.json', JSON.stringify(header)], ['chunk-000000.json', 'snapshot chunk 0'], ['chunk-000001.json', 'snapshot chunk 1'],
+  ]);
+  expect(ui.lastError()).toBeUndefined();
+});
+
+test('folder download rejects an invalid manifest before creating files or fetching parts', async () => {
+  const ui = panel();
+  ui.respond('getManifest', { ...sparseArchive(), unsupportedMetadata: true });
+  completeExport(ui);
+  await ui.click('Save entire archive to folder');
+  expect(ui.lastError()).toBeDefined();
+  expect(ui.calls.map(call => call.name)).toEqual(['getManifest']);
+  expect(ui.folderAttempts).toEqual([]);
+  expect(ui.successes).toEqual([]);
+});
+
+test.each(['RPC', 'write'])('a folder %s failure reports no success and permits a complete retry', async failure => {
+  const ui = panel();
+  ui.respond('getManifest', sparseArchive());
+  ui.respond('getChunk', ({ index }: { index: number }) => {
+    if (failure === 'RPC' && index === 7) throw new Error('Chunk request failed');
+    return `chunk ${index}`;
+  });
+  ui.respond('federation/backupPrivacyChunks:getChunk', { index: 0, table: 'travelPrivacyTombstones', rows: [] });
+  if (failure === 'write') ui.failFolderWrite('chunk-000007.json');
+  completeExport(ui);
+  await ui.click('Save entire archive to folder');
+  expect(ui.lastError()).toBeDefined();
+  expect(ui.successes).toEqual([]);
+  expect([...ui.folderFiles.keys()]).toEqual(['manifest.json', 'chunk-000000.json']);
+  expect(ui.button('Save entire archive to folder').props.disabled).toBeFalsy();
+  ui.respond('getChunk', ({ index }: { index: number }) => `chunk ${index}`);
+  ui.failFolderWrite();
+  await ui.click('Save entire archive to folder');
+  expect(ui.lastError()).toBeUndefined();
+  expect([...ui.folderFiles.keys()]).toEqual(['manifest.json', 'chunk-000000.json', 'chunk-000007.json', 'privacy-000000.json']);
+  expect(ui.successes).toEqual(['Manifest and every referenced chunk saved to the selected folder.']);
+});
+
+test.each([0, 7])('selected chunk download accepts declared sparse index %s', async index => {
+  const ui = panel(), chunk = `original chunk ${index}`;
+  ui.respond('getManifest', sparseArchive());
+  ui.respond('getChunk', chunk);
+  ui.selectJob({ jobId: 'export-job', kind: 'export', state: 'COMPLETE', phase: 'COMPLETE', chunkCount: 2 });
+  ui.change(element => element.props.type === 'number' && element.props.max === 39999, { value: String(index) });
+  await ui.click('Download selected chunk');
+  expect(ui.calls.map(call => call.name)).toEqual(['getManifest', 'getChunk']);
+  expect(ui.calls[1].args.index).toBe(index);
+  expect(ui.downloads).toEqual([{ name: `chunk-${String(index).padStart(6, '0')}.json`, text: chunk }]);
+  expect(ui.lastError()).toBeUndefined();
+});
+
+test('selected chunk download rejects an undeclared sparse index without fetching a chunk', async () => {
+  const ui = panel();
+  ui.respond('getManifest', sparseArchive());
+  completeExport(ui);
+  ui.change(element => element.props.type === 'number' && element.props.max === 39999, { value: '1' });
+  await ui.click('Download selected chunk');
+  expect(String(ui.lastError())).toContain('This archive has no chunk at the selected index.');
+  expect(ui.calls.map(call => call.name)).toEqual(['getManifest']);
+  expect(ui.downloads).toEqual([]);
+  expect(ui.successes).toEqual([]);
+});
 
 test('single-file download fetches all declared parts before downloading once', async () => {
   const ui = panel(), header = derived();

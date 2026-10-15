@@ -126,6 +126,11 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
   }
   async function download(kind: 'manifest' | 'chunk' | 'folder' | 'privacy') {
     if (!jobId) return;
+    if (
+      kind === 'chunk' &&
+      (!Number.isInteger(chunkIndex) || chunkIndex < 0 || (job && chunkIndex >= job.chunkCount))
+    )
+      throw new Error(t('All chunks have been downloaded.'));
     let password = encrypted ? passphrase : '';
     setPassphrase('');
     setConfirmation('');
@@ -164,9 +169,10 @@ export default function SelectiveExportPanel({ adminToken }: { adminToken: strin
       } else if (kind === 'chunk') {
         if (chunkIndex >= manifest.manifest.chunks.length)
           throw new Error(t('All chunks have been downloaded.'));
+        const chunk = manifest.manifest.chunks[chunkIndex];
         await write(
-          await convex.action(getChunk, { adminToken, jobId, index: chunkIndex }),
-          `chunk-${chunkIndex}`,
+          await convex.action(getChunk, { adminToken, jobId, index: chunk.index }),
+          `chunk-${chunk.index}`,
           'chunk',
         );
         setChunkIndex(chunkIndex + 1);

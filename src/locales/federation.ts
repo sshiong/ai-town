@@ -817,4 +817,5 @@ export const federationMessages: Record<string, string> = {
   "CLONE_DEPLOYMENT_CHANGED": "小镇身份或部署已变化，请刷新后重试。",
   "CLONE_SIGNING_KEY_UNAVAILABLE": "无法使用当前签名密钥，请检查本镇密钥配置。",
   "CLONE_SAFETY_CHECK_LIMIT": "数据超过当前激活安全核对上限。",
+  'This archive has no chunk at the selected index.': '此备份没有所选编号对应的分块。',
 };
