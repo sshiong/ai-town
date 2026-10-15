@@ -1868,3 +1868,33 @@ test('signed large manifests enforce the total resident policy capacity across i
     }
   }
 });
+
+
+test.each([false, true])('completed large clone activates with real completion format (legacy=%s)', async legacy => {
+  const source = await town(), archive = await exported(source.t);
+  const target = convexTest(schema, modules), jobId = await staged(target, archive, 'clone');
+  await drive(target, jobId, 'import', 'READY');
+  await target.mutation(mutation('startApply'), { adminToken, jobId });
+  await drive(target, jobId, 'import', 'COMPLETE');
+  const { local, receipt, job } = await target.run(async ctx => ({
+    local: (await ctx.db.query('federationIdentity').unique())!,
+    receipt: (await ctx.db.query('backupImports').unique())!, job: (await ctx.db.get(jobId))!,
+  }));
+  expect(receipt.runtimeSnapshot).toEqual({ largeJobId: jobId });
+  expect(job.metadata.importId).toBe(receipt._id);
+  expect(job).toMatchObject({ state: 'COMPLETE', phase: 'COMPLETE', newTownId: local.townId });
+  expect(receipt.cloneDeployment).toMatchObject({ townId: local.townId, publicKey: local.publicKey });
+  if (legacy) await target.run(ctx => ctx.db.patch(receipt._id, { cloneDeployment: undefined }));
+  const status = makeFunctionReference<'query'>('federation/admin:status');
+  const activate = makeFunctionReference<'mutation'>('federation/admin:activateIndependentClone');
+  expect((await target.query(status, { adminToken })).cloneActivation).toMatchObject({ eligible: true, importId: receipt._id });
+  const args = { adminToken, importId: receipt._id, expectedTownId: local.townId,
+    expectedDeploymentInstanceId: local.deploymentInstanceId, expectedDeploymentEpoch: local.deploymentEpoch,
+    operator: 'Large clone operator', reason: 'Start independent large town' };
+  expect(await target.mutation(activate, args)).toMatchObject({ alreadyActivated: false });
+  const activated = (await target.run(ctx => ctx.db.get(receipt._id)))!;
+  expect(activated.cloneDeployment).toMatchObject({ townId: local.townId, publicKey: local.publicKey,
+    sourcePublicKey: archive.manifest.source.publicKey, sourceFingerprint: archive.manifest.source.fingerprint });
+  expect(await target.mutation(activate, args)).toMatchObject({ alreadyActivated: true });
+  expect(await target.run(ctx => ctx.db.get(receipt._id))).toEqual(activated);
+});

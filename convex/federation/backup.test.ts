@@ -12,6 +12,7 @@ import { embeddingFingerprint } from '../models/compatibility';
 import { memorySourceDigest } from '../models/embeddingDataRevision';
 import { pipelineFingerprint } from '../models/ollamaEvidence';
 import { applyBackupData, importBackup } from './backup';
+import { independentCloneStatus } from './cloneActivation';
 import { seedMemoryBackupEvidence, assertMemoryBackupEvidence, useLegacyMemoryBackupDigests } from './memoryBackupTestHelpers';
 
 test('atomic cold packing rejects a large v2 root before fetching or combining its parts', async () => {
@@ -2129,4 +2130,155 @@ test('ordinary non-vector retry reuses committed cold files without uploading at
   expect(result.coldFilesRestored).toBe(bundle.coldHistoryFiles!.length);
   expect(harness.stores()).toBe(uploaded);
   expect(await target.run(ctx => ctx.db.query('coldHistoryArchives').collect())).toHaveLength(bundle.coldHistoryFiles!.length);
+});
+
+const cloneStatusQuery = makeFunctionReference<'query'>('federation/admin:status');
+const activateCloneMutation = makeFunctionReference<'mutation'>('federation/admin:activateIndependentClone');
+async function independentCloneFixture(legacy = false) {
+  const source = await town();
+  const bundle = await source.t.action(action('federation/backup:exportTown'), { adminToken });
+  const t = convexTest(schema, modules);
+  const imported = await t.action(action('federation/backup:importBackup'), {
+    adminToken, bundle, mode: 'clone', targetEndpoint: 'https://independent.example',
+  });
+  if (legacy) await t.run(ctx => ctx.db.patch(imported.importId!, { cloneDeployment: undefined }));
+  const local = (await t.run(ctx => ctx.db.query('federationIdentity').unique()))!;
+  const args = { adminToken, importId: imported.importId! as Id<'backupImports'>, expectedTownId: local.townId,
+    expectedDeploymentInstanceId: local.deploymentInstanceId, expectedDeploymentEpoch: local.deploymentEpoch,
+    operator: 'Clone operator', reason: 'Start an independent town with new pairing' };
+  return { t, args, local };
+}
+
+test.each([false, true])('completed ordinary clone activates independently and retry preserves audit (legacy=%s)', async legacy => {
+  const { t, args } = await independentCloneFixture(legacy);
+  expect((await t.query(cloneStatusQuery, { adminToken })).cloneActivation).toMatchObject({ eligible: true, importId: args.importId });
+  expect(await t.mutation(activateCloneMutation, args)).toMatchObject({ activated: true, alreadyActivated: false });
+  const state = await t.run(async ctx => ({ local: await ctx.db.query('federationIdentity').unique(),
+    receipt: await ctx.db.get(args.importId), records: await ctx.db.query('deploymentRecords').collect() }));
+  expect(state.local).toMatchObject({ mode: 'ACTIVE', enabled: false, allowIncomingPairRequests: false });
+  expect(state.receipt!.cloneActivation).toMatchObject({ operator: args.operator, reason: args.reason,
+    townId: args.expectedTownId, deploymentInstanceId: args.expectedDeploymentInstanceId,
+    deploymentEpoch: args.expectedDeploymentEpoch, publicKey: state.local!.publicKey });
+  expect(state.receipt!.cloneDeployment).toMatchObject({ townId: args.expectedTownId, publicKey: state.local!.publicKey });
+  expect(await t.mutation(activateCloneMutation, { ...args, reason: 'Retry' })).toMatchObject({ alreadyActivated: true });
+  const retried = await t.run(async ctx => ({ receipt: await ctx.db.get(args.importId), records: await ctx.db.query('deploymentRecords').collect() }));
+  expect(retried).toEqual({ receipt: state.receipt, records: state.records });
+  await expect(t.mutation(activateCloneMutation, { ...args, expectedDeploymentInstanceId: 'another-deployment' })).rejects.toThrow('CLONE_DEPLOYMENT_CHANGED');
+  await t.run(async ctx => { const local = (await ctx.db.query('federationIdentity').unique())!; await ctx.db.patch(local._id, { mode: 'DISABLED' }); });
+  await expect(t.mutation(activateCloneMutation, args)).rejects.toThrow('CLONE_ACTIVATION_NO_LONGER_CURRENT');
+});
+
+test.each(['restore', 'migrate', 'merge'])('a %s receipt cannot grant clone activation', async mode => {
+  const { t, args } = await independentCloneFixture();
+  await t.run(ctx => ctx.db.patch(args.importId, { mode }));
+  expect((await t.query(cloneStatusQuery, { adminToken })).cloneActivation).toMatchObject({ eligible: false, importId: null });
+  await expect(t.mutation(activateCloneMutation, args)).rejects.toThrow('CLONE_COMPLETION_PROOF_REQUIRED');
+});
+
+test.each([
+  ['MIGRATING_IN', 'CLONE_DEPLOYMENT_NOT_DISABLED'], ['QUARANTINED', 'CLONE_DEPLOYMENT_NOT_DISABLED'],
+  ['enabled', 'CLONE_ADMISSION_MUST_BE_CLOSED'], ['incoming', 'CLONE_ADMISSION_MUST_BE_CLOSED'],
+  ['handoff', 'CLONE_OLD_AUTHORITY_REMAINS'], ['runtime', 'CLONE_OLD_AUTHORITY_REMAINS'],
+  ['peer', 'CLONE_PEER_TRUST_REMAINS'], ['deployment', 'CLONE_COMPLETION_PROOF_REQUIRED'],
+  ['key', 'CLONE_COMPLETION_PROOF_REQUIRED'], ['source-key', 'CLONE_COMPLETION_PROOF_REQUIRED'],
+  ['session', 'CLONE_OLD_AUTHORITY_REMAINS'], ['visitor', 'CLONE_ACTIVE_TRAVEL_REMAINS'],
+])('clone activation rejects %s without changing deployment', async (variant, reason) => {
+  const { t, args, local } = await independentCloneFixture();
+  await t.run(async ctx => {
+    if (variant === 'MIGRATING_IN' || variant === 'QUARANTINED') await ctx.db.patch(local._id, { mode: variant });
+    if (variant === 'enabled') await ctx.db.patch(local._id, { enabled: true });
+    if (variant === 'incoming') await ctx.db.patch(local._id, { allowIncomingPairRequests: true });
+    if (variant === 'handoff') await ctx.db.patch(local._id, { activeHandoffId: 'old-handoff' });
+    if (variant === 'runtime') { const runtime = (await ctx.db.query('federationAgentRuntimes').first())!; await ctx.db.patch(runtime._id, { homeTownId: 'town:original' }); }
+    if (variant === 'peer') { const peer = (await ctx.db.query('federationPeers').first())!; await ctx.db.patch(peer._id, { trustState: 'TRUSTED' }); }
+    if (variant === 'deployment') await ctx.db.patch(local._id, { deploymentEpoch: local.deploymentEpoch + 1 });
+    if (variant === 'key') await ctx.db.patch(local._id, { publicKey: 'different-key' });
+    if (variant === 'source-key') { const receipt = (await ctx.db.get(args.importId))!; await ctx.db.patch(args.importId, { cloneDeployment: { ...receipt.cloneDeployment!, sourcePublicKey: local.publicKey } }); }
+    if (variant === 'session') await ctx.db.insert('transportSessions', { peerTownId: 'town:old-peer', channelState: 'TRANSPORT_READY', transportType: 'DIRECT_HTTPS', localDeploymentEpoch: 1, verifiedPeerDeploymentEpoch: 1 });
+    if (variant === 'visitor') { const world = (await ctx.db.query('worlds').first())!; await ctx.db.patch(world._id, { agents: world.agents.map(a => ({ ...a, travelVisitId: 'old-visit' })) }); }
+  });
+  expect((await t.query(cloneStatusQuery, { adminToken })).cloneActivation).toMatchObject({ eligible: false, reason });
+  await expect(t.mutation(activateCloneMutation, args)).rejects.toThrow(variant === 'deployment' ? 'CLONE_DEPLOYMENT_CHANGED' : reason);
+  expect((await t.run(ctx => ctx.db.get(args.importId)))!.cloneActivation).toBeUndefined();
+});
+
+test.each(['missing wrapping key', 'wrong wrapping key', 'invalid private key', 'mismatched private key'])('clone activation rejects %s atomically', async variant => {
+  const { t, args, local } = await independentCloneFixture();
+  if (variant === 'missing wrapping key') delete process.env.FEDERATION_KEY_ENCRYPTION_KEY;
+  if (variant === 'wrong wrapping key') process.env.FEDERATION_KEY_ENCRYPTION_KEY = Buffer.alloc(32, 8).toString('base64');
+  if (variant === 'invalid private key') await t.run(ctx => ctx.db.patch(local._id, { privateKeyEncrypted: 'invalid' }));
+  if (variant === 'mismatched private key') { const other = await createIdentityKeys(); await t.run(ctx => ctx.db.patch(local._id, { privateKeyEncrypted: other.privateKeyEncrypted })); }
+  // Eligibility uses public evidence only; the mutation validates the live signer.
+  expect((await t.query(cloneStatusQuery, { adminToken })).cloneActivation.eligible).toBe(true);
+  await expect(t.mutation(activateCloneMutation, args)).rejects.toThrow('CLONE_SIGNING_KEY_UNAVAILABLE');
+  const state = await t.run(async ctx => ({ local: await ctx.db.get(local._id), receipt: await ctx.db.get(args.importId) }));
+  expect(state.local!.mode).toBe('DISABLED');
+  expect(state.receipt!.cloneActivation).toBeUndefined();
+});
+
+test.each(['backup lock', 'cold lock', 'privacy job', 'unfinished backup', 'active visit', 'conflict', 'wrong receipt', 'invalid operator', 'invalid reason'])('clone activation refuses %s', async variant => {
+  const { t, args, local } = await independentCloneFixture();
+  await t.run(async ctx => {
+    if (variant === 'backup lock') { const jobId = await ctx.db.insert('backupLargeJobs', { kind: 'import', state: 'FAILED', phase: 'FINALIZE', tableIndex: 0, cursor: null, chunkCount: 0, processedChunks: 0, recordCount: 0, bytes: 0, createdAt: 1, updatedAt: 1, source: {} }); await ctx.db.insert('backupMaintenanceLocks', { key: 'town', jobId, createdAt: 1 }); }
+    if (variant === 'cold lock') {
+      const world = (await ctx.db.query('worlds').first())!;
+      const archiveId = await ctx.db.insert('coldHistoryArchives', { sourceKey: 'lock-fixture', lookupKey: 'lock-fixture',
+        worldId: world._id, kind: 'conversation', sourceId: 'c:0', state: 'PENDING', manifest: {}, signature: '', publicKey: local.publicKey, createdAt: 1 });
+      const jobId = await ctx.db.insert('coldHistoryJobs', { archiveId, owner: {}, source: {}, snapshotId: 'lock-fixture',
+        state: 'FAILED', phase: 'PACK', revision: 0, cursor: null, pageNumber: 0, messageOffset: 0, chunkCount: 0,
+        count: 0, bytes: 0, chainDigest: '', verifiedChunks: 0, createdAt: 1, updatedAt: 1 });
+      await ctx.db.insert('coldHistoryLocks', { key: 'town', jobId, createdAt: 1 });
+    }
+    if (variant === 'privacy job') await ctx.db.insert('travelPrivacyJobs', { visitId: 'old-visit', scope: 'CACHE', state: 'RUNNING',
+      phase: 'SCAN', tableIndex: 0, cursor: null, revision: 0, sourceRevision: 0, privacyRevision: 0, changed: false,
+      role: 'home', ownerGlobalId: `${local.townId}/agent:old`, conversationIds: [], conversationOwners: [], transcriptIds: [],
+      memoryIds: [], memoryOwners: [], archiveIds: [], textHashes: [], blockers: [], externalCopies: 0, counts: {},
+      processedRows: 0, createdAt: 1, updatedAt: 1 });
+    if (variant === 'unfinished backup') await ctx.db.insert('backupLargeJobs', { kind: 'import', state: 'FAILED', phase: 'FINALIZE',
+      tableIndex: 0, cursor: null, chunkCount: 0, processedChunks: 0, recordCount: 0, bytes: 0, createdAt: 1, updatedAt: 1, source: {} });
+    if (variant === 'active visit') await ctx.db.insert('visitLedger', { visitId: 'active-old-visit', agentGlobalId: `${local.townId}/agent:old`, homeTownId: local.townId, hostTownId: 'town:foreign', homeDeploymentEpoch: 1, hostDeploymentEpoch: 1, agentAuthorityEpoch: 1, visitLeaseVersion: 1, leaseExpiry: Date.now() + 60000, fencingToken: 'old', state: 'ACTIVE', role: 'home', profile: {}, createdAt: 1, updatedAt: 1 });
+    if (variant === 'conflict') await ctx.db.insert('federationIdentityConflicts', { conflictKey: 'clone', townId: local.townId, publicKey: local.publicKey, knownDeploymentInstanceId: local.deploymentInstanceId, knownDeploymentEpoch: 1, observedDeploymentInstanceId: 'other', observedDeploymentEpoch: 1, source: 'HEALTH', evidence: {}, evidenceDigest: 'evidence', state: 'OPEN', detectedAt: 1 });
+    if (variant === 'wrong receipt') args.importId = await ctx.db.insert('backupImports', { sourceTownId: 'town:unrelated', mode: 'restore', exportedAt: 1, importedAt: 1, mapping: {}, runtimeSnapshot: {}, manifest: {} });
+  });
+  if (variant === 'invalid operator') args.operator = ' ';
+  if (variant === 'invalid reason') args.reason = ' ';
+  const reasons: Record<string, string> = { 'backup lock': 'TOWN_BACKUP_MAINTENANCE_LOCKED',
+    'cold lock': 'TOWN_COLD_HISTORY_MAINTENANCE_LOCKED', 'privacy job': 'TOWN_TRAVEL_PRIVACY_BUSY',
+    'unfinished backup': 'CLONE_BACKUP_JOB_NOT_COMPLETE', 'active visit': 'CLONE_ACTIVE_TRAVEL_REMAINS',
+    conflict: 'TOWN_CLONE_CONFLICT', 'wrong receipt': 'CLONE_COMPLETION_PROOF_REQUIRED',
+    'invalid operator': 'INVALID_CLONE_ACTIVATION_DETAILS', 'invalid reason': 'INVALID_CLONE_ACTIVATION_DETAILS' };
+  await expect(t.mutation(activateCloneMutation, args)).rejects.toThrow(reasons[variant]);
+  expect((await t.run(ctx => ctx.db.get(local._id)))!.mode).toBe('DISABLED');
+});
+
+
+test.each(['ACTIVE', 'MIGRATING_IN', 'QUARANTINED'])('clone status in %s never reads backup history', async mode => {
+  const tables: string[] = [];
+  const ctx = { db: { query: (table: string) => {
+    tables.push(table);
+    if (table !== 'federationIdentity') throw new Error('UNEXPECTED_HISTORY_READ');
+    return { unique: async () => ({ townId: 'town:current', deploymentInstanceId: 'current', deploymentEpoch: 1, mode }) };
+  } } } as unknown as Parameters<typeof independentCloneStatus>[0];
+  expect(await independentCloneStatus(ctx)).toMatchObject({ eligible: false, reason: 'CLONE_DEPLOYMENT_NOT_DISABLED' });
+  expect(tables).toEqual(['federationIdentity']);
+});
+
+test.each(['epoch', 'instance', 'key', 'receipt', 'MIGRATING_IN', 'QUARANTINED', 'conflict'])('clone activation retry rejects changed %s', async variant => {
+  const { t, args, local } = await independentCloneFixture();
+  await t.mutation(activateCloneMutation, args);
+  await t.run(async ctx => {
+    if (variant === 'epoch') { args.expectedDeploymentEpoch++; await ctx.db.patch(local._id, { deploymentEpoch: args.expectedDeploymentEpoch }); }
+    if (variant === 'instance') { args.expectedDeploymentInstanceId = 'new-instance'; await ctx.db.patch(local._id, { deploymentInstanceId: 'new-instance' }); }
+    if (variant === 'key') await ctx.db.patch(local._id, { publicKey: 'replacement-key' });
+    if (variant === 'MIGRATING_IN' || variant === 'QUARANTINED') await ctx.db.patch(local._id, { mode: variant });
+    if (variant === 'receipt') args.importId = await ctx.db.insert('backupImports', { sourceTownId: 'town:other', mode: 'clone', exportedAt: 1, importedAt: 1, mapping: {}, runtimeSnapshot: {}, manifest: {} });
+    if (variant === 'conflict') await ctx.db.insert('federationIdentityConflicts', { conflictKey: 'retry-conflict', townId: local.townId,
+      publicKey: local.publicKey, knownDeploymentInstanceId: local.deploymentInstanceId, knownDeploymentEpoch: local.deploymentEpoch,
+      observedDeploymentInstanceId: 'other', observedDeploymentEpoch: local.deploymentEpoch, source: 'HEALTH', evidence: {},
+      evidenceDigest: 'evidence', state: 'OPEN', detectedAt: 1 });
+  });
+  const before = await t.run(async ctx => ({ receipt: await ctx.db.get(args.importId), records: await ctx.db.query('deploymentRecords').collect() }));
+  await expect(t.mutation(activateCloneMutation, args)).rejects.toThrow(variant === 'conflict' ? 'TOWN_CLONE_CONFLICT' :
+    variant === 'MIGRATING_IN' || variant === 'QUARANTINED' ? 'CLONE_DEPLOYMENT_NOT_DISABLED' : 'CLONE_ACTIVATION_NO_LONGER_CURRENT');
+  expect(await t.run(async ctx => ({ receipt: await ctx.db.get(args.importId), records: await ctx.db.query('deploymentRecords').collect() }))).toEqual(before);
 });

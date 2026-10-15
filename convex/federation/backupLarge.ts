@@ -1518,6 +1518,11 @@ export const finalizeImport = internalMutation({
       manifest: { format: 'ai-town-chunks', largeJobId: job._id, sourceTownId: source.townId,
         ...(job.metadata?.sourceSignatureValid === false ? { sourceSignatureValid: false,
           localManifestDigest: job.metadata.archiveLocalManifestDigest } : {}) },
+      ...(job.mode === 'clone' ? { cloneDeployment: {
+        townId: local!.townId, publicKey: local!.publicKey, fingerprint: local!.fingerprint,
+        deploymentInstanceId: local!.deploymentInstanceId, deploymentEpoch: local!.deploymentEpoch,
+        sourcePublicKey: source.publicKey, sourceFingerprint: source.fingerprint,
+      } } : {}),
     });
     await ctx.db.patch(job._id, { metadata: { ...job.metadata, importId } });
     await release(ctx, job, 'COMPLETE');

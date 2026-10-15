@@ -28,6 +28,16 @@ export const backupTables = {
     mapping: v.any(),
     runtimeSnapshot: v.any(),
     manifest: v.any(),
+    // Local completion evidence, never accepted from portable backup metadata.
+    cloneDeployment: v.optional(v.object({
+      townId: v.string(), publicKey: v.string(), fingerprint: v.string(),
+      deploymentInstanceId: v.string(), deploymentEpoch: v.number(),
+      sourcePublicKey: v.string(), sourceFingerprint: v.string(),
+    })),
+    cloneActivation: v.optional(v.object({
+      activatedAt: v.number(), operator: v.string(), reason: v.string(),
+      townId: v.string(), publicKey: v.string(), deploymentInstanceId: v.string(), deploymentEpoch: v.number(),
+    })),
     archivePrivacyState: v.optional(v.union(v.literal('REWRITING'), v.literal('LOCAL_SANITIZED'))),
     archiveRevision: v.optional(v.number()),
     localArchiveStorageId: v.optional(v.id('_storage')),
@@ -37,6 +47,7 @@ export const backupTables = {
       originalStorageId: v.id('_storage'), originalDigest: v.string(),
     })),
   }).index('sourceTown', ['sourceTownId'])
+    .index('mode', ['mode'])
     .index('ordinaryAttempt', ['ordinaryAttemptKey'])
     .index('vectorArchiveStorage', ['manifest.vectorArchiveStorageId'])
     .index('localArchiveStorage', ['localArchiveStorageId']),

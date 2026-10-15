@@ -1077,6 +1077,7 @@ export async function applyBackupData(
   if (args.mode === 'restore' || args.mode === 'migrate')
     await remapLocalPrivacy(ctx, bundle.manifest.sourceTownId, mapping);
   await restorePrivacyRows(ctx, rows.travelPrivacyTombstones ?? [], mapping);
+  const cloneIdentity = args.mode === 'clone' ? (await identity(ctx))! : null;
   const importId = await ctx.db.insert('backupImports', {
     sourceTownId: bundle.manifest.sourceTownId,
     mode: args.mode,
@@ -1086,6 +1087,11 @@ export async function applyBackupData(
     mapping,
     runtimeSnapshot: snapshots,
     manifest: { ...bundle.manifest, vectorSourceTrusted, vectorArchiveStorageId: args.vectorArchiveStorageId },
+    ...(args.mode === 'clone' ? { cloneDeployment: {
+      townId: townId!, publicKey: cloneIdentity!.publicKey, fingerprint: cloneIdentity!.fingerprint,
+      deploymentInstanceId: cloneIdentity!.deploymentInstanceId, deploymentEpoch: cloneIdentity!.deploymentEpoch,
+      sourcePublicKey: rows.federationIdentity[0].publicKey, sourceFingerprint: rows.federationIdentity[0].fingerprint,
+    } } : {}),
   });
   await ensureEmbeddingSpace(ctx);
   // Same active space may already exist during a resident merge; explicitly reindex imported canonical text.

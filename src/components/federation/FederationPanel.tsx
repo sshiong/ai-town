@@ -10,6 +10,7 @@ import IdentityKeyRotationPanel from './IdentityKeyRotationPanel';
 import VisitorQueuePanel from './VisitorQueuePanel';
 import ResidentPolicyPanel from './ResidentPolicyPanel';
 import HostResourcePanel from './HostResourcePanel';
+import CloneActivationPanel from './CloneActivationPanel';
 import { adminErrorSummary } from './uiPolicy';
 import {
   AdminButton,
@@ -106,6 +107,10 @@ export default function FederationPanel({ adminToken }: { adminToken: string }) 
                 <code>{data.identity.fingerprint}</code>
               </dd>
             </dl>
+            <CloneActivationPanel
+              key={`${data.identity.townId}:${data.identity.deploymentInstanceId}:${data.identity.deploymentEpoch}`}
+              adminToken={adminToken} status={data} task={task} refresh={refresh}
+            />
             <form
               className="admin-inline-form"
               key={`${data.identity.endpoint}:${data.identity.endpointGeneration}`}

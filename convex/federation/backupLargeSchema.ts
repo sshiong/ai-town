@@ -45,7 +45,7 @@ export const backupLargeTables = {
     metadata: v.optional(v.any()),
     archivePrivacyState: v.optional(v.union(v.literal('REWRITING'), v.literal('LOCAL_SANITIZED'))),
     archiveRevision: v.optional(v.number()),
-  }).index('manifestStorage', ['manifestStorageId']),
+  }).index('manifestStorage', ['manifestStorageId']).index('state', ['state']),
   backupLargeChunks: defineTable({
     jobId: v.id('backupLargeJobs'),
     index: v.number(),

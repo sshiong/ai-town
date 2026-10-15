@@ -2,7 +2,7 @@ import { configuredTimePolicy, timePolicy, validateTimePolicy, readClock, return
 import { replyTimeoutMs } from './replyPolicy';
 import { action, internalMutation, mutation, query } from '../maintenanceFunctions';
 import { v } from 'convex/values';
-import { createIdentityKeys, requireAdmin, randomSecret } from './security';
+import { createIdentityKeys, requireAdmin, randomSecret, sign, verifySignature } from './security';
 import { identity } from './store';
 import { normalizeEndpoint } from './protocol';
 import { actionRef, mutationRef } from './refs';
@@ -10,6 +10,7 @@ import { resourceLimits, validateResourceLimits, configuredResourceLimits, pendi
 import { hostResourceHealth, remoteEventRate, resourceMeasurements, sourceVisitorQuota } from './resourceMonitoring';
 import { visitorQueueSummary } from './visitorQueue';
 import { commitLocalEndpoint } from './endpoints';
+import { independentCloneStatus, cloneDeploymentBinding } from './cloneActivation';
 export const configureResources = mutation({
   args: { adminToken: v.string(), limits: resourceLimits },
   handler: async (ctx, args) => {
@@ -168,6 +169,7 @@ export const status = query({
       if (ledger?.role === 'host') sourceOccupancy.set(ledger.homeTownId, (sourceOccupancy.get(ledger.homeTownId) ?? 0) + 1);
     }
     return {
+      cloneActivation: await independentCloneStatus(ctx),
       resources: {
         limits, admissionState,
         visitorQueue: await visitorQueueSummary(ctx.db),
@@ -290,6 +292,65 @@ export const status = query({
           lastAckedEventSeq: lastAckedEventSeq ?? 0, returnSafety: returnSafety(ledger, clock, now) };
       }),
     };
+  },
+});
+
+export const activateIndependentClone = mutation({
+  args: {
+    adminToken: v.string(), importId: v.id('backupImports'),
+    expectedTownId: v.string(), expectedDeploymentInstanceId: v.string(), expectedDeploymentEpoch: v.number(),
+    operator: v.string(), reason: v.string(),
+  },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    if (!args.operator.trim() || args.operator.length > 100 || !args.reason.trim() || args.reason.length > 500)
+      throw new Error('INVALID_CLONE_ACTIVATION_DETAILS');
+    const local = await identity(ctx);
+    if (!local || local.townId !== args.expectedTownId || local.deploymentInstanceId !== args.expectedDeploymentInstanceId ||
+      local.deploymentEpoch !== args.expectedDeploymentEpoch) throw new Error('CLONE_DEPLOYMENT_CHANGED');
+    // Retry only the exact activation committed for this identity. General status
+    // intentionally does not scan import history on an active deployment.
+    const receipt = await ctx.db.get(args.importId);
+    let alreadyActivated = false;
+    if (local.mode !== 'DISABLED') {
+      if (local.mode !== 'ACTIVE') throw new Error('CLONE_DEPLOYMENT_NOT_DISABLED');
+      const activation = receipt?.cloneActivation;
+      if (!receipt || receipt.mode !== 'clone' || receipt.sourceTownId === local.townId || !activation ||
+        activation.townId !== local.townId || activation.publicKey !== local.publicKey ||
+        activation.deploymentInstanceId !== local.deploymentInstanceId || activation.deploymentEpoch !== local.deploymentEpoch)
+        throw new Error('CLONE_ACTIVATION_NO_LONGER_CURRENT');
+      if (await ctx.db.query('federationIdentityConflicts').withIndex('state', q => q.eq('state', 'OPEN')).first())
+        throw new Error('TOWN_CLONE_CONFLICT');
+      alreadyActivated = true;
+    } else {
+      const eligibility = await independentCloneStatus(ctx);
+      if (eligibility.importId !== args.importId) throw new Error('CLONE_COMPLETION_PROOF_REQUIRED');
+      if (!eligibility.eligible) throw new Error(eligibility.reason!);
+      const challenge = { operation: 'ACTIVATE_INDEPENDENT_CLONE', importId: args.importId,
+        townId: local.townId, deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch };
+      let signingKeyValid = false;
+      try {
+        signingKeyValid = await verifySignature(challenge, await sign(challenge, local.privateKeyEncrypted), local.publicKey);
+      } catch {
+        // Never expose wrapping-key or private-key parsing failures to clients.
+      }
+      if (!signingKeyValid) throw new Error('CLONE_SIGNING_KEY_UNAVAILABLE');
+      await ctx.db.patch(local._id, { mode: 'ACTIVE', enabled: false, allowIncomingPairRequests: false });
+      await ctx.db.patch(args.importId, {
+        cloneDeployment: await cloneDeploymentBinding(ctx, receipt!, local),
+        cloneActivation: {
+          activatedAt: Date.now(), operator: args.operator.trim(), reason: args.reason.trim(),
+          townId: local.townId, publicKey: local.publicKey,
+          deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch,
+        },
+      });
+      await ctx.db.insert('deploymentRecords', {
+        townId: local.townId, deploymentInstanceId: local.deploymentInstanceId,
+        deploymentEpoch: local.deploymentEpoch, mode: 'ACTIVE', createdAt: Date.now(),
+      });
+    }
+    return { activated: true, alreadyActivated, townId: local.townId,
+      deploymentInstanceId: local.deploymentInstanceId, deploymentEpoch: local.deploymentEpoch };
   },
 });
 
