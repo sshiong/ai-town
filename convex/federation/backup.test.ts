@@ -2033,3 +2033,100 @@ test('ordinary lost publication ACK reuses its vector bundle and published cold 
   expect(await target.run(async ctx => !!await ctx.storage.get(cold.storageId!))).toBe(true);
   expect((await target.run(ctx => ctx.db.query('archiveUploadCandidates').unique()))!.state).toBe('PUBLISHED');
 });
+
+test.each(['clone', 'merge', 'restore', 'migrate'] as const)(
+  'ordinary non-vector %s retries a lost publication ACK without reapplying or requiring old target state', async mode => {
+    const src = await town();
+    const bundle: BackupBundle = await src.t.action(action('federation/backup:exportTown'), { adminToken });
+    expect(bundle.manifest.includeVectors).toBe(false);
+    const destination = mode === 'clone' ? { t: convexTest(schema, modules), worldId: undefined } : await town();
+    if (mode === 'restore' || mode === 'migrate') {
+      const source = (await src.t.run(ctx => ctx.db.query('federationIdentity').unique()))!;
+      await destination.t.run(async ctx => {
+        const local = (await ctx.db.query('federationIdentity').unique())!;
+        await ctx.db.patch(local._id, { publicKey: source.publicKey, privateKeyEncrypted: source.privateKeyEncrypted,
+          fingerprint: source.fingerprint });
+      });
+    }
+    const harness = ordinaryImportHarness(destination.t, 'publish-ack');
+    const args = { adminToken, bundleJson: JSON.stringify(bundle), mode,
+      ...(mode === 'clone' ? { targetEndpoint: 'https://non-vector-copy.example' }
+        : mode === 'merge' ? { targetWorldId: destination.worldId } : { sourceStopped: true }),
+      uploadAttemptKey: `non-vector-${mode}` };
+    await expect(harness.invoke(args)).rejects.toThrow('RESPONSE_ACK_LOST');
+    const before = await destination.t.run(async ctx => ({
+      imports: await ctx.db.query('backupImports').collect(), worlds: await ctx.db.query('worlds').collect(),
+      memories: await ctx.db.query('memories').collect(), identities: await ctx.db.query('federationIdentity').collect(),
+    }));
+    expect(before.imports).toHaveLength(1);
+    const result = await harness.invoke(args);
+    expect(result.importId).toBe(before.imports[0]._id);
+    expect(before.imports[0].ordinaryImportResult).toEqual(result);
+    expect(harness.stores()).toBe(0);
+    expect(await destination.t.run(async ctx => ({
+      imports: await ctx.db.query('backupImports').collect(), worlds: await ctx.db.query('worlds').collect(),
+      memories: await ctx.db.query('memories').collect(), identities: await ctx.db.query('federationIdentity').collect(),
+    }))).toEqual(before);
+  },
+);
+
+test('ordinary non-vector retries reject a changed payload or import target under the same key', async () => {
+  const src = await town();
+  const bundle: BackupBundle = await src.t.action(action('federation/backup:exportTown'), { adminToken });
+  const target = convexTest(schema, modules), harness = ordinaryImportHarness(target);
+  const args = { adminToken, bundle, mode: 'clone', targetEndpoint: 'https://non-vector-copy.example', uploadAttemptKey: 'non-vector-immutable' };
+  const result = await harness.invoke(args);
+  const changed = { ...bundle, manifest: { ...bundle.manifest, exportedAt: bundle.manifest.exportedAt + 1 } };
+  const source = (await src.t.run(ctx => ctx.db.query('federationIdentity').unique()))!;
+  changed.signature = await sign(changed.manifest, source.privateKeyEncrypted);
+  for (const overrides of [{ bundle: changed }, { targetEndpoint: 'https://different.example' },
+    { mode: 'merge' }, { sourceStopped: true }, { residentRestore: { operator: 'different', reason: 'changed', expectedTargetDigest: 'x', confirmOverwrite: true } }]) {
+    await expect(harness.invoke({ ...args, ...overrides })).rejects.toThrow('BACKUP_IMPORT_REQUEST_CHANGED');
+  }
+  expect(await harness.invoke(args)).toEqual(result);
+  expect(await target.run(ctx => ctx.db.query('backupImports').collect())).toHaveLength(1);
+});
+
+test('ordinary non-vector apply rolls back its success receipt with failed import writes', async () => {
+  const src = await town();
+  const bundle: BackupBundle = await src.t.action(action('federation/backup:exportTown'), { adminToken });
+  const target = convexTest(schema, modules), harness = ordinaryImportHarness(target, 'late-rollback');
+  const args = { adminToken, bundle, mode: 'clone', targetEndpoint: 'https://non-vector-rollback.example', uploadAttemptKey: 'non-vector-rollback' };
+  await expect(harness.invoke(args)).rejects.toThrow('LATE_IMPORT_ROLLBACK');
+  expect(await target.run(ctx => ctx.db.query('backupImports').collect())).toHaveLength(0);
+  expect(await target.run(ctx => ctx.db.query('worlds').collect())).toHaveLength(0);
+  const result = await harness.invoke(args);
+  expect(await harness.invoke(args)).toEqual(result);
+  expect(await target.run(ctx => ctx.db.query('backupImports').collect())).toHaveLength(1);
+});
+
+
+test('ordinary non-vector original Home resident restore recovers a committed result after target digest changes', async () => {
+  const { t, worldId, memoryId } = await town();
+  const bundle = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
+  const args = { ...await residentRestoreArgs(t, bundle, worldId), uploadAttemptKey: 'resident-restoration-ack' };
+  const harness = ordinaryImportHarness(t, 'publish-ack');
+  await expect(harness.invoke(args)).rejects.toThrow('RESPONSE_ACK_LOST');
+  const first = (await t.run(ctx => ctx.db.query('backupImports').unique()))!;
+  await t.run(ctx => ctx.db.patch(memoryId, { description: 'New fact after the committed restore' }));
+  const result = await harness.invoke(args);
+  expect(result).toEqual(first.ordinaryImportResult);
+  expect(result.residentRestoreReport).toBeDefined();
+  expect((await t.run(ctx => ctx.db.get(memoryId)))!.description).toBe('New fact after the committed restore');
+  expect(await t.run(ctx => ctx.db.query('backupImports').collect())).toHaveLength(1);
+});
+
+test('ordinary non-vector retry reuses committed cold files without uploading attachments again', async () => {
+  const src = await town();
+  await src.t.action(action('federation/coldHistory:archive'), await nativeColdOwner(src.t, src.worldId));
+  const bundle: BackupBundle = await src.t.action(action('federation/backup:exportTown'), { adminToken });
+  expect(bundle.coldHistoryFiles!.length).toBeGreaterThan(0);
+  const target = convexTest(schema, modules), harness = ordinaryImportHarness(target, 'publish-ack');
+  const args = { adminToken, bundle, mode: 'clone', targetEndpoint: 'https://non-vector-cold.example', uploadAttemptKey: 'non-vector-cold' };
+  await expect(harness.invoke(args)).rejects.toThrow('RESPONSE_ACK_LOST');
+  const uploaded = harness.stores();
+  const result = await harness.invoke(args);
+  expect(result.coldFilesRestored).toBe(bundle.coldHistoryFiles!.length);
+  expect(harness.stores()).toBe(uploaded);
+  expect(await target.run(ctx => ctx.db.query('coldHistoryArchives').collect())).toHaveLength(bundle.coldHistoryFiles!.length);
+});

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
-import { backupImportSupportsRetry, newBackupUploadAttemptKey } from './uiPolicy';
+import { newBackupUploadAttemptKey } from './uiPolicy';
 import { translate } from '../../locale';
 import { federationMessages } from '../../locales/federation';
 import { dataMessages } from '../../locales/data';
@@ -79,7 +79,7 @@ function panel() {
       };
       if (name === '../../../convex/_generated/api') return { api };
       if (name === './uiPolicy') return { requiresStoppedSource: (mode: string) => ['restore', 'migrate'].includes(mode),
-        backupImportSupportsRetry, newBackupUploadAttemptKey };
+        newBackupUploadAttemptKey };
       if (name === './embeddingUiPolicy') return { declaredBackupSource: () => null };
       if (name === './backupEncryption') return { validBackupPassphrase: () => true,
         readBackupText: (file: any) => file.text() };
@@ -154,9 +154,9 @@ test('chunked archive shortcut works without export fields and scrolls before fo
   expect(ui.button('打开分块归档')!.props.type).toBe('button');
 });
 
-test('ordinary import retries preserve exact bytes, target, mode and key after world updates and lost ACK', async () => {
+test.each([false, true])('ordinary import with vectors=%s retries exact bytes, target, mode and key after world updates and lost ACK', async vectors => {
   const ui = panel();
-  await ui.load();
+  await ui.load(vectors);
   await ui.click('Run preflight');
   ui.confirm();
   await ui.click('Import validated package');
@@ -173,10 +173,10 @@ test('ordinary import retries preserve exact bytes, target, mode and key after w
   expect(ui.button('重试同一次导入')).toBeUndefined();
 });
 
-test('clone retry remains available after publication creates target identity and world', async () => {
+test.each([false, true])('clone with vectors=%s retry remains available after publication creates target identity and world', async vectors => {
   const ui = panel();
   ui.setWorld(undefined);
-  await ui.load();
+  await ui.load(vectors);
   ui.change(element => element.type === 'select' && element.props.value === 'merge', { value: 'clone' });
   ui.change(element => element.props.type === 'url', { value: 'https://clone.example' });
   await ui.click('Run preflight');
@@ -209,20 +209,6 @@ test('explicit new import and mode/file changes replace the retry key', async ()
   expect(ui.button('Retry the same import')).toBeUndefined();
   await ui.load();
   expect(ui.button('Retry the same import')).toBeUndefined();
-});
-
-test('ordinary backups without actual vector rows never offer an idempotent retry', async () => {
-  const ui = panel();
-  await ui.load(false);
-  await ui.click('Run preflight');
-  ui.confirm();
-  await ui.click('Import validated package');
-  expect(ui.button('Retry the same import')).toBeUndefined();
-  expect(ui.button('Start another import')).toBeDefined();
-  for (const bundle of [undefined, null, [], {}, { manifest: { includeVectors: true } },
-    { manifest: { includeVectors: true }, sections: { modelMemoryVectors: [] } },
-    { manifest: { includeVectors: false }, sections: { modelMemoryVectors: ['row'] } }])
-    expect(backupImportSupportsRetry(bundle)).toBe(false);
 });
 
 test('changing a clone endpoint discards the saved request instead of sending it under the old key', async () => {

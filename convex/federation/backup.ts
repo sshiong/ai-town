@@ -499,6 +499,53 @@ export const checkPreflight = internalQuery({
     };
   },
 });
+type OrdinaryImportResult = {
+  mode: ImportMode;
+  worldIds: string[];
+  mapping: Record<string, string>;
+  rebuildRequired: true;
+  importId?: Id<'backupImports'>;
+  coldFilesRestored?: number;
+  residentRestoreReport?: Awaited<ReturnType<typeof residentRestorePlan>>['report'];
+};
+
+async function ordinaryImportRequest(args: ObjectType<typeof importArgs>) {
+  if (args.uploadAttemptKey === undefined) return null;
+  const bundle = await validateBundle(importBundle(args));
+  if (args.uploadAttemptKey.length > 200 || !args.uploadAttemptKey.trim())
+    throw new Error('BACKUP_IMPORT_ATTEMPT_INVALID');
+  return {
+    key: args.uploadAttemptKey,
+    requestDigest: await digest({ bundle, owner: await ordinaryUploadOwner(args) }),
+  };
+}
+async function completedOrdinaryImport(ctx: QueryCtx | MutationCtx, request: Awaited<ReturnType<typeof ordinaryImportRequest>>) {
+  if (!request) return undefined;
+  const imported = await ctx.db.query('backupImports')
+    .withIndex('ordinaryAttempt', q => q.eq('ordinaryAttemptKey', request.key)).unique();
+  if (!imported) return undefined;
+  if (imported.ordinaryRequestDigest !== request.requestDigest)
+    throw new Error('BACKUP_IMPORT_REQUEST_CHANGED');
+  if (!imported.ordinaryImportResult) throw new Error('BACKUP_IMPORT_RECEIPT_INVALID');
+  return imported.ordinaryImportResult as OrdinaryImportResult;
+}
+export const completedImport = internalQuery({
+  args: importArgs,
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminToken);
+    return await completedOrdinaryImport(ctx, await ordinaryImportRequest(args)) ?? null;
+  },
+});
+async function recordOrdinaryImport(ctx: MutationCtx, request: Awaited<ReturnType<typeof ordinaryImportRequest>>, result: OrdinaryImportResult) {
+  if (!request) return;
+  if (!result.importId) throw new Error('BACKUP_IMPORT_RECEIPT_INVALID');
+  await ctx.db.patch(result.importId, {
+    ordinaryAttemptKey: request.key,
+    ordinaryRequestDigest: request.requestDigest,
+    ordinaryImportResult: result,
+  });
+}
+
 const ordinaryCheckpoint = { operationId: v.id('archiveUploadOperations'), revision: v.number() };
 async function ordinaryUploadOwner(args: ObjectType<typeof importArgs>) {
   return `ordinary:${await digest({ mode: args.mode, targetWorldId: args.targetWorldId ?? null,
@@ -604,20 +651,17 @@ export const importBackup = action({
   handler: async (
     ctx,
     args,
-  ): Promise<{
-    mode: ImportMode;
-    worldIds: string[];
-    mapping: Record<string, string>;
-    rebuildRequired: true;
-    importId?: Id<'backupImports'>;
-    coldFilesRestored?: number;
-    residentRestoreReport?: Awaited<ReturnType<typeof residentRestorePlan>>['report'];
-  }> => {
+  ): Promise<OrdinaryImportResult> => {
     requireAdmin(args.adminToken);
     // Generate fresh identity material outside the database transaction; never accept an imported private key.
     const keys = args.mode === 'clone' ? await createIdentityKeys() : undefined;
     const bundle = await validateBundle(importBundle(args));
     const needsBundle = !!bundle.manifest.includeVectors && !!bundle.sections.modelMemoryVectors?.length;
+    if (args.uploadAttemptKey !== undefined) {
+      const completed = await ctx.runQuery(queryRef('backup/completedImport'), args);
+      // Vector archives retain their existing verified storage/publication recovery.
+      if (completed && !needsBundle) return completed;
+    }
     // The exact byte string crosses RPC unchanged; Convex object transport can reorder JSON keys.
     args = { ...args, ...(needsBundle ? { bundle: undefined, bundleJson: JSON.stringify(bundle),
       uploadAttemptKey: args.uploadAttemptKey ?? crypto.randomUUID() } : {}) };
@@ -718,6 +762,11 @@ export async function applyBackupData(
 ) {
   requireAdmin(args.adminToken);
   args = { ...args, bundle: importBundle(args), bundleJson: undefined };
+  const ordinaryRequest = args.archiveUpload ? null : await ordinaryImportRequest(args);
+  // This index read and the receipt write share the import transaction: concurrent
+  // retries conflict and return the first committed mapping instead of importing twice.
+  const completed = await completedOrdinaryImport(ctx, ordinaryRequest);
+  if (completed) return completed;
   if (!!args.vectorArchiveStorageId !== !!args.archiveUpload) throw new Error('BACKUP_UPLOAD_PROVENANCE_REQUIRED');
   if (args.archiveUpload) {
     await assertOrdinaryUploadRequest(ctx, args, args.archiveUpload.operationId);
@@ -734,6 +783,7 @@ export async function applyBackupData(
     if (imported) await ctx.db.patch(imported._id, { manifest: { ...imported.manifest, vectorSourceTrusted, vectorArchiveStorageId: args.vectorArchiveStorageId } });
     const publishedResult = {...result,coldFilesRestored};
     await publishOrdinaryBundle(ctx, args, publishedResult);
+    await recordOrdinaryImport(ctx, ordinaryRequest, publishedResult);
     return publishedResult;
   }
   const { bundle, local, rows } = await checkImport(ctx, args);
@@ -1055,6 +1105,7 @@ export async function applyBackupData(
     rebuildRequired: true as const,
   };
   await publishOrdinaryBundle(ctx, args, result);
+  await recordOrdinaryImport(ctx, ordinaryRequest, result);
   return result;
 }
 export const applyImport = importInternalMutation({ args: applyImportFields, handler: applyBackupData });

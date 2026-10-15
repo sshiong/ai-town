@@ -19,6 +19,9 @@ export const backupTables = {
   backupImports: defineTable({
     sourceTownId: v.string(),
     mode: v.string(),
+    ordinaryAttemptKey: v.optional(v.string()),
+    ordinaryRequestDigest: v.optional(v.string()),
+    ordinaryImportResult: v.optional(v.any()),
     exportedAt: v.number(),
     importedAt: v.number(),
     sourceStoppedAt: v.optional(v.number()),
@@ -34,6 +37,7 @@ export const backupTables = {
       originalStorageId: v.id('_storage'), originalDigest: v.string(),
     })),
   }).index('sourceTown', ['sourceTownId'])
+    .index('ordinaryAttempt', ['ordinaryAttemptKey'])
     .index('vectorArchiveStorage', ['manifest.vectorArchiveStorageId'])
     .index('localArchiveStorage', ['localArchiveStorageId']),
   backupReconciliations: defineTable({

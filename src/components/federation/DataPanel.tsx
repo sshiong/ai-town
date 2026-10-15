@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from 'react';
 import { useConvex, useQuery } from 'convex/react';
 import type { FunctionArgs, FunctionReturnType } from 'convex/server';
 import {
-  backupImportSupportsRetry,
   newBackupUploadAttemptKey,
   requiresStoppedSource,
 } from './uiPolicy';
@@ -84,7 +83,6 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
     useState<FunctionReturnType<typeof api.federation.backup.importBackup>>();
   const [importAttempt, setImportAttempt] = useState<{
     request: Omit<FunctionArgs<typeof api.federation.backup.importBackup>, 'adminToken'>;
-    supportsRetry: boolean;
   }>();
   const [encryptDownloads, setEncryptDownloads] = useState(false);
   const [includeVectors, setIncludeVectors] = useState(false);
@@ -705,7 +703,6 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
                     const { adminToken: _adminToken, ...request } = args;
                     const attempt = {
                       request: { ...request, uploadAttemptKey: newBackupUploadAttemptKey() },
-                      supportsRetry: backupImportSupportsRetry(bundle),
                     };
                     // Keep the exact request before awaiting its ACK. Reactive world/identity
                     // updates can remove preflight after a committed import with a lost response.
@@ -730,17 +727,13 @@ export default function DataPanel({ adminToken }: { adminToken: string }) {
         <>
           {!result && (
             <p className="admin-muted">
-              {importAttempt.supportsRetry
-                ? t(
-                    'Retry sends the same import request. Its upload and publication can be recovered if the response was lost. Keep this panel open; retry state is held only in browser memory.',
-                  )
-                : t(
-                    'This backup has no vector upload checkpoint. A lost response cannot be retried safely here; review import history and target data before starting another import.',
-                  )}
+              {t(
+                'Retry sends the same import request and recovers its saved result if the response was lost. Keep this panel open; retry state is held only in browser memory.',
+              )}
             </p>
           )}
           <div className="admin-toolbar">
-            {!result && importAttempt.supportsRetry && (
+            {!result && (
               <AdminButton
                 danger
                 disabled={!!task.pending}
