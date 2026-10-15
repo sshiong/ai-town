@@ -594,3 +594,7 @@ GPT-6.1-sol medium 子代理完成后端，主代理完成前端并独立运行�
 该次仅用正式配置接口将旅行上限临时延长至15分钟，观察窗口10分钟；成功后两镇均恢复原5分钟上限。lease仍按原策略正常续约，没有绕过Host租约验证。N前次OOM引起的观察gap在无活跃访问且UTC与宿主/后端一致后经正式时钟恢复处理。
 
 同时修复严格交谈harness自身：原来lease已等于tripDeadline时仍提前60秒renew，会因正常LEASE_NOT_EXTENDED误中断观察。现仅在未过期且min(now+leaseMs,tripDeadline)>当前lease时续约，达到cap后观察至明确期限，慢probe后复查时间。legacy status未公开createdAt/tripDeadline时保守观察到已授lease、不猜可延长期限；这可能较早结束本可续约的旧访问，但不改变产品租约或严格双方各两条标准。原finally认证返乡保留。7项确定性观察器测试及语法/diff检查通过；模拟测试不替代本段真实交谈证据。
+
+本次专用浏览器未赶在返乡前捕获Home away/Host来源标签，因此这些UI不能据本轮称已验收。返乡后公开worldState与截图确认M/N正常运行、无访客、M原居民在场且away=false，地图完整；N的同名p:0是本地ID，未将其误认旅行者。私有travel-ui-evidence目录保留截图和布尔回执，专用浏览器已关闭。
+
+浏览器代理启动临时M前端时误用npm run dev触发predev，新建3210本地部署配置，推送以DeploymentNotConfiguredForNodeActions失败，随后停止。该临时部署检查只见系统表、无应用表，3210已无监听；因没有部署前基线，不声称其function/schema绝对未变。生成的.env.local移至Git外私有incident目录保存，未覆盖M/N/O凭据；临时5176前端改直接vite后核对实际连接3422，结束时已关闭。M/N/O原部署与用户5177仍使用原有独立地址，本轮后复查双向TRANSPORT_READY、无活跃访问。
