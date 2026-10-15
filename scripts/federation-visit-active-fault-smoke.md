@@ -38,6 +38,10 @@ Dropping only an HTTP `MESSAGE_ACK` response is a different scenario.
   signing the gate certificate; its SAN must match the advertised hostname.
   For Docker access through `host.docker.internal`, bind the gate to `0.0.0.0`
   explicitly and use a dedicated port. Restrict access to this lab listener.
+  Check that hostname's actual address in the backend container first: forbidden
+  loopback, link-local or benchmark ranges remain rejected even with a private
+  allowlist. In that case use an authorized private LAN address covered by the
+  certificate SAN for both town endpoints; do not relax the network policy.
 
 ## External configuration
 

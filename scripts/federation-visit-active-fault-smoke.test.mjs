@@ -16,17 +16,18 @@ function configuration() {
       upstream: 'http://127.0.0.1:3501', endpoint: 'https://host.docker.internal:3504/federation/v1' } };
 }
 function inspect(config, town) {
+  const bindings = { '3210/tcp': [{ HostIp: '127.0.0.1', HostPort: new URL(town.url).port }],
+    ...(town.role === 'home' ? { '3211/tcp': [{ HostIp: '127.0.0.1', HostPort: '3501' }] } : {}) };
   return { Id: (town.role === 'home' ? 'a' : 'b').repeat(64), Name: `/${town.containerName}`,
-    State: { Running: true }, HostConfig: { NetworkMode: 'bridge' },
+    State: { Running: true }, HostConfig: { NetworkMode: 'bridge', PortBindings: structuredClone(bindings) },
     Config: { Labels: { 'ai-town.federation-fault-lab': config.labId,
       'ai-town.federation-fault-role': town.role, 'ai-town.federation-town-id': town.townId } },
-    NetworkSettings: { Ports: { '3210/tcp': [{ HostIp: '127.0.0.1', HostPort: new URL(town.url).port }],
-      ...(town.role === 'home' ? { '3211/tcp': [{ HostIp: '127.0.0.1', HostPort: '3501' }] } : {}) } } };
+    NetworkSettings: { Ports: bindings } };
 }
 function simulation() {
   const config = configuration(), calls = [], resident = { state: 'HOME_ACTIVE', agentGlobalId: 'home/alice',
     playerId: 'p:1', agentId: 'a:1', worldId: 'home-world' };
-  let phase = 'idle', time = 0, retryPending = false, closed = false;
+  let phase = 'idle', time = 0, retryPending = false, closed = false, hostRunning = true;
   const event = { visitId: 'visit', messageId: 'active-message', type: 'VISIT_ACTIVE',
     fromTownId: 'host', toTownId: 'home', forwarded: false, timestamp: 0 };
   const gate = { events: [], arm() { calls.push('arm'); }, release() {
@@ -45,8 +46,16 @@ function simulation() {
   const ops = {
     now: () => time,
     pause: async ms => { time += ms; if (retryPending) { gate.events.push({ ...event, timestamp: time }); retryPending = false; } },
-    inspect: async town => inspect(config, town),
-    docker: async (_town, operation, id) => { calls.push(`${operation}:${id}`); if (operation === 'start') retryPending = true; },
+    inspect: async town => {
+      const value = inspect(config, town);
+      if (town.role === 'host' && !hostRunning) { value.State.Running = false; value.NetworkSettings.Ports = {}; }
+      return value;
+    },
+    docker: async (_town, operation, id) => {
+      calls.push(`${operation}:${id}`);
+      hostRunning = operation !== 'kill';
+      if (operation === 'start') retryPending = true;
+    },
     status: async town => state(town),
     residents: async town => town.role === 'home' ? [{ ...resident, state: ['idle', 'returned'].includes(phase) ? 'HOME_ACTIVE' : 'TRAVELING' }] : [],
     defaultWorld: async () => ({ worldId: 'host-world' }),
@@ -81,6 +90,21 @@ test('Docker guards require pinned container, dedicated labels and loopback API/
     const i = inspect(c, town); change(i);
     assert.throws(() => validateContainer(c, town, i, 'a'.repeat(64)));
   }
+});
+
+test('stopped Docker shape permits start only with the correct persistent loopback binding', () => {
+  const c = configuration(), town = c.towns[1], value = inspect(c, town);
+  value.State.Running = false;
+  value.NetworkSettings.Ports = {};
+  assert.equal(validateContainer(c, town, value, 'b'.repeat(64)), 'b'.repeat(64));
+  for (const change of [i => { i.HostConfig.PortBindings = {}; },
+    i => { i.HostConfig.PortBindings['3210/tcp'][0].HostPort = '9999'; },
+    i => { i.HostConfig.PortBindings['3210/tcp'][0].HostIp = '0.0.0.0'; }]) {
+    const invalid = structuredClone(value); change(invalid);
+    assert.throws(() => validateContainer(c, town, invalid, 'b'.repeat(64)), /LOCAL_CONTAINER_PORT_MISMATCH/);
+  }
+  value.State.Running = true;
+  assert.throws(() => validateContainer(c, town, value, 'b'.repeat(64)), /LOCAL_CONTAINER_PORT_MISMATCH/);
 });
 
 test('active visits, additional trusted peers and alternate Home routes block before gate or mutations', async () => {

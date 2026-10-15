@@ -66,11 +66,17 @@ export function validateContainer(config, town, inspect, pinnedId) {
     inspect.Config?.Labels?.['ai-town.federation-fault-role'] === town.role &&
     inspect.Config?.Labels?.['ai-town.federation-town-id'] === town.townId,
   'DEDICATED_CONTAINER_MISMATCH');
-  const published = Object.values(inspect.NetworkSettings?.Ports ?? {}).flat().filter(Boolean);
   const ports = [localUrl(town.url).port];
   if (town.role === 'home') ports.push(localUrl(config.gate.upstream).port);
-  requireCondition(ports.every(port => published.some(binding => binding.HostPort === port &&
-    ['127.0.0.1', '::1'].includes(binding.HostIp))), 'LOCAL_CONTAINER_PORT_MISMATCH');
+  // Docker clears runtime publications while stopped; the persisted bindings
+  // remain available and must still authorize the exact container before start.
+  const bindings = [inspect.HostConfig?.PortBindings];
+  if (inspect.State?.Running === true) bindings.push(inspect.NetworkSettings?.Ports);
+  for (const mapping of bindings) {
+    const published = Object.values(mapping ?? {}).flat().filter(Boolean);
+    requireCondition(ports.every(port => published.some(binding => binding.HostPort === port &&
+      ['127.0.0.1', '::1'].includes(binding.HostIp))), 'LOCAL_CONTAINER_PORT_MISMATCH');
+  }
   return inspect.Id;
 }
 function assertIdentity(town, state) {

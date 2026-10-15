@@ -638,3 +638,13 @@ GPT-6.1-sol medium 子代理完成后端，主代理完成前端并独立运行�
 另补独立可执行runner及配置说明 `scripts/federation-visit-active-fault-smoke.md`。只接受显式专用lab标记、固定实验容器命名/标签、预期Town/部署身份、loopback端口以及固定Docker容器ID；初始已有访问、其他可信邻居或Home备用入口绕过gate时拒绝。要求实际账本、Host身体、未确认outbox及Home无inbox证据后才重启Host，释放后核对同messageId正式收件/ACK并正常返乡。finally仅处理本次访问及固定实验Host；创建请求响应丢失时也尝试从原居民唯一新增访问恢复清理。不会改模型绑定或小镇设置，不能直接对现有M/N执行。
 
 根代理最终合并运行5个脚本测试文件36项全通过（原19项、gate7项、runner10项），语法及diff检查通过。runner测试为确定性编排模拟，不冒称实际Docker故障。全量Jest扩展检查在61套通过、未见失败后因历史大数据用例持续耗时超过20分钟而主动中止，退出130；本次不称全量通过，也未删除、跳过测试或降低断言。该扩展检查不再重复，新增脚本由上述独立测试覆盖。
+
+### 2026-10-16 真实创建确认丢失、Host重启与原居民返乡
+
+新增两个全新专用Docker实验镇，独立数据库、API/HTTP端口、容器身份/标签及各1GiB上限，保留M/N/O运行。部署当前代码，Home初始化1名居民、Host无本地居民，关闭自主发起以隔离故障；两端实际探测qwen3.5:4b与qwen3-embedding:0.6b/1024成功，embedding READY。初次host.docker.internal配对被正式ENDPOINT_NOT_ALLOWED拒绝，改用证书SAN覆盖且两端既有allowlist明确允许的宿主LAN地址后正常签名配对，没有修改网络安全规则。
+
+首次真实强停暴露runner自身错误：Docker停止容器时NetworkSettings.Ports变空，导致重启的防误操作检查误拒绝。现始终核对持久HostConfig.PortBindings，运行时再核对实际NetworkSettings.Ports；固定容器ID、名称、标签和loopback端口保护均保留。仅恢复专用Host并通过正式返乡清理首轮访问后重跑。新增停机真实形状、错误持久绑定及运行中未发布端口回归，根代理运行gate7项及runner11项共18项通过，语法/diff检查通过。
+
+实际通过访问aff8fd71-2310-40f2-98ad-f0ac51580af1，创建确认messageId=6c01ecf5-539e-42e1-8433-8ae8cabc747d。真实Host创建身体后VISIT_ACTIVE在转发前被拦截，Home保持CONFIRMING且无身体、无该inbox；Host账本ACTIVE、恰有1访客、outbox未ACK。真正docker kill/start同一Host后，原Host playerId保留，持久同messageId再次被拦截；两次drop后release，Home正式inbox COMMITTED且outbox ACK，Home转ACTIVE。随后正常returnVisit，两端COMPLETED、Host身体与reservation清空、同Home playerId/agentId/globalId恢复。
+
+根代理独立正式API后验核对两镇部署身份/epoch未变、全部访问终态、reserved=0、无remoteVisitor、Home原居民/Agent各1且HOME_ACTIVE，模型组合保持。私有回执含212条跨镇顺序位置样本，各样本Home身体数+Host身体数不超过1；这些仍是顺序观察，不夸大为瞬时全局原子证明。本轮无双方对话要求，Host无本地NPC，不能替代既有真实跨镇交谈证据或其他故障阶段验收。实验结束停止两新容器但保留数据库和Git外私有回执，M/N双向探针另行复查。
