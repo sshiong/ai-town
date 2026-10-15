@@ -626,3 +626,15 @@ GPT-6.1-sol medium 子代理完成后端，主代理完成前端并独立运行�
 选择性导出“下载下一块”同样修正：UI计数仍是ordinal，实际请求和文件名改用manifest.chunks[ordinal].index；到任务或manifest末尾不再请求不存在分块，失败不递增计数，可原位置重试。未改目录选择性导出已正确使用描述符的路径，也未改冷历史独立连续格式。
 
 主代理独立运行RAW下载/manifest/bundle/语言4套109项及选择性实际handler4项，共113项通过。覆盖0/7空洞、普通0/1、独立privacy0、逐partAES解密后原字节一致、无效header零文件写入、RPC/目录写失败不成功且可重试、未声明索引不取chunk、任务末尾无重复下载；这是执行实际组件handler和fake目录stream的确定性测试，不冒称本次真实浏览器稀疏文件下载验收。生产构建、类型和diff检查通过，用户N前端同步；未改后端数据或游戏机制。
+
+### 2026-10-16 创建确认丢失的专用实验网关
+
+补充独立实验工具 `scripts/federation-visit-active-fault-gate.mjs`，不接入生产TLS代理。实际Host世界事务创建访客后发送的是VISIT_ACTIVE；VISIT_CONFIRM的HTTP MESSAGE_ACK仅代表传输接收，不能当作创建完成证明。为验证“Host已创建、Home仍不知道”，工具在转发之前断开指定Host→Home的VISIT_ACTIVE连接，锁定第一次匹配的visitId并持续阻断该访次重试，直到显式release。其他消息、其他访次及释放后的请求/响应原字节转发；这与Home已处理消息后仅丢HTTP响应的情景不同。
+
+在Node 20中导入startVisitActiveFaultGate，传入certPath、keyPath、listenPort、upstream、homeTownId及hostTownId，调用arm开始阻断，events读取最多1000条脱敏元数据，release恢复转发，最后await close释放连接。默认只监听127.0.0.1，上游仅允许本机HTTP origin；Docker实验需要明确配置可达监听地址。没有HTTP控制或注入接口，不记录信封、签名、凭据或消息正文。消息体限制与正式协议一致为64KiB，连接/上游超时及关闭均有上限。
+
+主代理独立运行7项真实TLS socket测试通过，覆盖原字节转发、非法JSON透传、定点阻断/重试/释放、无关流量、元数据隐私、大小上限、启动失败、超时、客户端断开及连接清理；原有代理/交谈观察器/资源采样脚本19项测试另通过。M/N正式签名探针均TRANSPORT_READY且无活跃访问。本段仅验证故障工具，不宣称已完成“真实两镇创建确认丢失→Host重启→正常返乡”。
+
+另补独立可执行runner及配置说明 `scripts/federation-visit-active-fault-smoke.md`。只接受显式专用lab标记、固定实验容器命名/标签、预期Town/部署身份、loopback端口以及固定Docker容器ID；初始已有访问、其他可信邻居或Home备用入口绕过gate时拒绝。要求实际账本、Host身体、未确认outbox及Home无inbox证据后才重启Host，释放后核对同messageId正式收件/ACK并正常返乡。finally仅处理本次访问及固定实验Host；创建请求响应丢失时也尝试从原居民唯一新增访问恢复清理。不会改模型绑定或小镇设置，不能直接对现有M/N执行。
+
+根代理最终合并运行5个脚本测试文件36项全通过（原19项、gate7项、runner10项），语法及diff检查通过。runner测试为确定性编排模拟，不冒称实际Docker故障。全量Jest扩展检查在61套通过、未见失败后因历史大数据用例持续耗时超过20分钟而主动中止，退出130；本次不称全量通过，也未删除、跳过测试或降低断言。该扩展检查不再重复，新增脚本由上述独立测试覆盖。
