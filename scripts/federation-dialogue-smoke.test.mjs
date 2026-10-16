@@ -11,6 +11,161 @@ const observerSource = source.slice(
   source.indexOf('async function cleanupVisit('),
 );
 
+// Run the real configuration and fixed-binding preflight with local fixtures.
+// Stop before resident selection and any travel, heartbeat or dialogue reads.
+const preflightSource = source.slice(
+  source.indexOf('  assert.equal(config.towns?.length'),
+  source.indexOf('  const residentGlobalId ='),
+);
+const bindingSource = source.slice(
+  source.indexOf('function modelSnapshot('),
+  source.indexOf('async function probePair('),
+);
+const snapshot = vm.runInNewContext(`${bindingSource}\nmodelSnapshot`);
+
+function snapshotFixture() {
+  return {
+    chatProfiles: [{ _id: 'chat', provider: 'ollama', model: 'qwen3.5:4b', url: 'http://localhost:11434' }],
+    bindings: [{ _id: 'binding', chatProfileId: 'chat', agentGlobalId: 'agent', playerId: 'player', worldId: 'world' }],
+    embeddingProfiles: [{ _id: 'profile', model: 'embedding', dimensions: 768, fingerprint: 'fingerprint' }],
+    embeddingSpaces: [{
+      _id: 'space', _creationTime: 1, createdAt: 1, profileId: 'profile',
+      fingerprint: 'fingerprint', embeddingCertificateId: 'certificate', status: 'ACTIVE',
+    }, {
+      _id: 'inactive', profileId: 'profile', fingerprint: 'fingerprint', status: 'RETIRED',
+    }],
+    settings: { activeEmbeddingSpaceId: 'space', mainChatProfileId: 'chat' },
+  };
+}
+
+test('model snapshot permits background embedding failure and validation progress updates', () => {
+  const before = snapshotFixture();
+  const after = structuredClone(before);
+  Object.assign(before.embeddingSpaces[0], {
+    validatedAt: 10, validationSampleCount: 1, failure: 'old failure',
+    validationJobId: 'old-validation', coverageJobId: 'old-coverage',
+  });
+  Object.assign(after.embeddingSpaces[0], {
+    validatedAt: 20, validationSampleCount: 2, failure: 'background catch-up failure',
+    validationJobId: 'new-validation', coverageJobId: 'new-coverage',
+  });
+  assert.deepEqual(snapshot(after), snapshot(before));
+});
+
+test('model snapshot rejects binding, profile, embedding identity and route changes', () => {
+  const before = snapshotFixture();
+  const changes = [
+    ['bindings', 0, 'chatProfileId', 'other-chat'],
+    ['bindings', 0, 'agentGlobalId', 'other-agent'],
+    ['bindings', 0, 'playerId', 'other-player'],
+    ['bindings', 0, 'worldId', 'other-world'],
+    ['chatProfiles', 0, 'model', 'qwen3.5:9b'],
+    ['chatProfiles', 0, 'provider', 'custom'],
+    ['chatProfiles', 0, 'url', 'http://other.example'],
+    ['embeddingProfiles', 0, 'dimensions', 1024],
+    ['embeddingProfiles', 0, 'model', 'other-model'],
+    ['embeddingProfiles', 0, 'fingerprint', 'other-fingerprint'],
+    ['embeddingSpaces', 0, '_id', 'other-space'],
+    ['embeddingSpaces', 0, 'profileId', 'other-profile'],
+    ['embeddingSpaces', 0, 'fingerprint', 'other-fingerprint'],
+    ['embeddingSpaces', 0, 'embeddingCertificateId', 'other-certificate'],
+    ['embeddingSpaces', 0, 'status', 'FAILED'],
+    ['embeddingSpaces', 1, 'status', 'READY'],
+  ];
+  for (const [table, index, field, value] of changes) {
+    const after = structuredClone(before);
+    after[table][index][field] = value;
+    assert.notDeepEqual(snapshot(after), snapshot(before), `${table}.${field} must remain fixed`);
+  }
+  for (const field of ['activeEmbeddingSpaceId', 'mainChatProfileId']) {
+    const after = structuredClone(before);
+    after.settings[field] = 'other-route';
+    assert.notDeepEqual(snapshot(after), snapshot(before), `${field} must remain fixed`);
+  }
+});
+
+async function preflight(configuredModels, actualModels = ['qwen3.5:4b', 'qwen3.5:4b']) {
+  const fixtureTowns = configuredModels.map((model, index) => ({
+    url: `http://town${index}.example`,
+    adminKey: 'fake-key',
+    adminToken: 'fake-token',
+    ...(model === undefined ? {} : { expectedChatModel: model }),
+  }));
+  const evidence = {};
+  let clientsCreated = 0;
+  const context = vm.createContext({
+    assert,
+    URL,
+    config: { towns: fixtureTowns },
+    towns: [],
+    evidence,
+    EXPECTED_CHAT_MODEL: 'qwen3.5:4b',
+    REQUEST_TIMEOUT_MS: 30_000,
+    process: { env: {} },
+    integerEnvironment: (_name, fallback) => fallback,
+    ConvexHttpClient: class {
+      constructor() { clientsCreated++; }
+      setAdminAuth() {}
+    },
+    status: async (town) => {
+      const index = fixtureTowns.findIndex((t) => t.url === town.url);
+      return {
+        identity: { townId: `town${index}`, deploymentInstanceId: `instance${index}`, mode: 'ACTIVE' },
+        settings: { enabled: true },
+        visits: [],
+        peers: [{ townId: `town${1 - index}`, trustState: 'TRUSTED' }],
+      };
+    },
+    residents: async () => [{ agentGlobalId: 'agent', playerId: 'player', worldId: 'world' }],
+    models: async (town) => ({
+      chatProfiles: [{
+        _id: 'chat', provider: 'ollama', url: 'http://localhost:11434',
+        model: actualModels[fixtureTowns.findIndex((t) => t.url === town.url)],
+      }],
+      bindings: [{
+        _id: 'binding', agentGlobalId: 'agent', playerId: 'player',
+        worldId: 'world', chatProfileId: 'chat',
+      }],
+      embeddingProfiles: [],
+      embeddingSpaces: [{ _id: 'embedding', status: 'ACTIVE' }],
+      settings: { activeEmbeddingSpaceId: 'embedding' },
+    }),
+  });
+  const run = vm.runInContext(
+    `${bindingSource}\n(async () => {\n${preflightSource}\n})`, context,
+  );
+  return { run, evidence, clientsCreated: () => clientsCreated };
+}
+
+test('preflight defaults both towns to the original 4b model', async () => {
+  const s = await preflight([undefined, undefined]);
+  await s.run();
+  assert.deepEqual(Array.from(s.evidence.expectedChatModels), ['qwen3.5:4b', 'qwen3.5:4b']);
+});
+
+test('preflight accepts each town fixed to its configured 4b or 9b model', async () => {
+  const s = await preflight(['qwen3.5:4b', 'qwen3.5:9b'], ['qwen3.5:4b', 'qwen3.5:9b']);
+  await s.run();
+  assert.deepEqual(Array.from(s.evidence.expectedChatModels), ['qwen3.5:4b', 'qwen3.5:9b']);
+});
+
+test('preflight rejects a fixed model that differs from its town expectation', async () => {
+  for (const actual of [['qwen3.5:9b', 'qwen3.5:9b'], ['qwen3.5:4b', 'qwen3.5:4b']]) {
+    const s = await preflight(['qwen3.5:4b', 'qwen3.5:9b'], actual);
+    await assert.rejects(s.run(), /Dialogue requires the fixed chat model/);
+  }
+});
+
+test('preflight rejects invalid model configuration before creating clients', async () => {
+  for (const invalid of ['', '  ', null, 4, {}, [], 'x'.repeat(257)]) {
+    for (const configured of [[invalid, undefined], [undefined, invalid]]) {
+      const s = await preflight(configured);
+      await assert.rejects(s.run(), /Town expectedChatModel must be a nonempty string/);
+      assert.equal(s.clientsCreated(), 0);
+    }
+  }
+});
+
 function scenario({
   tripDeadline = 130_000,
   leaseExpiry = 130_000,

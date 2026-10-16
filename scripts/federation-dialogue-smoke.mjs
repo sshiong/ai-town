@@ -1,5 +1,6 @@
 // Observe real NPC dialogue in two dedicated, independently deployed towns.
 // FEDERATION_TEST_CONFIG uses the same external 0600 JSON as federation-smoke.mjs.
+// Each town may set expectedChatModel (defaults to qwen3.5:4b).
 // Optional: FEDERATION_DIALOGUE_REPORT (external 0600 evidence), FEDERATION_DIALOGUE_HOME_INDEX (0/1),
 // FEDERATION_DIALOGUE_TIMEOUT_MS (whole dialogue phase), FEDERATION_DIALOGUE_ATTEMPTS.
 // FEDERATION_DIALOGUE_RESIDENT_GLOBAL_ID and FEDERATION_DIALOGUE_HOST_RESIDENT_GLOBAL_ID
@@ -22,7 +23,6 @@ const repository = path.resolve(import.meta.dirname, '..');
 const evidence = {
   startedAt: Date.now(),
   requirement: 'one natural NPC conversation with at least two utterances from each participant',
-  expectedChatModel: EXPECTED_CHAT_MODEL,
   attempts: [],
   passed: false,
 };
@@ -108,11 +108,29 @@ function modelSnapshot(value) {
     chatProfiles: stable(value.chatProfiles),
     bindings: stable(value.bindings),
     embeddingProfiles: stable(value.embeddingProfiles),
-    embeddingSpaces: stable(value.embeddingSpaces),
+    // Background indexing may update failure and coverage/validation diagnostics.
+    // Preserve every space's identity, model provenance and lifecycle status.
+    embeddingSpaces: stable(value.embeddingSpaces).map((space) => ({
+      _id: space._id,
+      _creationTime: space._creationTime,
+      createdAt: space.createdAt,
+      profileId: space.profileId,
+      fingerprint: space.fingerprint,
+      embeddingCertificateId: space.embeddingCertificateId,
+      status: space.status,
+    })),
     settings: value.settings,
   };
 }
-function assertFixedBindings(snapshot, residentRows) {
+function configuredChatModel(town) {
+  const model = town.expectedChatModel === undefined ? EXPECTED_CHAT_MODEL : town.expectedChatModel;
+  assert.ok(
+    typeof model === 'string' && model.trim().length > 0 && model.length <= 256,
+    'Town expectedChatModel must be a nonempty string of at most 256 characters',
+  );
+  return model;
+}
+function assertFixedBindings(snapshot, residentRows, expectedChatModel) {
   for (const resident of residentRows) {
     const binding = snapshot.bindings.find(
       (b) =>
@@ -124,7 +142,7 @@ function assertFixedBindings(snapshot, residentRows) {
     const profile = snapshot.chatProfiles.find((p) => p._id === binding.chatProfileId);
     assert.ok(profile, 'Bound resident chat profile must exist');
     assert.equal(profile.provider, 'ollama', 'Dialogue requires actual local Ollama');
-    assert.equal(profile.model, EXPECTED_CHAT_MODEL, 'Dialogue requires the fixed chat model');
+    assert.equal(profile.model, expectedChatModel, 'Dialogue requires the fixed chat model');
     assert.ok(
       [
         'localhost',
@@ -453,6 +471,8 @@ async function main() {
     throw new Error('Cannot parse private federation configuration');
   }
   assert.equal(config.towns?.length, 2, 'Exactly two deployed towns are required');
+  const expectedChatModels = config.towns.map(configuredChatModel);
+  evidence.expectedChatModels = expectedChatModels;
   towns = config.towns.map((town) => {
     assert.ok(
       typeof town.adminKey === 'string' &&
@@ -504,7 +524,9 @@ async function main() {
   evidence.homeTownIndex = homeIndex;
   const residentLists = await Promise.all(towns.map(residents));
   const originalModels = (await Promise.all(towns.map(models))).map(modelSnapshot);
-  originalModels.forEach((snapshot, index) => assertFixedBindings(snapshot, residentLists[index]));
+  originalModels.forEach((snapshot, index) =>
+    assertFixedBindings(snapshot, residentLists[index], expectedChatModels[index]),
+  );
   evidence.fixedBindings = originalModels.map((s) =>
     s.bindings.map(({ agentGlobalId, playerId, chatProfileId }) => ({
       agentGlobalId,

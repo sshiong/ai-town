@@ -656,3 +656,15 @@ GPT-6.1-sol medium 子代理完成后端，主代理完成前端并独立运行�
 正常Host joinWorld创建人类测试角色，通过公开且强制human身份的startConversation/acceptInvite/writeMessage链路与访客交流；未向visitor写入管理员动作或合成回复。实际访问39fae4c9-4045-4ff9-87db-bd00af4c41e1、会话c:5中，双方正常进入participating，真人与访客各2条持久消息。Host聊天入口持续503期间，Home产生7次SUCCESS聊天调用、5个COMMITTED决策，Host成功聊天调用为0；Home原居民绑定完整相同，证明这次访客思考与回复来自Home。本轮是Host真人与Home访客交谈，不是本地NPC自然双方交谈，也未验证两镇不同Chat模型/Embedding维度。
 
 结束通过正式returnVisit及leaveWorld清理，并恢复实验Host原主模型、禁用临时代理配置、关闭代理/TLS监听。后续根代理独立读取正式API确认两镇部署身份未变、全部访问终态、reserved=0、无human/remoteVisitor、Home原playerId及agentId各1，主模型恢复原qwen3.5:4b入口。私有结果和消息原文留在Git外0600文件，仅本段脱敏数量/ID入库。后验检查曾遇实验容器已停止（Home此前1GiB实验限额有OOM记录），确认后短暂启动核对并再次停止、数据保留；这次交谈成功不能证明实验后端长期内存稳定性。没有修改产品代码，未重复扩大回归或用本轮覆盖其他故障阶段。
+
+### 2026-10-16 真实4b/9b异构Chat模型自然NPC交谈
+
+仅复用隔离实验镇，Home居民仍绑定原qwen3.5:4b；Host通过正式save/probe/setMain设置本机已有qwen3.5:9b，正常init首次创建1名当地NPC并核对9b绑定，均关闭自主出访。两镇原bootstrap qwen3-embedding:0.6b/1024空间通过正式validateSpace扫描DONE及activateSpace后作为本轮基线；Home同模型旧ACTIVE保留RETIRED可回滚。没有改用户M/N/O绑定或下载模型。
+
+自然交谈观察脚本新增逐镇可选expectedChatModel，省略仍严格默认4b；外部配置4b/9b逐镇核对，Ollama/本机地址限制、原绑定及模型配置保持、双方各两条、原始持久记录/摘要/签名ACK标准不变。修复原快照将embeddingSpaces.failure、验证时间/计数/作业ID等后台字段变化误判配置变化；空间身份/profile/fingerprint/证书/status及profiles/维度/bindings/active路由仍严格比较。主代理独立运行13项脚本测试通过，包含原7项观察器与6项模型配置/快照回归。
+
+首轮启动因实验空间未ACTIVE在旅行前拒绝；补齐正常激活后又发现宿主LAN已变192.168.2.7，原7.150探针超时，仍未出访。仅实验两镇在保留旧allowlist规则基础上正式追加新地址/32、更新本地endpoint，再在TLS在线时通过peers.updateEndpoint签名核验同步，未放宽网络规则。随后首轮真实访问23e538fe-146f-40f6-bc2a-203650403c9f已完成双方各两条及回传，但finally因上述failure运行字段误判而整体标失败；原失败回执保留，未改写为通过。
+
+修正快照后重新完整实跑，访问dee4eceb-8973-4442-ac47-264937405fc5、会话c:258通过：访客4b与当地NPC9b各2条真实消息，逐条Home/Host原始持久记录相同，COMPLETE transcript、DONE摘要、认证投递ACK，原居民返乡。无人工邀请/移动/说话或合成NPC动作。观察器退出0，固定绑定及Embedding配置保持检查均通过。根代理随后独立正式API核对两镇身份、全部访问终态、reserved=0、无human/visitor、各1名原Agent/居民，5分钟旅行上限已从本轮临时15分钟恢复。
+
+这次仍使用相同Embedding模型/维度，不扩大为不同维度或不同供应商实测。两实验后端各1GiB中Home之后发生OOM退出，后验时按身份校验短暂重启核对，随后两新容器停止且数据保留；短时交谈通过不代表该限额长期可用。实际空间failure记录的modelUsageBuckets事务冲突另行诊断，不能靠快照排除视为已修复。私有聊天原文/回执均留Git外600文件。
