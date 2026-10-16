@@ -648,3 +648,11 @@ GPT-6.1-sol medium 子代理完成后端，主代理完成前端并独立运行�
 实际通过访问aff8fd71-2310-40f2-98ad-f0ac51580af1，创建确认messageId=6c01ecf5-539e-42e1-8433-8ae8cabc747d。真实Host创建身体后VISIT_ACTIVE在转发前被拦截，Home保持CONFIRMING且无身体、无该inbox；Host账本ACTIVE、恰有1访客、outbox未ACK。真正docker kill/start同一Host后，原Host playerId保留，持久同messageId再次被拦截；两次drop后release，Home正式inbox COMMITTED且outbox ACK，Home转ACTIVE。随后正常returnVisit，两端COMPLETED、Host身体与reservation清空、同Home playerId/agentId/globalId恢复。
 
 根代理独立正式API后验核对两镇部署身份/epoch未变、全部访问终态、reserved=0、无remoteVisitor、Home原居民/Agent各1且HOME_ACTIVE，模型组合保持。私有回执含212条跨镇顺序位置样本，各样本Home身体数+Host身体数不超过1；这些仍是顺序观察，不夸大为瞬时全局原子证明。本轮无双方对话要求，Host无本地NPC，不能替代既有真实跨镇交谈证据或其他故障阶段验收。实验结束停止两新容器但保留数据库和Git外私有回执，M/N双向探针另行复查。
+
+### 2026-10-16 Host聊天入口不可用时的真实Home推理与交谈
+
+复用上述两个隔离实验镇，保持Home居民绑定及Embedding不变。仅在无本地NPC的实验Host新增临时qwen3.5:4b配置，其HTTP代理先透传真实Ollama并通过正式probe/setMain，再切换所有聊天请求为503；正式Host probe确实失败，私有代理元数据记录2次503，不记录请求正文。没有关闭宿主共享Ollama或干预用户M/N/O，也没有把Profile禁用等价称为服务故障。
+
+正常Host joinWorld创建人类测试角色，通过公开且强制human身份的startConversation/acceptInvite/writeMessage链路与访客交流；未向visitor写入管理员动作或合成回复。实际访问39fae4c9-4045-4ff9-87db-bd00af4c41e1、会话c:5中，双方正常进入participating，真人与访客各2条持久消息。Host聊天入口持续503期间，Home产生7次SUCCESS聊天调用、5个COMMITTED决策，Host成功聊天调用为0；Home原居民绑定完整相同，证明这次访客思考与回复来自Home。本轮是Host真人与Home访客交谈，不是本地NPC自然双方交谈，也未验证两镇不同Chat模型/Embedding维度。
+
+结束通过正式returnVisit及leaveWorld清理，并恢复实验Host原主模型、禁用临时代理配置、关闭代理/TLS监听。后续根代理独立读取正式API确认两镇部署身份未变、全部访问终态、reserved=0、无human/remoteVisitor、Home原playerId及agentId各1，主模型恢复原qwen3.5:4b入口。私有结果和消息原文留在Git外0600文件，仅本段脱敏数量/ID入库。后验检查曾遇实验容器已停止（Home此前1GiB实验限额有OOM记录），确认后短暂启动核对并再次停止、数据保留；这次交谈成功不能证明实验后端长期内存稳定性。没有修改产品代码，未重复扩大回归或用本轮覆盖其他故障阶段。
