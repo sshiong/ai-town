@@ -684,3 +684,13 @@ GPT-6.1-sol medium 子代理完成后端，主代理完成前端并独立运行�
 O为之前测试克隆，主代理正式API确认无human、无remoteVisitor且全部访问终态后正常testing.stop，再核对既有容器名/端口停止O，保留数据库和配置，释放约2.6GiB。M/N未为此重启或改变容量。实际观察N已存在较多自动重启、内存接近8GiB上限；现有原生backend版本接口返回unknown，当前观察未提供足以分类每次重启的OOM/panic证据，没有凭猜测增加上限或设置未知版本缓存参数，长期内存稳定性仍未关闭。
 
 发现M/N仍公布旧LAN地址192.168.7.150且clock保护未恢复。确认宿主实际192.168.2.7、证书SAN覆盖、容器UTC与宿主一致、无活跃访问后，正式confirmClockRecovery；仅保留既有allowlist并追加新地址/32，通过updateLocalEndpoint与peers.updateEndpoint签名核验同步两端，再probe。身份/epoch/公钥/fingerprint及模型绑定保持。主代理另独立运行双向正式签名probe，确认M/N TRANSPORT_READY、clock healthy、无活跃访问，用户5177/ai-town HTTP200；没有用HTTP200替代联邦验证。私有部署/基线/后验记录留Git外600文件。
+
+### 2026-10-16 后端OOM事件确认与并发worker单变量实验
+
+后续直接查询Docker事件，N过去2小时有30次明确oom事件，随后die/start，证实这些重启与OOM有关；重启后当前State.OOMKilled=false不足以否认历史事件。当前cgroup曾到8GiB峰值，内存主体为原生backend匿名RSS。仍不能仅据此称已定位具体分配来源或内存泄漏。
+
+官方Convex common/knobs.rs说明MAX_ISOLATE_WORKERS为本机环境可覆盖参数；进一步检查实际挂载二进制包含参数，O启动日志明确override=8，N运行metrics isolate_pool_max=8，避免只依据未知版本的最新源码推测。先在无human/访客/活跃访问的O上，保留原容器且restart=no，以同Config/HostConfig/Cmd/卷/身份/端口/3GiB限额仅加MAX_ISOLATE_WORKERS=8。3NPC模拟300秒、11样本实际isolate全8、engine推进299408ms、probe成功、restart0、无队列拒绝/panic，RSS约1.96→2.16GiB。O随后正常testing.stop并停止；docker stop等待30秒后退出137、OOMKilled=false，记录为主动停止超时而非优雅退出或OOM。
+
+N等同进程API恢复后正式核对0human/0visitor/无活跃访问，保存身份/居民/模型配置并testing.stop；停止等待60秒、保留旧容器和回滚脚本，同卷/身份/8GiB限额仅加worker8，不改M。N约93秒冷启动，身份、worldId、居民及模型bindings/settings精确保持，probe成功并resume。运行120秒engine推进约115.5秒、restart0、无匹配队列错误/panic；实际8个isolate，但RSS约7.28→8.01GiB，cgroup末样本8577773568/8589934592字节，仍极接近上限。N数据库约4.23GB、O仅约5MB，不能把O结果推广为N内存已解决；metrics显示当时V8总heap约134MB，也不足以将全部RSS归因worker。
+
+主代理独立复查N的三次5秒间隔engine读数均推进，保存时滞分别约91/4712/741ms，新容器restart0；只证明当时仍运行。worker上限已证实生效，但本轮未解决N高内存，未声称长期稳定或停止OOM。N暂保留运行的新配置、原容器不自动启动以免同卷双开，Git外bounded-n/回滚材料和bounded-o/report均保留，私有文件600；没有删历史数据、改模型、增内存上限或重建镇身份。
