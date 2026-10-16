@@ -676,3 +676,11 @@ GPT-6.1-sol medium 子代理完成后端，主代理完成前端并独立运行�
 非匹配错误或4次耗尽显式MODEL_USAGE_SETTLEMENT_FAILED并保留cause，不静默放行。provider与结算均失败时用固定消息AggregateError保留两层原因，不主动打印私密异常；原finishCall原子幂等及持久DEADLINE/PROVIDER_FAILURE类别不变。持续热点仍可能耗尽并留下unfinished receipt，这次不是持久异步结算设计或无限重试保证。
 
 根代理独立执行usage整套15项通过，包括真实convex-test记账、同receipt响应丢失重试不重复累计、provider/start各一次、额度与tokens/retries、精确退避耗时、非OCC不重试、失败类别和不主动日志；Convex类型检查通过。命令同时传入不存在的embeddingsCache.test.ts路径，Jest实际只执行usage一套，因此不计额外cache集成测试。本段修复尚未部署到运行小镇或在线注入OCC，不扩大声明为现场并发压力已通过。
+
+### 2026-10-16 用量修复部署、本机地址恢复与测试资源收尾
+
+将42b63f5的usage.ts逐份同步到M/N/O既有formal-source，通过明确self-hosted URL/admin key及既有env文件执行convex deploy --typecheck disable --codegen disable，三次均exit0；没有dev/predev或新建默认backend。每镇仅正式probeChat一次，Qwen4b均成功（M413ms/N144ms/O895ms），新SUCCESS/finishedAt receipt及PROFILE成功bucket核对通过。主代理独立读取私有结构化回执再次断言probe成功、SUCCESS receipt和完整settings/profiles/bindings/spaces/identity前后不变。本轮没有在线注入OCC，因此只证明部署和正常真实调用/结算，冲突重试仍由上节确定性测试证明。
+
+O为之前测试克隆，主代理正式API确认无human、无remoteVisitor且全部访问终态后正常testing.stop，再核对既有容器名/端口停止O，保留数据库和配置，释放约2.6GiB。M/N未为此重启或改变容量。实际观察N已存在较多自动重启、内存接近8GiB上限；现有原生backend版本接口返回unknown，当前观察未提供足以分类每次重启的OOM/panic证据，没有凭猜测增加上限或设置未知版本缓存参数，长期内存稳定性仍未关闭。
+
+发现M/N仍公布旧LAN地址192.168.7.150且clock保护未恢复。确认宿主实际192.168.2.7、证书SAN覆盖、容器UTC与宿主一致、无活跃访问后，正式confirmClockRecovery；仅保留既有allowlist并追加新地址/32，通过updateLocalEndpoint与peers.updateEndpoint签名核验同步两端，再probe。身份/epoch/公钥/fingerprint及模型绑定保持。主代理另独立运行双向正式签名probe，确认M/N TRANSPORT_READY、clock healthy、无活跃访问，用户5177/ai-town HTTP200；没有用HTTP200替代联邦验证。私有部署/基线/后验记录留Git外600文件。
