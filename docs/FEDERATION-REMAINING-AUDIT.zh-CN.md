@@ -694,3 +694,13 @@ O为之前测试克隆，主代理正式API确认无human、无remoteVisitor且�
 N等同进程API恢复后正式核对0human/0visitor/无活跃访问，保存身份/居民/模型配置并testing.stop；停止等待60秒、保留旧容器和回滚脚本，同卷/身份/8GiB限额仅加worker8，不改M。N约93秒冷启动，身份、worldId、居民及模型bindings/settings精确保持，probe成功并resume。运行120秒engine推进约115.5秒、restart0、无匹配队列错误/panic；实际8个isolate，但RSS约7.28→8.01GiB，cgroup末样本8577773568/8589934592字节，仍极接近上限。N数据库约4.23GB、O仅约5MB，不能把O结果推广为N内存已解决；metrics显示当时V8总heap约134MB，也不足以将全部RSS归因worker。
 
 主代理独立复查N的三次5秒间隔engine读数均推进，保存时滞分别约91/4712/741ms，新容器restart0；只证明当时仍运行。worker上限已证实生效，但本轮未解决N高内存，未声称长期稳定或停止OOM。N暂保留运行的新配置、原容器不自动启动以免同卷双开，Git外bounded-n/回滚材料和bounded-o/report均保留，私有文件600；没有删历史数据、改模型、增内存上限或重建镇身份。
+
+### 2026-10-16 一致存储快照与PostgreSQL候选基础验证
+
+使用query-database-schema技能只读检查N SQLite物理结构documents/indexes/persistence_globals；计数约189万文档版本、205万索引版本，4.24GB，不能将版本数直接当作当前业务记录数或常驻内存量。实时外部SQLite聚合曾返回SQLITE_CORRUPT，未据此宣布损坏或执行修复。在正式无human/访客/活跃访问前提下，停止同ID N并复制一致原始数据库4,243,873,792字节（无WAL/SHM/journal旁文件），立刻启动原ID；只对另一验证副本运行聚合及quick_check(5)。聚合约19秒成功、完整性检查约51秒单行ok，未复现实时读取错误，不能断言原库损坏。原始副本未打开/写入，文件600/目录700。默认SIGTERM停机等待60秒后曾exit137，已记录而不称优雅退出；N恢复后身份/world/居民一致、engine运行、正式UTC核对及clock恢复成功。
+
+官方Convex源码与未合并PR539指出SQLite max_ts可能经load_documents忽略分页、一次解码整段历史；这提供具体嫌疑，不证明当前未知构建RSS全来自该路径，也不称修复已发布。未擅改retention或删历史。为验证候选方案，当前内存不足时先确认测试M无human/访客/活跃访问，保存设置与身份后正式关闭准入/暂停模拟，并以SIGINT停止同ID M；用户N保持运行。隔离postgres-stage用本地PostgreSQL17.10、独立网络/卷/新密钥和loopback3512/3513，无数据库宿主端口，部署当前相同Convex业务代码，不导入N身份或数据。
+
+首次新target启动出现队列过期，保留失败记录，在同容器等待启动队列后有限重试，未重复创建；最终backend512MiB/2worker、PG384MiB下，真实init0、world/engine查询、暂停→恢复→暂停写读通过，0agent/0player。SQL实际documents/indexes/leases/persistence_globals/read_only表存在，数据库12,875,443字节、PGDATA约66.6MiB；两个候选容器均正常停止exit0且非OOM。主代理独立读取结构化回执再次断言成功、真实状态转换和未导入用户数据。该证据只证明PG-backed候选基础可用，未证明N数据恢复、迁移或真实NPC负载完成。
+
+M随后同ID恢复，身份/居民名单及原准入设置保持。最终联通核对发现N→M失败，根因实际为上一轮worker8重建N仅复用Config/HostConfig而遗漏旧容器可写层的Node运行时/wrapper，Node executor ENOENT使N出站失败，并非M接收异常。已从保留的旧N精确恢复/usr/local/lib/c08-node和/usr/local/bin/node，同handle核对Node v20.20.2；无重配对、重启或代码修改。主代理最终独立正式双向probe确认M/N均TRANSPORT_READY、clock healthy。该遗漏已补充到引擎恢复说明，不将模型probe成功等同Node出站完备。
