@@ -134,22 +134,49 @@ export const finishCall = internalMutation({
   },
 });
 
+const SETTLEMENT_BACKOFF_MS = [100, 300, 900];
+function isSettlementConflict(error: unknown) {
+  return error instanceof Error && error.message.includes(
+    'Documents read from or written to the "modelUsageBuckets" table changed while this mutation was being run and on every subsequent retry.',
+  );
+}
+async function settleCall(ctx: ActionCtx, args: {
+  callId: Id<'modelCallReceipts'>; ok: boolean; totalTokens?: number; retries?: number; errorCode?: string;
+}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await ctx.runMutation(finishRef, args);
+      return;
+    } catch (error) {
+      if (!isSettlementConflict(error) || attempt === SETTLEMENT_BACKOFF_MS.length)
+        throw new Error('MODEL_USAGE_SETTLEMENT_FAILED', { cause: error });
+      // Reuse the receipt and outcome: finishCall atomically ignores duplicate completion.
+      await new Promise(resolve => setTimeout(resolve, SETTLEMENT_BACKOFF_MS[attempt]));
+    }
+  }
+}
 /** A logical request, including transport retries, reserves one daily request slot. */
 export async function trackedModelCall<T extends { retries?: number }>(ctx: ActionCtx, kind: Kind, route: UsageRoute | undefined,
   run: () => Promise<T>, tokens: (result: T) => number | undefined): Promise<T> {
   if (!route) return run(); // Original environment diagnostics have no persisted Profile.
   const admission: { callId: Id<'modelCallReceipts'> | null; deniedReason?: string } = await ctx.runMutation(startRef, { kind, ...route });
   if (!admission.callId) throw new Error(admission.deniedReason);
+  let result: T;
   try {
-    const result = await run(), count = tokens(result);
-    const totalTokens = Number.isSafeInteger(count) && count! >= 0 ? count : undefined;
-    await ctx.runMutation(finishRef, { callId: admission.callId, ok: true, totalTokens, retries: result.retries });
-    return result;
+    result = await run();
   } catch (error) {
-    await ctx.runMutation(finishRef, { callId: admission.callId, ok: false,
-      errorCode: error instanceof Error && error.message === 'CHAT_REQUEST_DEADLINE' ? 'DEADLINE' : 'PROVIDER_FAILURE' });
+    try {
+      await settleCall(ctx, { callId: admission.callId, ok: false,
+        errorCode: error instanceof Error && error.message === 'CHAT_REQUEST_DEADLINE' ? 'DEADLINE' : 'PROVIDER_FAILURE' });
+    } catch (settlementError) {
+      throw new AggregateError([error, settlementError], 'MODEL_CALL_AND_USAGE_SETTLEMENT_FAILED', { cause: error });
+    }
     throw error;
   }
+  const count = tokens(result);
+  const totalTokens = Number.isSafeInteger(count) && count! >= 0 ? count : undefined;
+  await settleCall(ctx, { callId: admission.callId, ok: true, totalTokens, retries: result.retries });
+  return result;
 }
 export const summary = query({
   args: { adminToken: v.string() },

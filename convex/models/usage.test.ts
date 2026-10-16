@@ -1,7 +1,7 @@
 import { jest } from '@jest/globals';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
-import { makeFunctionReference } from 'convex/server';
+import { getFunctionName, makeFunctionReference } from 'convex/server';
 import schema from '../schema';
 import { api, internal } from '../_generated/api';
 import type { Id } from '../_generated/dataModel';
@@ -190,4 +190,102 @@ test('daily quota resets at UTC midnight and Chat quotas are independent of Embe
   expect(rows.filter(row => row.kind === 'CHAT' && row.dimension === 'PROVIDER').map(row => row.started)).toEqual([1, 1]);
   const current = await t.query(api.models.usage.summary, { adminToken });
   expect(current.buckets.every(row => row.succeeded === 0 && row.totalTokens === null && row.unfinished === 1)).toBe(true);
+});
+
+const settlementConflict = () => new Error('Documents read from or written to the "modelUsageBuckets" table changed while this mutation was being run and on every subsequent retry.');
+async function settlementFixture(faults: Array<Error | 'response-lost'>) {
+  const fixture = await setup();
+  const { t, first } = fixture;
+  const profile = (await t.run(ctx => ctx.db.get(first)))!;
+  await t.mutation(api.models.usage.configureProviderQuota, { adminToken, kind: 'CHAT',
+    providerKey: providerUsageKey(profile), maxRequestsPerDay: 1, reason: 'One logical request' });
+  const starts: unknown[] = [], finishes: Array<{ ok: boolean; [key: string]: unknown }> = [];
+  const invoke = <T extends { retries?: number }>(run: () => Promise<T>, tokens: (result: T) => number | undefined) =>
+    t.action(ctx => trackedModelCall({ ...ctx, runMutation: (async (ref, args) => {
+      const name = getFunctionName(ref);
+      if (name === 'models/usage:startCall') starts.push(args);
+      if (name === 'models/usage:finishCall') {
+        finishes.push(args as typeof finishes[number]);
+        const fault = faults.shift();
+        if (fault === 'response-lost') {
+          await ctx.runMutation(ref, args);
+          throw settlementConflict();
+        }
+        if (fault) throw fault;
+      }
+      return ctx.runMutation(ref, args);
+    }) as typeof ctx.runMutation }, 'CHAT', { profileId: first }, run, tokens));
+  return { ...fixture, starts, finishes, invoke };
+}
+async function finishSettlement<T>(promise: Promise<T>) {
+  const outcome = promise.then(value => ({ value, error: undefined }), error => ({ value: undefined, error }));
+  await jest.runAllTimersAsync();
+  return outcome;
+}
+test.each([false, true])('successful provider survives settlement conflict (committed response lost: %s)', async responseLost => {
+  const { t, first, starts, finishes, invoke } = await settlementFixture([responseLost ? 'response-lost' : settlementConflict()]);
+  const result = { retries: 2, tokens: 7 };
+  const run = jest.fn(async () => result);
+  const startedAt = Date.now();
+  expect(await finishSettlement(invoke(run, value => value.tokens))).toEqual({ value: result, error: undefined });
+  expect(Date.now() - startedAt).toBe(100);
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(starts).toHaveLength(1);
+  expect(finishes).toHaveLength(2);
+  expect(finishes[0]).toEqual(finishes[1]);
+  expect(finishes[0]).toMatchObject({ ok: true, totalTokens: 7, retries: 2 });
+  const stats = await t.query(api.models.usage.summary, { adminToken });
+  for (const row of stats.buckets) expect(row).toMatchObject({ started: 1, succeeded: 1, failed: 0,
+    totalTokens: 7, retries: 2, reportedTokenCalls: 1, unknownTokenCalls: 1, unfinished: 0 });
+  expect(await t.mutation(internal.models.usage.startCall, { kind: 'CHAT', profileId: first }))
+    .toMatchObject({ callId: null, deniedReason: 'MODEL_PROVIDER_DAILY_QUOTA_EXCEEDED' });
+});
+test.each([true, false])('settlement fails explicitly without marking successful provider failed (OCC: %s)', async occ => {
+  const fault = occ ? settlementConflict() : new Error('INVALID_MODEL_USAGE');
+  const { t, starts, finishes, invoke } = await settlementFixture(occ ? [fault, fault, fault, fault] : [fault]);
+  const run = jest.fn(async () => ({ retries: 0, tokens: 7 }));
+  const startedAt = Date.now();
+  const outcome = await finishSettlement(invoke(run, value => value.tokens));
+  expect(Date.now() - startedAt).toBe(occ ? 1300 : 0);
+  expect(outcome.error).toMatchObject({ message: 'MODEL_USAGE_SETTLEMENT_FAILED', cause: fault });
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(starts).toHaveLength(1);
+  expect(finishes).toHaveLength(occ ? 4 : 1);
+  expect(finishes.every(args => args.ok && args.totalTokens === 7)).toBe(true);
+  const stats = await t.query(api.models.usage.summary, { adminToken });
+  for (const row of stats.buckets) expect(row).toMatchObject({ started: 1, succeeded: 0, failed: 0, unfinished: 1 });
+  expect(stats.failures).toEqual([]);
+});
+test('provider failure keeps its original error after settlement retry and sanitizes persisted failure', async () => {
+  const { t, starts, finishes, invoke } = await settlementFixture([settlementConflict()]);
+  const providerError = new Error('private-provider-error-sentinel');
+  const run = jest.fn(async (): Promise<{ retries: number }> => { throw providerError; });
+  const outcome = await finishSettlement(invoke(run, () => undefined));
+  expect(outcome.error).toBe(providerError);
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(starts).toHaveLength(1);
+  expect(finishes).toHaveLength(2);
+  expect(finishes[0]).toEqual(finishes[1]);
+  expect(finishes[0]).toMatchObject({ ok: false, errorCode: 'PROVIDER_FAILURE' });
+  const stats = await t.query(api.models.usage.summary, { adminToken });
+  for (const row of stats.buckets) expect(row).toMatchObject({ started: 1, succeeded: 0, failed: 1, unfinished: 0 });
+  expect(JSON.stringify(stats)).not.toContain('private-provider-error-sentinel');
+});
+test('provider and settlement failures retain both causes without logging private errors', async () => {
+  const fault = settlementConflict();
+  const { starts, finishes, invoke } = await settlementFixture([fault, fault, fault, fault]);
+  const providerError = new Error('CHAT_REQUEST_DEADLINE');
+  const log = jest.spyOn(console, 'log'), warn = jest.spyOn(console, 'warn'), errorLog = jest.spyOn(console, 'error');
+  const run = jest.fn(async (): Promise<{ retries: number }> => { throw providerError; });
+  const outcome = await finishSettlement(invoke(run, () => undefined));
+  expect(outcome.error).toBeInstanceOf(AggregateError);
+  expect(outcome.error.cause).toBe(providerError);
+  expect(outcome.error.errors[0]).toBe(providerError);
+  expect(outcome.error.errors[1]).toMatchObject({ message: 'MODEL_USAGE_SETTLEMENT_FAILED', cause: fault });
+  expect(outcome.error.message).toBe('MODEL_CALL_AND_USAGE_SETTLEMENT_FAILED');
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(starts).toHaveLength(1);
+  expect(finishes).toHaveLength(4);
+  expect(finishes.every(args => !args.ok && args.errorCode === 'DEADLINE')).toBe(true);
+  expect(log).not.toHaveBeenCalled(); expect(warn).not.toHaveBeenCalled(); expect(errorLog).not.toHaveBeenCalled();
 });

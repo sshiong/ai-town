@@ -668,3 +668,11 @@ GPT-6.1-sol medium 子代理完成后端，主代理完成前端并独立运行�
 修正快照后重新完整实跑，访问dee4eceb-8973-4442-ac47-264937405fc5、会话c:258通过：访客4b与当地NPC9b各2条真实消息，逐条Home/Host原始持久记录相同，COMPLETE transcript、DONE摘要、认证投递ACK，原居民返乡。无人工邀请/移动/说话或合成NPC动作。观察器退出0，固定绑定及Embedding配置保持检查均通过。根代理随后独立正式API核对两镇身份、全部访问终态、reserved=0、无human/visitor、各1名原Agent/居民，5分钟旅行上限已从本轮临时15分钟恢复。
 
 这次仍使用相同Embedding模型/维度，不扩大为不同维度或不同供应商实测。两实验后端各1GiB中Home之后发生OOM退出，后验时按身份校验短暂重启核对，随后两新容器停止且数据保留；短时交谈通过不代表该限额长期可用。实际空间failure记录的modelUsageBuckets事务冲突另行诊断，不能靠快照排除视为已修复。私有聊天原文/回执均留Git外600文件。
+
+### 2026-10-16 模型成功与用量结算失败的异常边界修复
+
+上述真实运行错误进一步定位到trackedModelCall：原try同时包住provider调用和finishCall(ok:true)，因此成功后的结算事务冲突会落入provider失败catch，再尝试ok:false，既可能误记失败，也会抛弃成功结果使Embedding catchup写入failure。现拆开异常边界，成功结算失败不再提交失败结果；仅对实际出现的modelUsageBuckets OCC精确模板按100/300/900ms退避，共最多4次重试同receipt及相同payload，不重跑provider/start、不重复quota、也不把结算重试混入模型transport retries。
+
+非匹配错误或4次耗尽显式MODEL_USAGE_SETTLEMENT_FAILED并保留cause，不静默放行。provider与结算均失败时用固定消息AggregateError保留两层原因，不主动打印私密异常；原finishCall原子幂等及持久DEADLINE/PROVIDER_FAILURE类别不变。持续热点仍可能耗尽并留下unfinished receipt，这次不是持久异步结算设计或无限重试保证。
+
+根代理独立执行usage整套15项通过，包括真实convex-test记账、同receipt响应丢失重试不重复累计、provider/start各一次、额度与tokens/retries、精确退避耗时、非OCC不重试、失败类别和不主动日志；Convex类型检查通过。命令同时传入不存在的embeddingsCache.test.ts路径，Jest实际只执行usage一套，因此不计额外cache集成测试。本段修复尚未部署到运行小镇或在线注入OCC，不扩大声明为现场并发压力已通过。
