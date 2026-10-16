@@ -704,3 +704,21 @@ N等同进程API恢复后正式核对0human/0visitor/无活跃访问，保存身
 首次新target启动出现队列过期，保留失败记录，在同容器等待启动队列后有限重试，未重复创建；最终backend512MiB/2worker、PG384MiB下，真实init0、world/engine查询、暂停→恢复→暂停写读通过，0agent/0player。SQL实际documents/indexes/leases/persistence_globals/read_only表存在，数据库12,875,443字节、PGDATA约66.6MiB；两个候选容器均正常停止exit0且非OOM。主代理独立读取结构化回执再次断言成功、真实状态转换和未导入用户数据。该证据只证明PG-backed候选基础可用，未证明N数据恢复、迁移或真实NPC负载完成。
 
 M随后同ID恢复，身份/居民名单及原准入设置保持。最终联通核对发现N→M失败，根因实际为上一轮worker8重建N仅复用Config/HostConfig而遗漏旧容器可写层的Node运行时/wrapper，Node executor ENOENT使N出站失败，并非M接收异常。已从保留的旧N精确恢复/usr/local/lib/c08-node和/usr/local/bin/node，同handle核对Node v20.20.2；无重配对、重启或代码修改。主代理最终独立正式双向probe确认M/N均TRANSPORT_READY、clock healthy。该遗漏已补充到引擎恢复说明，不将模型probe成功等同Node出站完备。
+
+
+### 2026-10-17 N完整单文件备份、PG独立恢复与真实交谈
+
+通过正式backupLarge API完成用户N的完整RAW导出kn72hbex8n2641z4nbrwr59sfs8gdza0：50,430条记录、2,670块、单文件26,260,095字节，includeVectors=true。仓库原decodeArchiveBundle/assertArchiveBundleParts验证通过，来源确为N；保留原签名、声明索引与每块原字符串，未以旧M包替代或另跑哈希循环。导出锁释放后先恢复N原enabled/running，再只读下载；身份、模型配置保持，maintenance=false。主代理独立读取私有成品和恢复回执再次断言通过。
+
+保留先前空载PG实验容器/卷，新建独立restore-pgdata及restore-backend-data；新backend为2GiB/8worker，PG384MiB，显式只读挂载Node/wrapper/CA。部署相同业务代码且不init，正式逐表确认68个候选表为空。首次准备脚本遗漏卷名替换，曾短暂挂载旧PG和旧backend-data卷；因新密码被旧PG拒绝，未连接、部署或导入，但旧卷启动/停机元数据可能改变，不称字节级未改。已停下并改为明确的新卷，挂载核对后才执行导入；旧卷未DROP或覆盖。
+
+正式clone导入kn76gxs2v7d2g2hnxm72hj01f18gdgbs经过签名、关系、隐私预检READY，再startApply，最终COMPLETE，回执k97faed5cm08p63t7p965ryh058gcymk。新townId/fingerprint、DISABLED、联邦关闭、模拟暂停、3居民/3Agent。静止正式只读比对通过：2,670个已保存块descriptor与签名manifest一致；50,430个SOURCE行齐全；14,737个实体/全局映射；11,014个稳定行逐字段一致，含7,745消息、地图、居民设定与模型配置；2,036个canonical memories除派生embedding引用外整行映射一致。35,369条历史inputs按既有恢复规则留审计staging，未重新执行旧动作。主代理独立断言数量及比对结果。
+
+沿原本机qwen3.5:4b及qwen3-embedding:0.6b/1024绑定，正式chat/embedding probe成功。归档的派生modelMemoryVectors为0，因此通过正式恢复后台重建2,036记忆的2,036向量；COVERAGE扫描DONE且两计数一致，mainProfile/bindings保持。随后公开joinWorld→startConversation→双方participating→writeMessage，NPC在真人首句之后产生1条非空真实持久化回复。邀请前后位置证明双方实际移动且距离缩短；无管理员移动或合成NPC动作。真人已leave清理，恢复为3居民/3Agent/0human、模拟暂停、联邦关闭。主代理独立读取模型及聊天回执断言通过。
+
+本次运行采样窗口约66秒，PG backend约858.5→894.1MiB，DB约75.3→78.48MiB，均未重启或OOM；PG数据库约986,887,859字节，含导入审计staging，不作为纯业务库大小。样本只证明本次恢复及短时真实交谈，不证明长期稳定，也不是保留同等SQLite历史版本的存储对照实验。原N仍约7.9GiB/8GiB，尚未解决长期OOM，未切换用户N存储。候选backend/DB均SIGINT停止exit0，四个旧/新卷保留；所有私有归档、正文、凭据与回执均留Git外受限文件。
+
+
+收尾恢复M时新增2次明确OOM事件（原6GiB限额），N也新增1次OOM（8GiB限额），不能把这轮PG成功扩大成原运行环境稳定。另发现宿主LAN再次变化，原地址探针CONNECTION_TIMEOUT；保留原CA/server key及旧SAN，补当前地址覆盖，通过正式allowlist追加精确/32、updateLocalEndpoint和peers.updateEndpoint签名验证更新两端，未重新配对或放宽公共网络规则。操作前正式确认无human/visitor/活跃访问，临时暂停两镇。M以同卷/同6GiB cap仅新增MAX_ISOLATE_WORKERS=8；正规停止后本地私有commit完整可写层，旧容器保留restart=no，避免再次遗漏Node/CA。新Config仅Image和worker8预期差异，HostConfig只有Docker对OomKillDisable null→false的等价规范化；实际日志override=8、Node20.20.2、身份/模型/名单保持。该并发调整不称已解决RSS根因或长期OOM。
+
+根代理最后独立正式核对M/N均running、engine运行、原居民/Agent ID保持、无human/visitor/活跃访问、clock healthy；当前LAN双向新签名inbound/outbound证据均TRANSPORT_READY，用户5177页面HTTP200。两镇原准入设置已恢复，PG候选保持停止。调试中一次configure参数缺失的校验错误把N本地admin token带入输出，已正式轮换并更新Git外600凭据文件；未把令牌、原始异常、正文或私有镜像推送仓库。此次只推送脱敏验证记录，无新增产品代码。
