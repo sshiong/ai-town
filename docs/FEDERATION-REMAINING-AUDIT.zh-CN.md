@@ -722,3 +722,12 @@ M随后同ID恢复，身份/居民名单及原准入设置保持。最终联通�
 收尾恢复M时新增2次明确OOM事件（原6GiB限额），N也新增1次OOM（8GiB限额），不能把这轮PG成功扩大成原运行环境稳定。另发现宿主LAN再次变化，原地址探针CONNECTION_TIMEOUT；保留原CA/server key及旧SAN，补当前地址覆盖，通过正式allowlist追加精确/32、updateLocalEndpoint和peers.updateEndpoint签名验证更新两端，未重新配对或放宽公共网络规则。操作前正式确认无human/visitor/活跃访问，临时暂停两镇。M以同卷/同6GiB cap仅新增MAX_ISOLATE_WORKERS=8；正规停止后本地私有commit完整可写层，旧容器保留restart=no，避免再次遗漏Node/CA。新Config仅Image和worker8预期差异，HostConfig只有Docker对OomKillDisable null→false的等价规范化；实际日志override=8、Node20.20.2、身份/模型/名单保持。该并发调整不称已解决RSS根因或长期OOM。
 
 根代理最后独立正式核对M/N均running、engine运行、原居民/Agent ID保持、无human/visitor/活跃访问、clock healthy；当前LAN双向新签名inbound/outbound证据均TRANSPORT_READY，用户5177页面HTTP200。两镇原准入设置已恢复，PG候选保持停止。调试中一次configure参数缺失的校验错误把N本地admin token带入输出，已正式轮换并更新Git外600凭据文件；未把令牌、原始异常、正文或私有镜像推送仓库。此次只推送脱敏验证记录，无新增产品代码。
+
+
+### 2026-10-17 同身份迁移准备：独立加密身份包与离线预检
+
+本轮实际开始时M/N和TLS网关均已停止，宿主LAN又已变化，未沿用上一轮running/READY结论。仅临时启动同ID N，经正式identityRecovery.exportEncryptedIdentity导出独立AES-GCM身份包，口令随机生成并单独保存为Git外600文件；没有冻结源端、初始化第二个活跃同身份实例或签署handoff。导出后通过finally SIGINT停止原ID N，exit0，恢复本轮起始停机状态；其他容器没有启动。首次在线检查已通过签名/解密/私钥挑战及identity比较，随后对动态settings.clock做整对象相等断言失败，保留失败记录，没有把原进程改称全通过。
+
+新增federation-recovery-preflight.mjs作为无网络、无小镇写入的恢复预检：接受原RAW manifest或v1单文件bundle，匹配townId、公钥、指纹及源epoch；验证包与manifest签名、实际解密及私钥挑战。真实N两份产物离线复验成功，对应50,430记录/2,670块。输出明确列出未检查chunkContents/sourceShutdown/targetState/signedHandoff，不以离线通过代替正式导入或交接。仅进行身份指纹必要摘要与签名验证，不循环重算全量数据块哈希。私钥和口令不出现在结果/错误中，输入大小、实际读取、口令文件权限/所有权/符号链接均设边界。
+
+5项回归通过，使用正式生产exportEncryptedIdentity和security.sign生成包，覆盖原manifest/单文件、错镇/错epoch、派生归档拒绝、篡改签名、错误口令、经过正确加密和签名但内含另一私钥、KDF参数、权限/文件上限/符号链接及CLI异常脱敏。测试临时目录finally清理。该提交没有切换用户存储、改变模型或宣称解决N高RSS；独立PG clone不能冒充原身份迁移目标，正式迁移仍须新的一致快照、空目标身份恢复、冻结源端签署handoff及邻居fresh凭证/双向探测。源冻结或交接后不得靠手改mode/epoch恢复旧权威，操作边界已写入脚本说明。
