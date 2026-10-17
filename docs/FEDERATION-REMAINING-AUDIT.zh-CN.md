@@ -731,3 +731,18 @@ M随后同ID恢复，身份/居民名单及原准入设置保持。最终联通�
 新增federation-recovery-preflight.mjs作为无网络、无小镇写入的恢复预检：接受原RAW manifest或v1单文件bundle，匹配townId、公钥、指纹及源epoch；验证包与manifest签名、实际解密及私钥挑战。真实N两份产物离线复验成功，对应50,430记录/2,670块。输出明确列出未检查chunkContents/sourceShutdown/targetState/signedHandoff，不以离线通过代替正式导入或交接。仅进行身份指纹必要摘要与签名验证，不循环重算全量数据块哈希。私钥和口令不出现在结果/错误中，输入大小、实际读取、口令文件权限/所有权/符号链接均设边界。
 
 5项回归通过，使用正式生产exportEncryptedIdentity和security.sign生成包，覆盖原manifest/单文件、错镇/错epoch、派生归档拒绝、篡改签名、错误口令、经过正确加密和签名但内含另一私钥、KDF参数、权限/文件上限/符号链接及CLI异常脱敏。测试临时目录finally清理。该提交没有切换用户存储、改变模型或宣称解决N高RSS；独立PG clone不能冒充原身份迁移目标，正式迁移仍须新的一致快照、空目标身份恢复、冻结源端签署handoff及邻居fresh凭证/双向探测。源冻结或交接后不得靠手改mode/epoch恢复旧权威，操作边界已写入脚本说明。
+
+
+### 2026-10-18 N保留身份的SQLite到PostgreSQL正式迁移
+
+完成新的原N一致RAW导出kn711c6a0jh26sr741k7ef0m658gf0kj：51,234条记录、2,710块、26,672,521字节，保留签名及原分块字符串。首次扩大inputs读取页却未维持每块20行上限，正式manifest校验拒绝INVALID_LARGE_BACKUP_DESCRIPTOR；失败导出已正式取消。0451aa7将读取页200行与输出块最多20行、512KiB字节界限分开，新增真实签名导出及旧cursor续读回归，通过3项定向验证及Convex类型检查；随后重新导出的上述任务成功，不把失败产物改称通过。
+
+新目标使用独立PG/backend卷、2GiB backend及384MiB PostgreSQL，明确只读挂载Node运行时与CA。空目标经加密身份恢复进入MIGRATING_IN，再正式migrate导入kn7bxds089q6yt6hr5bvrt8am18ge5yg至COMPLETE。逐表只读核对51,234个SOURCE行、14,988个映射、11,207个稳定行以及2,072个canonical memories一致，含7,890条原消息；35,919条旧inputs只留审计staging，未重放。原Town、公钥、指纹、居民globalId及核心playerId/agentId保持，部署instance变化、最终epoch为3。
+
+正式模型探测仍为原本机qwen3.5:4b及qwen3-embedding:0.6b/1024；2,072份记忆重建2,072个向量，COVERAGE完成且两计数一致，原主模型和绑定保持。目标尚未获得联邦权威时，公开joinWorld/startConversation/writeMessage链路产生1条真人消息后的实际NPC回复；位置证明确有走近、距离缩短。真人已清理，测试结束恢复暂停和联邦关闭，无管理员移动或合成NPC动作。
+
+之后按prepareTarget→freezeSource→signHandoff→停止源端→activateTarget执行单活交接。原M邻居通过notifyPeer换取新凭证，两端新签名探针成功。旧SQLite源保留为退役、停止且restart=no，不得通过手改mode/epoch重新成为权威。用户5177前端已切换到新PG backend，实际页面HTTP200且加载的Convex地址正确，原名单与身份保留、模拟恢复。第一次源端地址验证曾PRIVATE_ENDPOINT_NOT_AUTHORIZED、一次目标未ready，均在冻结前失败并保留记录；后续完成正式交接，不隐藏这些失败。
+
+本轮重新启动宿主Docker后发现上一轮自然交谈观察进程已消失，该未完成记录不算通过。经正式租约恢复清理遗留访问后，依据当前LAN精确追加/32、签名更新邻居地址；一次更新HTTP400保留失败记录，后续实际签名probe返回200，重试后双方TRANSPORT_READY、clock healthy且无活跃访问，未重配对或放宽网络策略。迁移后重新完整实跑自然NPC交谈，访问83b476a3-96fb-4251-a251-4c00ced837a7、会话c:18568通过：N访客与M当地NPC各2条真实持久消息、两端原文一致、COMPLETE transcript、DONE摘要及认证ACK，原居民返乡，观察器退出0且模型配置保持。根代理随后独立正式API核对两端身份/epoch保持、该访问COMPLETED、全部访问终态、reserved=0、无human/visitor、3名N及2名M原居民均HOME_ACTIVE。不用旧中断记录作证。
+
+M仍使用SQLite，因原6GiB限额接近占满，本次跨镇验证暂增至7GiB并保存原限额，不能称已修复M高RSS或证明长期稳定；N迁移后的短时低RSS也不等于长期稳定。无用户记忆或历史删除。按用户要求已删除废弃PG clone的2个容器、2个卷、1个网络及重复旧N worker容器，保留当前M/N、必要回滚及原始身份/归档备份；现有AI Town私有镜像仍被M使用，不删、不推送。清理后复验当前4个服务容器仍运行。所有凭据、聊天正文、归档与原始回执均在Git外受限目录，仅脱敏记录入库。
