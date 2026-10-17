@@ -825,3 +825,10 @@ M当前API/site为3520/3521，HTTPS 3432路由至3521；N仍3516/3517，HTTPS 34
 自然交流期间另采样145,389ms、13组运行资源：M PG backend采样峰值341.4MiB/2GiB，数据库93.19MiB/384MiB；容器ID和重启计数保持，未OOM，引擎时间前进。该有限窗口覆盖真实跨镇交谈及返乡，不证明长期无增长或任意负载容量。私有证据为 `m-pg-natural-dialogue.private.json`、`bounded-resources.private.json`、`independent-final-proof.private.json`。
 
 M原SQLite历史启动/内存风险已由实际同身份PG迁移替代当前运行路径；没有把旧backend本身宣称已修复。剩余跨实际供应商的P0互操作实测仍缺可用外部服务：本轮原地址 `http://192.168.7.10:18078` 无HTTP响应并连接超时，未修改或冒用用户模型绑定来代替验收。不同Ollama模型、异构Embedding及本轮双PG自然交谈不代替该供应商要求；目标继续保持未完成。
+
+
+### 2026-10-18 按用户纠正核对本机Ollama入口
+
+用户明确当前模型服务为本机Ollama，应检查127本地入口。实际读取 `http://127.0.0.1:11434/api/tags` 成功，qwen3.5:4b及qwen3-embedding:0.6b均存在；127.0.0.1:18078没有Ollama tags响应。当前M/N有效主Chat及所有居民绑定均为ollama/qwen3.5:4b，active Embedding均为ollama/qwen3-embedding:0.6b、1024维；容器经 `http://host.docker.internal:11434` 访问宿主同一Ollama，不应把容器loopback错误改成宿主loopback。逐镇正式Chat和Embedding探测均成功，主配置、居民绑定及活跃空间不变。
+
+旧192.168.7.10:18078不再作为当前用户指定模型的运行入口，其超时不能认定本机模型联调受阻。此前关于缺外部服务的结论只涉及原方案跨实际供应商验收，不能表述成当前本机小镇不可用；本轮本机核对也不扩大为跨实际供应商验证完成。私有脱敏证据为 `local-origin-confirmation-20261018.private.json`。
