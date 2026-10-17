@@ -782,3 +782,12 @@ M仍使用SQLite，因原6GiB限额接近占满，本次跨镇验证暂增至7Gi
 原runner在REAL_HTTPS_400_NOT_CAPTURED断言失败，失败报告保留，未标为通过。根代理另独立读取API及原运行回执：H/C相同Town/公钥、不同instance，独立容器/卷证据齐备；Host持久OPEN冲突为source=MESSAGE，known=原Home、observed=C，包含真实TRANSPORT_PROBE签名证据；Host QUARANTINED且无READY通道。正式startVisit与setPolicy恢复TRUSTED两项均拒绝TOWN_CLONE_CONFLICT；隔离期间引擎running且currentTime/lastStepTs实际前进。C、复制容器、C卷及临时源码均finally删除并确认不存在，原Home恢复。未证明线上精确HTTP冲突码，也不把原runner失败改成成功；这些不影响已独立证实的持久检测、敏感操作阻断和本地模拟继续运行。
 
 先前脚本要求所有历史outbox必须ACK的额外门槛已移除；仍保留无活跃旅行/容量/人类/自治出访、唯一配对及精确容器身份检查，记录历史待确认消息数量，不删除或合成ACK。清理代理关闭可能留下终态协议重试，这不是活跃身体。复核后通过正式resolve(RETAIN_KNOWN,sourceStopped=true)记录处置并撤销旧凭证，重新正式配对及双向探测成功。配对首次因Host禁用、随后60秒限流拒绝均保留，未绕过限制。后续自然交谈采用300秒lease/900秒trip，断联用30秒短租约不再用于多轮交谈。
+
+
+### 2026-10-18 真实1024/384异构Embedding自然交谈与清理
+
+独立Home保持qwen3-embedding:0.6b/1024，Host使用all-minilm:22m/384；两边Chat同为本机qwen3.5:4b。早期实验错误地沿用断联测试30秒lease，且bootstrap漏配reasoningEffort:none；随后真实decision记录EMPTY_CHAT_RESPONSE、finishReason:length、completionTokens:1500。根代理停止无效观察，正常返乡清理后通过正式save/probe/setMain/setResidentChat仅修正实验镇配置（同4b），Embedding路由不动。一次probe因客户端30秒超时失败，暂停实验模拟并用足够客户端等待后探测成功；原失败/中断回执保留，未回写通过。
+
+重新完整实跑访问bd27c3ea-0ebf-4dde-9c22-e438a513a04f、会话c:1851通过：两种实际不同维度空间下，Home访客与Host当地NPC各2条持久原始消息，逐条Home/Host原文相同、transcript COMPLETE、摘要DONE、认证投递ACK、原居民正常返乡。观察器退出0，原固定Chat绑定及本轮起始Embedding配置保持；根代理独立读取回执再次核对双方各2条及返乡，再从正式API确认全部访问终态/reserved0/无human后清理。没有管理员邀请、移动、发言或合成NPC动作。此前4条synthetic反思只用于检索/切换验证，不称其为自然生成记忆；本轮真实会话另有生产回传摘要。
+
+已实际删除该轮2个实验容器、2个数据卷、1个网络，以及此前独立冲突克隆的容器/复制容器/卷/临时源码；测试专用all-minilm:22m已从Ollama删除，正式tags确认用户原qwen Embedding仍存在。浏览器已关闭并删除其临时DOM/日志目录，保留必要脱敏回执、脚本及已检查截图。没有新建或推送Docker镜像，当前仅用户M/N/PG/TLS四服务运行和必要退役/回滚容器保留。异构实测证明不同模型/维度，仍不是不同供应商厂商实测、3–10镇压力或长期运行稳定性证明。
