@@ -791,3 +791,8 @@ M仍使用SQLite，因原6GiB限额接近占满，本次跨镇验证暂增至7Gi
 重新完整实跑访问bd27c3ea-0ebf-4dde-9c22-e438a513a04f、会话c:1851通过：两种实际不同维度空间下，Home访客与Host当地NPC各2条持久原始消息，逐条Home/Host原文相同、transcript COMPLETE、摘要DONE、认证投递ACK、原居民正常返乡。观察器退出0，原固定Chat绑定及本轮起始Embedding配置保持；根代理独立读取回执再次核对双方各2条及返乡，再从正式API确认全部访问终态/reserved0/无human后清理。没有管理员邀请、移动、发言或合成NPC动作。此前4条synthetic反思只用于检索/切换验证，不称其为自然生成记忆；本轮真实会话另有生产回传摘要。
 
 已实际删除该轮2个实验容器、2个数据卷、1个网络，以及此前独立冲突克隆的容器/复制容器/卷/临时源码；测试专用all-minilm:22m已从Ollama删除，正式tags确认用户原qwen Embedding仍存在。浏览器已关闭并删除其临时DOM/日志目录，保留必要脱敏回执、脚本及已检查截图。没有新建或推送Docker镜像，当前仅用户M/N/PG/TLS四服务运行和必要退役/回滚容器保留。异构实测证明不同模型/维度，仍不是不同供应商厂商实测、3–10镇压力或长期运行稳定性证明。
+
+
+### 2026-10-18 用户M/N后端同步后验
+
+在正式API确认用户M/N无human/visitor/活跃旅行、reserved=0后，使用各自明确selfhost地址将64da00e修复同步到N PG与M（未运行dev/predev）。两端部署CLI成功。部署前因宿主Docker中断留下clock不健康；实际docker UTC与宿主差小于3秒、无活跃访问后，正式confirmClockRecovery，再做两轮新签名双向probe。根代理后验确认两端Town/instance/epoch、worldId、原player/agent名单、modelSettings及bindings精确保持，clock healthy、TRANSPORT_READY、engine.running=true；引擎时滞样本N805ms/M70ms，用户5177页面HTTP200。未重新配对、重建用户居民或变更其Embedding。以上为同步后短时检查，仍不证明M SQLite高RSS及长期运行问题已解决。
