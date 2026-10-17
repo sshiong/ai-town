@@ -175,6 +175,54 @@ async function town(memoryCount = 2) {
   return { t, keys, ...ids };
 }
 type Town = Awaited<ReturnType<typeof town>>;
+
+test('input snapshot pagination resumes a smaller legacy page without skipping or replaying inputs', async () => {
+  const s = await town(25);
+  await s.t.run(async ctx => {
+    for (let number = 0; number < 450; number++)
+      await ctx.db.insert('inputs', { engineId: s.engineId, number, name: 'moveTo',
+        args: { playerId: 'p:0', destination: { x: 1, y: 2 } }, received: number + 1 });
+  });
+  const legacy = await s.t.run(ctx => ctx.db.query('inputs').paginate({ cursor: null, numItems: 20 }));
+  expect(legacy.page).toHaveLength(20);
+  const { jobId } = await s.t.mutation(mutation('startExport'), { adminToken });
+  await s.t.run(ctx => ctx.db.patch(jobId, { tableIndex: largeTables.indexOf('inputs'), cursor: legacy.continueCursor }));
+  const numbers = legacy.page.map(row => row.number);
+  for (const expected of [200, 200, 30]) {
+    const page = await s.t.query(query('page'), { jobId });
+    expect(page.rows).toHaveLength(expected);
+    numbers.push(...page.rows.map((row: any) => row.number));
+    await s.t.run(ctx => ctx.db.patch(jobId, { cursor: page.continueCursor }));
+    expect(page.isDone).toBe(expected === 30);
+  }
+  expect(numbers).toEqual(Array.from({ length: 450 }, (_, number) => number));
+  expect(await s.t.run(ctx => ctx.db.query('inputs').collect())).toHaveLength(450);
+  expect((await s.t.run(ctx => ctx.db.get(s.engineId)))?.running).toBe(false);
+  await s.t.run(ctx => ctx.db.patch(jobId, { tableIndex: largeTables.indexOf('memories'), cursor: null }));
+  expect((await s.t.query(query('page'), { jobId })).rows).toHaveLength(20);
+});
+
+test('input snapshot pages retain valid signed 20-row chunks across byte and row splitting', async () => {
+  const s = await town(0);
+  await s.t.run(async ctx => {
+    for (let number = 0; number < 450; number++)
+      await ctx.db.insert('inputs', { engineId: s.engineId, number, name: 'moveTo',
+        args: { note: number === 225 || number === 226 ? '大'.repeat(100000) : 'audit-only' }, received: number + 1 });
+  });
+  const archive = await exported(s.t);
+  await expect(validateManifest(archive.manifest, archive.signature)).resolves.toBeUndefined();
+  const chunks = archive.chunks.filter(chunk => chunk.table === 'inputs');
+  expect(chunks.length).toBeGreaterThanOrEqual(23);
+  expect(chunks.every(chunk => chunk.rows.length <= 20 && size(chunk) <= MAX_CHUNK_BYTES)).toBe(true);
+  const firstLarge = chunks.find(chunk => chunk.rows.some(row => decodeRow(row).number === 225));
+  expect(firstLarge).toBeDefined();
+  expect(firstLarge!.rows.some(row => decodeRow(row).number === 226)).toBe(false);
+  expect(chunks.flatMap(chunk => chunk.rows.map(row => decodeRow(row).number)))
+    .toEqual(Array.from({ length: 450 }, (_, number) => number));
+  expect(await s.t.run(ctx => ctx.db.query('inputs').collect())).toHaveLength(450);
+  expect((await s.t.run(ctx => ctx.db.get(s.engineId)))?.running).toBe(false);
+});
+
 const historyAction = (name: string) => makeFunctionReference<'action'>(`federation/${name}`);
 const historyQuery = (name: string) => makeFunctionReference<'query'>(`federation/${name}`);
 async function coldConversation(source: Town, firstMessage?: string, count = 3, chunked = false) {

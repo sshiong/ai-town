@@ -196,7 +196,10 @@ export const page = internalQuery({
       return { table: name, rows: [], page: [], isDone: true, continueCursor: '' };
     const result = await ctx.db
       .query(table(name))
-      .paginate({ cursor: job.cursor, numItems: 20, maximumBytesRead: TARGET_CHUNK_BYTES });
+      // Input snapshots are audit records, not live actions to replay. Larger
+      // pages avoid one round trip per 20 tiny inputs while retaining the byte
+      // limit and normal chunk splitting. Other tables keep their existing bound.
+      .paginate({ cursor: job.cursor, numItems: name === 'inputs' ? 200 : 20, maximumBytesRead: TARGET_CHUNK_BYTES });
     const rows: BackupRow[] = name === 'modelMemoryVectors' && !a.capture
       ? (await Promise.all(result.page.map(row => portableVector(ctx.db, row as Doc<'modelMemoryVectors'>, true)))).filter((row): row is NonNullable<typeof row> => !!row)
       : result.page.map(row => sanitizeLargeValue(row));
@@ -441,11 +444,11 @@ export const advanceExport = action({
           const encoded = encodeRow(row);
           if (
             current.length &&
-            size({
+            (current.length >= 20 || size({
               index: job.chunkCount + groups.length - 1,
               table: page.table,
               rows: [...current, encoded],
-            }) > TARGET_CHUNK_BYTES
+            }) > TARGET_CHUNK_BYTES)
           ) {
             current = [];
             groups.push(current);
