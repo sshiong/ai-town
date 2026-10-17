@@ -65,3 +65,10 @@ Ready 只证明时间窗口内经过认证的双向 Direct 路由，不证明任
 完成对话新增独立分页历史流与持久 ACK 等待；真实最后页 ACK 丢失后幂等重试通过。
 这些管理员驱动的引擎检查没有改模型绑定，也不代替真实 claw 自主交流验收。
 完整最新记录见 `FEDERATION-VALIDATION.zh-CN.md`；其余未验证项继续保留。
+
+
+## 指定真实 Chat 提供商的自然交谈观察
+
+`scripts/federation-dialogue-smoke.mjs` 的 Git 外 0600 配置可逐镇声明 `expectedChatProvider`、`expectedChatModel`、`expectedChatOrigin`。省略时仍要求本机 Ollama 的 `qwen3.5:4b`；非 Ollama 必须三项显式声明，提供商取 `openai`、`together` 或 `custom`。`expectedChatOrigin` 必须是精确 origin（例如 `https://api.example.com`），不包含路径、查询、片段或用户凭据。云入口要求 HTTPS，custom HTTP 仅接受明确的 loopback 入口。
+
+观察器逐居民核对实际绑定的提供商、模型及 origin；报告只记这三项，不记 endpoint 路径、API key。接口适配器名称不证明背后真实供应商不同，验收仍需实际服务归属和调用证据。提供商选项不会放宽双方各两条真实消息、原始历史一致、摘要、认证投递、绑定保持和原居民返乡要求。改变配置标签、同一 Ollama 的代理别名或单元测试通过都不算跨供应商实测。

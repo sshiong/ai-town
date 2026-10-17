@@ -1,6 +1,9 @@
 // Observe real NPC dialogue in two dedicated, independently deployed towns.
 // FEDERATION_TEST_CONFIG uses the same external 0600 JSON as federation-smoke.mjs.
-// Each town may set expectedChatModel (defaults to qwen3.5:4b).
+// Defaults: local Ollama qwen3.5:4b. Each town may set expectedChatModel.
+// Non-Ollama requires explicit expectedChatProvider, expectedChatModel and
+// expectedChatOrigin (exact HTTP(S) origin, no path or credentials).
+// Cloud origins require HTTPS; custom HTTP is restricted to explicit loopback.
 // Optional: FEDERATION_DIALOGUE_REPORT (external 0600 evidence), FEDERATION_DIALOGUE_HOME_INDEX (0/1),
 // FEDERATION_DIALOGUE_TIMEOUT_MS (whole dialogue phase), FEDERATION_DIALOGUE_ATTEMPTS.
 // FEDERATION_DIALOGUE_RESIDENT_GLOBAL_ID and FEDERATION_DIALOGUE_HOST_RESIDENT_GLOBAL_ID
@@ -130,7 +133,37 @@ function configuredChatModel(town) {
   );
   return model;
 }
-function assertFixedBindings(snapshot, residentRows, expectedChatModel) {
+function chatUrl(value, label) {
+  let url;
+  try { url = new URL(value); } catch { throw new Error(`${label} must be an HTTP(S) URL`); }
+  assert.ok(['http:', 'https:'].includes(url.protocol) && !url.username && !url.password,
+    `${label} must be HTTP(S) without userinfo`);
+  return url;
+}
+function configuredChatExpectation(town) {
+  const provider = town.expectedChatProvider === undefined ? 'ollama' : town.expectedChatProvider;
+  assert.ok(['ollama', 'openai', 'together', 'custom'].includes(provider),
+    'Town expectedChatProvider must be a supported provider');
+  if (provider !== 'ollama') {
+    assert.ok(town.expectedChatModel !== undefined && town.expectedChatOrigin !== undefined,
+      'Non-Ollama requires explicit expectedChatProvider, expectedChatModel and expectedChatOrigin');
+  }
+  const model = configuredChatModel(town);
+  let origin;
+  if (town.expectedChatOrigin !== undefined) {
+    assert.equal(typeof town.expectedChatOrigin, 'string', 'Town expectedChatOrigin must be a string');
+    const url = chatUrl(town.expectedChatOrigin, 'Town expectedChatOrigin');
+    assert.ok(town.expectedChatOrigin === url.origin,
+      'Town expectedChatOrigin must be an exact origin without path, query or hash');
+    const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    assert.ok(url.protocol === 'https:' || provider === 'ollama' || (provider === 'custom' && loopback),
+      'Cloud chat origins require HTTPS; custom HTTP requires explicit loopback');
+    origin = url.origin;
+  }
+  return { provider, model, origin };
+}
+function assertFixedBindings(snapshot, residentRows, expectation) {
+  const observed = [];
   for (const resident of residentRows) {
     const binding = snapshot.bindings.find(
       (b) =>
@@ -141,24 +174,25 @@ function assertFixedBindings(snapshot, residentRows, expectedChatModel) {
     assert.ok(binding, 'Every resident needs its original fixed model binding');
     const profile = snapshot.chatProfiles.find((p) => p._id === binding.chatProfileId);
     assert.ok(profile, 'Bound resident chat profile must exist');
-    assert.equal(profile.provider, 'ollama', 'Dialogue requires actual local Ollama');
-    assert.equal(profile.model, expectedChatModel, 'Dialogue requires the fixed chat model');
-    assert.ok(
-      [
-        'localhost',
-        '127.0.0.1',
-        '::1',
-        '[::1]',
-        'host.docker.internal',
-        'gateway.docker.internal',
-      ].includes(new URL(profile.url).hostname),
-      'Ollama chat binding must point to the local machine',
-    );
+    assert.equal(profile.provider, expectation.provider, 'Dialogue requires the expected chat provider');
+    assert.equal(profile.model, expectation.model, 'Dialogue requires the fixed chat model');
+    const url = chatUrl(profile.url, 'Bound chat URL');
+    if (expectation.origin !== undefined) {
+      assert.equal(url.origin, expectation.origin, 'Dialogue requires the exact expected chat origin');
+    } else {
+      assert.ok(
+        ['localhost', '127.0.0.1', '::1', '[::1]', 'host.docker.internal', 'gateway.docker.internal']
+          .includes(url.hostname),
+        'Ollama chat binding must point to the local machine',
+      );
+    }
+    observed.push({ provider: profile.provider, model: profile.model, origin: url.origin });
   }
   const active = snapshot.embeddingSpaces.find(
     (s) => s._id === snapshot.settings?.activeEmbeddingSpaceId,
   );
   assert.ok(active && active.status === 'ACTIVE', 'An existing active embedding space is required');
+  return observed;
 }
 async function probePair(identities) {
   for (let index = 0; index < 2; index++) {
@@ -471,7 +505,8 @@ async function main() {
     throw new Error('Cannot parse private federation configuration');
   }
   assert.equal(config.towns?.length, 2, 'Exactly two deployed towns are required');
-  const expectedChatModels = config.towns.map(configuredChatModel);
+  const expectedChat = config.towns.map(configuredChatExpectation);
+  const expectedChatModels = expectedChat.map((chat) => chat.model);
   evidence.expectedChatModels = expectedChatModels;
   towns = config.towns.map((town) => {
     assert.ok(
@@ -524,8 +559,8 @@ async function main() {
   evidence.homeTownIndex = homeIndex;
   const residentLists = await Promise.all(towns.map(residents));
   const originalModels = (await Promise.all(towns.map(models))).map(modelSnapshot);
-  originalModels.forEach((snapshot, index) =>
-    assertFixedBindings(snapshot, residentLists[index], expectedChatModels[index]),
+  evidence.chatBindings = originalModels.map((snapshot, index) =>
+    assertFixedBindings(snapshot, residentLists[index], expectedChat[index]),
   );
   evidence.fixedBindings = originalModels.map((s) =>
     s.bindings.map(({ agentGlobalId, playerId, chatProfileId }) => ({

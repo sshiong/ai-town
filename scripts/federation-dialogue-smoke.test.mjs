@@ -89,7 +89,8 @@ async function preflight(configuredModels, actualModels = ['qwen3.5:4b', 'qwen3.
     url: `http://town${index}.example`,
     adminKey: 'fake-key',
     adminToken: 'fake-token',
-    ...(model === undefined ? {} : { expectedChatModel: model }),
+    ...(model !== null && typeof model === 'object' && !Array.isArray(model) ? model :
+      model === undefined ? {} : { expectedChatModel: model }),
   }));
   const evidence = {};
   let clientsCreated = 0;
@@ -120,7 +121,9 @@ async function preflight(configuredModels, actualModels = ['qwen3.5:4b', 'qwen3.
     models: async (town) => ({
       chatProfiles: [{
         _id: 'chat', provider: 'ollama', url: 'http://localhost:11434',
-        model: actualModels[fixtureTowns.findIndex((t) => t.url === town.url)],
+        ...(typeof actualModels[fixtureTowns.findIndex((t) => t.url === town.url)] === 'object'
+          ? actualModels[fixtureTowns.findIndex((t) => t.url === town.url)]
+          : { model: actualModels[fixtureTowns.findIndex((t) => t.url === town.url)] }),
       }],
       bindings: [{
         _id: 'binding', agentGlobalId: 'agent', playerId: 'player',
@@ -159,10 +162,94 @@ test('preflight rejects a fixed model that differs from its town expectation', a
 test('preflight rejects invalid model configuration before creating clients', async () => {
   for (const invalid of ['', '  ', null, 4, {}, [], 'x'.repeat(257)]) {
     for (const configured of [[invalid, undefined], [undefined, invalid]]) {
-      const s = await preflight(configured);
+      const s = await preflight(configured.map((value) => value === undefined ? undefined : { expectedChatModel: value }));
       await assert.rejects(s.run(), /Town expectedChatModel must be a nonempty string/);
       assert.equal(s.clientsCreated(), 0);
     }
+  }
+});
+
+const cloudExpectation = {
+  expectedChatProvider: 'openai', expectedChatModel: 'cloud-model',
+  expectedChatOrigin: 'https://api.example.com',
+};
+const cloudProfile = {
+  provider: 'openai', model: 'cloud-model', url: 'https://api.example.com/private/token-path',
+  apiKeyEnv: 'PRIVATE_KEY_NAME', apiKey: 'private-api-key',
+};
+
+test('preflight accepts explicit cloud provider and records only provider, model and origin', async () => {
+  const s = await preflight([undefined, cloudExpectation], ['qwen3.5:4b', cloudProfile]);
+  await s.run();
+  assert.deepEqual(JSON.parse(JSON.stringify(s.evidence.chatBindings)), [
+    [{ provider: 'ollama', model: 'qwen3.5:4b', origin: 'http://localhost:11434' }],
+    [{ provider: 'openai', model: 'cloud-model', origin: 'https://api.example.com' }],
+  ]);
+  assert.doesNotMatch(JSON.stringify(s.evidence), /token-path|PRIVATE_KEY_NAME|private-api-key/);
+});
+
+test('preflight rejects provider, model and origin mismatches', async () => {
+  for (const change of [{ provider: 'together' }, { model: 'other' },
+    { url: 'https://other.example.com' }, { url: 'https://api.example.com:8443' },
+    { url: 'http://api.example.com' }]) {
+    const s = await preflight([undefined, cloudExpectation], ['qwen3.5:4b', { ...cloudProfile, ...change }]);
+    await assert.rejects(s.run(), /Dialogue requires/);
+  }
+});
+
+test('non-Ollama config requires explicit model and origin before creating clients', async () => {
+  for (const missing of ['expectedChatModel', 'expectedChatOrigin']) {
+    const config = { ...cloudExpectation };
+    delete config[missing];
+    const s = await preflight([config, undefined]);
+    await assert.rejects(s.run(), /Non-Ollama requires explicit/);
+    assert.equal(s.clientsCreated(), 0);
+  }
+});
+
+test('preflight rejects invalid or non-origin expectations without exposing their contents', async () => {
+  for (const origin of [null, 4, '', 'not-a-url', 'ftp://api.example.com',
+    'https://user:secret@api.example.com', 'https://api.example.com/',
+    'https://api.example.com/private-secret', 'https://api.example.com?secret=1',
+    'https://api.example.com#secret', 'http://api.example.com', 'http://localhost:9999']) {
+    const s = await preflight([{ ...cloudExpectation, expectedChatOrigin: origin }, undefined]);
+    await assert.rejects(s.run(), (error) => {
+      assert.doesNotMatch(error.message, /private-secret|user:secret|secret=1|#secret/);
+      return /origin|Origin|HTTP|HTTPS/.test(error.message);
+    });
+    assert.equal(s.clientsCreated(), 0);
+  }
+});
+
+test('custom HTTP requires an explicit loopback origin', async () => {
+  for (const origin of ['http://localhost:9999', 'http://127.0.0.1:9999', 'http://[::1]:9999']) {
+    const s = await preflight([{ ...cloudExpectation, expectedChatProvider: 'custom', expectedChatOrigin: origin }, undefined],
+      [{ ...cloudProfile, provider: 'custom', url: origin }, 'qwen3.5:4b']);
+    await s.run();
+  }
+  for (const origin of ['http://host.docker.internal:9999', 'http://192.168.1.1:9999', 'http://cloud.example']) {
+    const s = await preflight([{ ...cloudExpectation, expectedChatProvider: 'custom', expectedChatOrigin: origin }, undefined]);
+    await assert.rejects(s.run(), /custom HTTP requires explicit loopback/);
+    assert.equal(s.clientsCreated(), 0);
+  }
+});
+
+test('default still rejects remote Ollama, cloud provider and changed default model', async () => {
+  for (const change of [{ url: 'https://remote.example.com' }, { provider: 'openai' }, { model: 'other' },
+    { url: 'https://user:secret@localhost/private' }, { url: 'invalid-secret-url' }]) {
+    const s = await preflight([undefined, undefined], [{ model: 'qwen3.5:4b', ...change }, 'qwen3.5:4b']);
+    await assert.rejects(s.run(), (error) => {
+      assert.doesNotMatch(error.message, /user:secret|invalid-secret-url/);
+      return true;
+    });
+  }
+});
+
+test('unsupported providers reject before creating clients', async () => {
+  for (const provider of [null, '', 'unknown', {}, 4]) {
+    const s = await preflight([{ ...cloudExpectation, expectedChatProvider: provider }, undefined]);
+    await assert.rejects(s.run(), /supported provider/);
+    assert.equal(s.clientsCreated(), 0);
   }
 });
 
