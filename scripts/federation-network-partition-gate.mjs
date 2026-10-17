@@ -4,6 +4,19 @@ import https from 'node:https';
 import { readFile } from 'node:fs/promises';
 import { MESSAGE_MAX_BYTES } from './federation-visit-active-fault-gate.mjs';
 
+// Diagnostic metadata only. Unknown/wrapped server text is never promoted to a
+// protocol success code, and raw response text never enters the report.
+export function decodePartitionRefusal(bytes) {
+  let value;
+  try { value = JSON.parse(bytes.toString('utf8')); }
+  catch { return { reason: 'UNEXPECTED_RESPONSE', responseFormat: 'non-json', responseBytes: bytes.length }; }
+  const error = value?.error;
+  const isCode = typeof error === 'string' && /^[A-Z_]{1,80}$/.test(error);
+  return { reason: isCode ? error : 'UNEXPECTED_RESPONSE', responseFormat: isCode ? 'json-error-code'
+    : typeof error === 'string' ? 'json-error-text' : error && typeof error === 'object' ? 'json-error-object' : 'json-without-error',
+    responseBytes: bytes.length };
+}
+
 export async function startNetworkPartitionGate(config) {
   const target = new URL(config.upstream);
   if (target.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname) ||
@@ -111,9 +124,8 @@ export async function startNetworkPartitionGate(config) {
             });
             response.on('error', reject);
             response.on('end', () => {
-              let error;
-              try { error = JSON.parse(Buffer.concat(chunks).toString('utf8')).error; } catch { /* No arbitrary body is retained. */ }
-              resolve({ status: response.statusCode, reason: /^[A-Z_]{1,80}$/.test(error ?? '') ? error : 'UNEXPECTED_RESPONSE',
+              const decoded = decodePartitionRefusal(Buffer.concat(chunks));
+              resolve({ status: response.statusCode, ...decoded,
                 visitId: packet.visitId, messageId: packet.messageId });
             });
           });

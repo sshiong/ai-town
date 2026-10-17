@@ -139,7 +139,7 @@ create and never runs Docker prune.
 ```sh
 node --check scripts/federation-network-partition-gate.mjs
 node --check scripts/federation-network-partition-smoke.mjs
-node --test scripts/federation-network-partition-smoke.test.mjs
+node --test scripts/federation-network-partition-smoke.test.mjs scripts/federation-network-partition-gate.test.mjs
 ```
 
 These deterministic tests do not start sockets, Docker or real towns. They verify
@@ -159,3 +159,15 @@ still-valid envelope can reach VISIT_LEASE_EXPIRED after Host reconciliation.
 The runner does not count MESSAGE_EXPIRED or a generic terminal-state response
 as proof of that guard; either fails this specific lease scenario. This call-path
 review and deterministic orchestration coverage are not a real deployment test.
+
+
+For an isolated retry of scenario 3, explicitly add this field to a new private
+config copy: `"scenarios": ["late-signed-confirm-rejected"]`. Omission runs all
+three; empty, duplicate and unknown selections fail before any operation. Select
+a new report filename so the earlier two scenarios' evidence remains intact.
+`requestedScenarios` records this limited scope; a passing selected run proves
+only its listed scenarios. Before asserting the late response, the runner syncs
+`lateAuthorizationAttempt` with the HTTP status, exact code (or
+UNEXPECTED_RESPONSE), response shape/size, visit/message IDs and timing. Unknown
+server text, nested error objects and wrapped substrings never count as lease
+rejection evidence, and no raw response body is retained.

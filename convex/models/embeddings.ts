@@ -485,10 +485,15 @@ async function assertScanCurrent(ctx: MutationCtx, job: Doc<'embeddingScanJobs'>
   if (job.sourceRevision !== current.sourceRevision || job.vectorRevision !== current.vectorRevision)
     throw new Error('EMBEDDING_SOURCE_CHANGED');
 }
-async function verifyMemoryVector(ctx: MutationCtx, memory: Doc<'memories'>, spaceId: Id<'embeddingSpaces'>, dimensions: number) {
+async function verifyMemoryVector(ctx: MutationCtx, memory: Doc<'memories'>, spaceId: Id<'embeddingSpaces'>, dimensions: number, allowMissing?: false): Promise<Doc<'modelMemoryVectors'>>;
+async function verifyMemoryVector(ctx: MutationCtx, memory: Doc<'memories'>, spaceId: Id<'embeddingSpaces'>, dimensions: number, allowMissing: true): Promise<Doc<'modelMemoryVectors'> | null>;
+async function verifyMemoryVector(ctx: MutationCtx, memory: Doc<'memories'>, spaceId: Id<'embeddingSpaces'>, dimensions: number, allowMissing = false) {
   const vector = await ctx.db.query('modelMemoryVectors')
     .withIndex('memory_space', q => q.eq('memoryId', memory._id).eq('spaceId', spaceId)).unique();
-  if (!vector) throw new Error('EMBEDDING_COVERAGE_INCOMPLETE');
+  if (!vector) {
+    if (allowMissing) return null;
+    throw new Error('EMBEDDING_COVERAGE_INCOMPLETE');
+  }
   validateVector(vector.embedding, dimensions);
   await assertVectorCertificate(ctx.db, spaceId, vector.embeddingCertificateId);
   if (!memory.worldId || vector.playerId !== memory.playerId || vector.worldId !== memory.worldId ||
@@ -510,9 +515,26 @@ async function advanceScan(ctx: MutationCtx, jobId: Id<'embeddingScanJobs'>) {
       // Exactly one paginate call per mutation. Later phases use separate transactions.
       const page = await ctx.db.query('memories').paginate({ cursor: job.cursor, numItems: SCAN_PAGE_SIZE, maximumBytesRead: 512000 });
       const samples = [...job.sampleMemoryIds];
+      const missingMemoryIds: Id<'memories'>[] = [];
+      const buildingCoverage = job.kind === 'COVERAGE' && route?.status === 'BUILDING' && route.coverageJobId === job._id;
       for (const memory of page.page) {
-        if (job.spaceId) await verifyMemoryVector(ctx, memory, job.spaceId, profile!.dimensions);
+        if (job.spaceId && !await verifyMemoryVector(ctx, memory, job.spaceId, profile!.dimensions, true)) {
+          if (!buildingCoverage) throw new Error('EMBEDDING_COVERAGE_INCOMPLETE');
+          missingMemoryIds.push(memory._id);
+        }
         if (samples.length < 3) samples.push(memory._id);
+      }
+      if (missingMemoryIds.length) {
+        if (job.restarts >= 3) throw new Error('EMBEDDING_COVERAGE_INCOMPLETE');
+        // A source can commit after the final rebuild page but before coverage starts.
+        // Persist the shared retry budget and repair dispatch together; keep old routing.
+        await ctx.db.patch(jobId, { phase: 'MEMORIES', cursor: null, memoryCount: 0, vectorCount: 0,
+          sampleIndex: 0, sampleMemoryIds: [], queryVector: undefined, sampleCount: 0,
+          restarts: job.restarts + 1, updatedAt: Date.now() });
+        await ctx.scheduler.runAfter(0, internal.models.embeddings.repairCoverage, {
+          jobId, attempt: job.restarts + 1, memoryIds: missingMemoryIds,
+        });
+        return true;
       }
       patch.memoryCount = job.memoryCount + page.page.length;
       patch.sampleMemoryIds = samples;
@@ -581,15 +603,68 @@ async function advanceScan(ctx: MutationCtx, jobId: Id<'embeddingScanJobs'>) {
       await ctx.db.patch(jobId, { phase: 'FAILED', failure, updatedAt: Date.now() });
       const space = job.spaceId && await ctx.db.get(job.spaceId);
       if (space && (space.validationJobId === job._id || space.coverageJobId === job._id))
-        await ctx.db.patch(space._id, { failure, validatedAt: undefined, validationSampleCount: undefined });
+        await ctx.db.patch(space._id, { failure, validatedAt: undefined, validationSampleCount: undefined,
+          ...(job.kind === 'COVERAGE' && space.status === 'BUILDING' && job.restarts >= 3 &&
+            (failure.includes('EMBEDDING_COVERAGE_INCOMPLETE') || failure.includes('EMBEDDING_SOURCE_CHANGED'))
+            ? { status: 'FAILED' as const } : {}) });
     }
   }
 }
 export const advanceScanPage = internalMutation({
   args: { jobId: v.id('embeddingScanJobs') },
   handler: async (ctx, args) => {
-    await advanceScan(ctx, args.jobId);
-    return ctx.db.get(args.jobId);
+    const repairScheduled = await advanceScan(ctx, args.jobId);
+    const job = await ctx.db.get(args.jobId);
+    return job && { ...job, repairScheduled: !!repairScheduled };
+  },
+});
+export const resumeCoverageScan = internalMutation({
+  args: { jobId: v.id('embeddingScanJobs'), attempt: v.number() },
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.jobId), space = job?.spaceId && await ctx.db.get(job.spaceId);
+    if (!job || job.kind !== 'COVERAGE' || job.phase !== 'MEMORIES' || job.restarts !== args.attempt ||
+      !space || space.status !== 'BUILDING' || space.coverageJobId !== job._id) return;
+    // Repair writes advance vector revisions; certify a fresh full scan after those writes.
+    await ctx.db.patch(job._id, { ...await scanRevisions(ctx, job.spaceId), updatedAt: Date.now() });
+    await ctx.scheduler.runAfter(0, internal.models.embeddings.scanWork, { jobId: job._id });
+  },
+});
+export const repairCoverage = internalAction({
+  args: { jobId: v.id('embeddingScanJobs'), attempt: v.number(), memoryIds: v.array(v.id('memories')) },
+  handler: async (ctx, args): Promise<void> => {
+    if (!args.memoryIds.length || args.memoryIds.length > SCAN_PAGE_SIZE) throw new Error('INVALID_COVERAGE_REPAIR_PAGE');
+    const job = await ctx.runQuery(internal.models.embeddings.scanJob, { jobId: args.jobId });
+    if (!job?.spaceId || job.kind !== 'COVERAGE' || job.phase !== 'MEMORIES' || job.restarts !== args.attempt) return;
+    try {
+      const route = await ctx.runQuery(internal.models.embeddings.getRoute, { spaceId: job.spaceId });
+      if (route.space.status !== 'BUILDING' || route.space.coverageJobId !== job._id) return;
+      const budget = await ctx.runQuery(internal.federation.storagePolicy.rebuildBudget, { requestedBatchSize: args.memoryIds.length });
+      if (budget.paused) {
+        await ctx.scheduler.runAfter(60000, internal.models.embeddings.repairCoverage, args);
+        return;
+      }
+      for (const memoryId of args.memoryIds.slice(0, budget.allowedBatchSize)) {
+        // Delayed indexMemory may already have filled this key. Never overwrite an
+        // existing malformed/stale vector: the full verification must reject it.
+        if (!await ctx.runQuery(internal.models.embeddings.existingVector, { memoryId, spaceId: job.spaceId }))
+          await indexOne(ctx, memoryId, route);
+      }
+      if (args.memoryIds.length > budget.allowedBatchSize) {
+        await ctx.scheduler.runAfter(0, internal.models.embeddings.repairCoverage, {
+          ...args, memoryIds: args.memoryIds.slice(budget.allowedBatchSize),
+        });
+        return;
+      }
+      await ctx.runMutation(internal.models.embeddings.resumeCoverageScan, { jobId: job._id, attempt: args.attempt });
+    } catch (error) {
+      if (String(error).includes('MAINTENANCE_LOCKED')) {
+        await ctx.scheduler.runAfter(60000, internal.models.embeddings.repairCoverage, args);
+      } else if (String(error).includes('EMBEDDING_SOURCE_CHANGED')) {
+        await ctx.runMutation(internal.models.embeddings.resumeCoverageScan, { jobId: job._id, attempt: args.attempt });
+      } else {
+        await ctx.runMutation(internal.models.embeddings.failScan, { jobId: job._id, failure: String(error).slice(0, 500) });
+      }
+    }
   },
 });
 export const scanJob = internalQuery({
@@ -640,7 +715,7 @@ export const scanWork = internalAction({
         }
       }
       const next = await ctx.runMutation(internal.models.embeddings.advanceScanPage, args);
-      if (next && !['DONE', 'FAILED'].includes(next.phase))
+      if (next && !next.repairScheduled && !['DONE', 'FAILED'].includes(next.phase))
         await ctx.scheduler.runAfter(0, internal.models.embeddings.scanWork, args);
     } catch (error) {
       if (String(error).includes('MAINTENANCE_LOCKED')) {
@@ -649,7 +724,7 @@ export const scanWork = internalAction({
       }
       if (String(error).includes('EMBEDDING_SOURCE_CHANGED')) {
         const next = await ctx.runMutation(internal.models.embeddings.advanceScanPage, args);
-        if (next && !['DONE', 'FAILED'].includes(next.phase))
+        if (next && !next.repairScheduled && !['DONE', 'FAILED'].includes(next.phase))
           await ctx.scheduler.runAfter(0, internal.models.embeddings.scanWork, args);
         return;
       }
@@ -673,8 +748,8 @@ export const finishBuild = internalMutation({
   handler: async (ctx, args) => {
     if (!await ctx.db.get(args.spaceId)) throw new Error('EMBEDDING_SPACE_NOT_FOUND');
     const jobId = await createScan(ctx, 'COVERAGE', args);
-    await advanceScan(ctx, jobId);
-    await ctx.scheduler.runAfter(0, internal.models.embeddings.scanWork, { jobId });
+    const repairScheduled = await advanceScan(ctx, jobId);
+    if (!repairScheduled) await ctx.scheduler.runAfter(0, internal.models.embeddings.scanWork, { jobId });
     return jobId;
   },
 });

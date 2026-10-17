@@ -12,6 +12,8 @@ const modules = {
   '../models/embeddings.ts': () => import('./embeddings'),
   '../models/profiles.ts': () => import('./profiles'),
   '../models/usage.ts': () => import('./usage'),
+  '../agent/embeddingsCache.ts': () => import('../agent/embeddingsCache'),
+  '../federation/storagePolicy.ts': () => import('../federation/storagePolicy'),
 };
 const mutation = (name: string) => makeFunctionReference<'mutation'>(`models/embeddings:${name}`);
 const query = (name: string) => makeFunctionReference<'query'>(`models/embeddings:${name}`);
@@ -126,7 +128,8 @@ async function drain(t: ReturnType<typeof convexTest>, jobId: any) {
  test('late-page missing vector, extra owner vector and late negative cannot authorize activation', async () => {
   const f = await fixture();
   await f.t.run(ctx => withEmbeddingRevision(ctx).db.delete(f.vectors[2580]));
-  const missing = await drain(f.t, await f.t.mutation(mutation('finishBuild'), { spaceId: f.next }));
+  const missingValidation = await f.t.action(action('validateSpace'), { adminToken, spaceId: f.next });
+  const missing = await drain(f.t, missingValidation.jobId);
   expect(missing.memoryCount).toBeGreaterThan(2500);
   expect(missing.failure).toContain('EMBEDDING_COVERAGE_INCOMPLETE');
   await f.t.mutation(mutation('putVector'), { memoryId: f.memories[2580], spaceId: f.next, worldId: f.worldId, agentGlobalId: 'home/owner', embedding: [0, 1] });
@@ -174,3 +177,113 @@ async function drain(t: ReturnType<typeof convexTest>, jobId: any) {
   await f.t.run(ctx => withEmbeddingRevision(ctx).db.patch(f.memories[0], { description: 'Changed during embedding request' }));
   await expect(f.t.mutation(mutation('putVector'), { memoryId: f.memories[0], spaceId: f.next, worldId: f.worldId, agentGlobalId: 'home/owner', expectedSourceDigest: sourceDigest, embedding: [1, 0] })).rejects.toThrow('EMBEDDING_SOURCE_CHANGED');
 }, 60000);
+
+async function appendUnindexed(f: Awaited<ReturnType<typeof fixture>>, number: number) {
+  return f.t.run(ctx => withEmbeddingRevision(ctx).db.insert('memories', {
+    worldId: f.worldId, playerId: 'p:0', agentGlobalId: 'home/owner',
+    description: `Late source fact ${number}`, importance: 5, lastAccess: 1,
+    data: { type: 'reflection', relatedMemoryIds: [] },
+  }));
+}
+
+test('BUILDING coverage repairs the final source-page insertion without delayed indexMemory or manual resume', async () => {
+  const f = await fixture(2);
+  // The rebuild has read its final source page. Its vectors exist, but this new
+  // canonical write lands before finishBuild creates the coverage snapshot.
+  expect((await f.t.query(query('memoryPage'), { cursor: null })).isDone).toBe(true);
+  const late = await appendUnindexed(f, 1);
+  const jobId = await f.t.mutation(mutation('finishBuild'), { spaceId: f.next });
+  expect(await f.t.query(query('scanJob'), { jobId })).toMatchObject({ phase: 'MEMORIES', restarts: 1 });
+  const dispatch = await f.t.run(ctx => ctx.db.system.query('_scheduled_functions').collect());
+  expect(dispatch).toEqual(expect.arrayContaining([expect.objectContaining({
+    name: 'models/embeddings:repairCoverage', args: [{ jobId, attempt: 1, memoryIds: [late] }],
+  })]));
+  expect(await f.t.query(query('existingVector'), { memoryId: late, spaceId: f.next })).toBeNull();
+  await expect(f.t.mutation(mutation('activateSpace'), { adminToken, spaceId: f.next })).rejects.toThrow('EMBEDDING_SPACE_NOT_VALIDATED');
+  // Execute the durably dispatched repair with the same job and attempt. No
+  // indexMemory is run: coverage must fill the missing key itself.
+  await f.t.action(action('repairCoverage'), { jobId, attempt: 1, memoryIds: [late] });
+  expect(await f.t.query(query('existingVector'), { memoryId: late, spaceId: f.next })).toMatchObject({ memoryId: late, embedding: [1, 0] });
+  expect(await drain(f.t, jobId)).toMatchObject({ phase: 'DONE', memoryCount: 4, vectorCount: 4, restarts: 1 });
+  expect(await f.t.run(ctx => ctx.db.get(f.next))).toMatchObject({ status: 'READY' });
+  expect((await f.t.query(query('getRoute'), {})).space._id).toBe(f.old);
+});
+
+test('coverage source changes after repair share the persistent retry budget and still catch up', async () => {
+  const f = await fixture(2);
+  const late = await appendUnindexed(f, 1);
+  const jobId = await f.t.mutation(mutation('finishBuild'), { spaceId: f.next });
+  await f.t.action(action('repairCoverage'), { jobId, attempt: 1, memoryIds: [late] });
+  const later = await appendUnindexed(f, 2);
+  await onePage(f.t, jobId); // Source revision changed after repair: rescan #2.
+  expect(await f.t.query(query('scanJob'), { jobId })).toMatchObject({ restarts: 2 });
+  await onePage(f.t, jobId); // The fresh scan finds another missing key: repair #3.
+  expect(await f.t.query(query('scanJob'), { jobId })).toMatchObject({ restarts: 3 });
+  await f.t.action(action('repairCoverage'), { jobId, attempt: 3, memoryIds: [later] });
+  expect(await drain(f.t, jobId)).toMatchObject({ phase: 'DONE', memoryCount: 5, vectorCount: 5, restarts: 3 });
+  expect((await f.t.query(query('getRoute'), {})).space._id).toBe(f.old);
+});
+
+test('continuous final-page arrivals exhaust three coverage repairs and require explicit resume', async () => {
+  const f = await fixture(2);
+  let late = await appendUnindexed(f, 1);
+  const jobId = await f.t.mutation(mutation('finishBuild'), { spaceId: f.next });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    // A further source commits while the provider is generating the repair.
+    // resumeCoverageScan must take its revisions after the committed repair,
+    // and the next pass must discover the new missing key independently.
+    let next: Id<'memories'> | undefined;
+    (globalThis.fetch as jest.Mock).mockImplementationOnce(async () => {
+      next = await appendUnindexed(f, attempt + 1);
+      return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] }));
+    });
+    await f.t.action(action('repairCoverage'), { jobId, attempt, memoryIds: [late] });
+    expect(next).toBeDefined();
+    late = next!;
+    await onePage(f.t, jobId);
+    expect(await f.t.query(query('scanJob'), { jobId })).toMatchObject({ restarts: Math.min(attempt + 1, 3) });
+  }
+  expect(await f.t.query(query('scanJob'), { jobId })).toMatchObject({ phase: 'FAILED', failure: expect.stringContaining('EMBEDDING_COVERAGE_INCOMPLETE'), restarts: 3 });
+  expect(await f.t.run(ctx => ctx.db.get(f.next))).toMatchObject({ status: 'FAILED' });
+  expect((await f.t.query(query('getRoute'), {})).space._id).toBe(f.old);
+  await f.t.mutation(mutation('resumeRebuild'), { adminToken, spaceId: f.next });
+  expect(await f.t.run(ctx => ctx.db.get(f.next))).toMatchObject({ status: 'BUILDING' });
+});
+
+test.each(['owner', 'dimensions', 'certificate', 'sourceDigest'] as const)('coverage repair never hides an existing %s error', async (kind) => {
+  const f = await fixture(2);
+  await appendUnindexed(f, 1); // Also missing: a malformed neighbor must still fail immediately.
+  await f.t.run(async ctx => {
+    const db = withEmbeddingRevision(ctx).db;
+    if (kind === 'owner') await db.patch(f.vectors[0], { agentGlobalId: 'wrong/owner' });
+    if (kind === 'dimensions') await db.patch(f.vectors[0], { embedding: [1] });
+    if (kind === 'sourceDigest') await db.patch(f.vectors[0], { sourceDigest: 'stale' });
+    if (kind === 'certificate') {
+      const certificateId = await db.insert('embeddingCertificates', {
+        profileId: f.profileId, state: 'ACTIVE', verifiedAt: 1, checkedAt: 1, trustBoundary: 'test',
+        providerId: 'test', providerUrl: 'https://embed.example', profileFingerprint: 'target',
+        artifactDigest: 'test', metadataDigest: 'test', pipelineFingerprint: 'test', serviceVersion: 'test',
+        dimensions: 2, querySample: [1, 0], documentSample: [1, 0],
+      });
+      await db.patch(f.vectors[0], { embeddingCertificateId: certificateId });
+    }
+  });
+  const jobId = await f.t.mutation(mutation('finishBuild'), { spaceId: f.next });
+  expect(await f.t.query(query('scanJob'), { jobId })).toMatchObject({ phase: 'FAILED', restarts: 0 });
+  const expected = { owner: 'MEMORY_OWNER_MISMATCH', dimensions: 'INVALID_EMBEDDING_VECTOR', certificate: 'EMBEDDING_CERTIFICATE_FENCED', sourceDigest: 'EMBEDDING_SOURCE_VECTOR_STALE' }[kind];
+  expect((await f.t.query(query('scanJob'), { jobId })).failure).toContain(expected);
+  expect((await f.t.query(query('getRoute'), {})).space._id).toBe(f.old);
+});
+
+test('a delayed malformed vector is verified rather than overwritten by the queued coverage repair', async () => {
+  const f = await fixture(2);
+  const late = await appendUnindexed(f, 1);
+  const jobId = await f.t.mutation(mutation('finishBuild'), { spaceId: f.next });
+  await f.t.run(ctx => withEmbeddingRevision(ctx).db.insert('modelMemoryVectors', {
+    memoryId: late, spaceId: f.next, worldId: f.worldId, playerId: 'p:0', agentGlobalId: 'home/owner',
+    sourceDigest: 'incorrect-delayed-source', embedding: [1, 0],
+  }));
+  await f.t.action(action('repairCoverage'), { jobId, attempt: 1, memoryIds: [late] });
+  expect(await drain(f.t, jobId)).toMatchObject({ phase: 'FAILED', failure: expect.stringContaining('EMBEDDING_SOURCE_VECTOR_STALE'), restarts: 1 });
+  expect(await f.t.query(query('existingVector'), { memoryId: late, spaceId: f.next })).toMatchObject({ sourceDigest: 'incorrect-delayed-source' });
+});

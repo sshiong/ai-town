@@ -207,3 +207,30 @@ test('Host terminal ledger remains eligible for replay verification and is recor
   assert.ok(report.scenarios[2].envelopeExpiresAt > report.scenarios[2].deliveredAt);
   assert.equal(report.scenarios[2].reason, 'VISIT_LEASE_EXPIRED');
 });
+
+test('third-only explicitly executes one owned visit and does not claim earlier scenarios', async () => {
+  const f = fixture(); f.config.scenarios = ['late-signed-confirm-rejected'];
+  const report = await runNetworkPartitionSmoke(f.config, f.ops, f.startGate);
+  assert.deepEqual(report.requestedScenarios, ['late-signed-confirm-rejected']);
+  assert.deepEqual(report.scenarios.map(value => value.scenario), report.requestedScenarios);
+  assert.equal(report.scenarios[0].visitId, 'visit-1');
+  assert.equal(report.lateAuthorizationAttempt.status, 400);
+  assert.ok(f.saved.some(value => value.outcome === 'running' && value.lateAuthorizationAttempt?.delivery === 'responded'));
+});
+
+test('failed refusal is synced before its assertion and remains in the failure report', async () => {
+  const f = fixture(); f.config.scenarios = ['late-signed-confirm-rejected'];
+  f.gates[1].deliverHeld = async () => ({ status: 400, reason: 'FEDERATION_REJECTED', responseFormat: 'json-error-code',
+    responseBytes: 31, visitId: 'visit-1', messageId: 'signed-confirm' });
+  await assert.rejects(runNetworkPartitionSmoke(f.config, f.ops, f.startGate), /LATE_AUTHORIZATION_NOT_REJECTED/);
+  assert.ok(f.saved.some(value => value.outcome === 'running' && value.lateAuthorizationAttempt?.reason === 'FEDERATION_REJECTED'));
+  assert.equal(f.saved.at(-1).lateAuthorizationAttempt.reason, 'FEDERATION_REJECTED');
+  assert.equal(f.saved.at(-1).scenarios.length, 0);
+});
+
+test('empty, duplicate and unknown scenario selections are refused', () => {
+  for (const scenarios of [[], ['unknown'], ['late-signed-confirm-rejected', 'late-signed-confirm-rejected']]) {
+    const f = fixture(); f.config.scenarios = scenarios;
+    assert.throws(() => validatePartitionConfig(f.config), /INVALID_SCENARIO_SELECTION/);
+  }
+});

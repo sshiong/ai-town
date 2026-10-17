@@ -1,4 +1,5 @@
 import { jest } from '@jest/globals';
+import { convexToJson } from 'convex/values';
 import { webcrypto } from 'node:crypto';
 import { convexTest } from 'convex-test';
 import schema from '../schema';
@@ -9,8 +10,8 @@ import { homeFrozen, hostCreated, hostRemoved, homeResumed } from './ledger';
 import { enqueueMessage } from './queue';
 import { resourceMeasurements } from './resourceMonitoring';
 import { configuredTimePolicy } from './timePolicy';
-import { maintenanceWork, tick } from './transport';
-import { getFunctionName } from 'convex/server';
+import { maintenanceWork, tick, registerFederationRoutes } from './transport';
+import { getFunctionName, httpRouter } from 'convex/server';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 const modules = {
@@ -1160,4 +1161,56 @@ test('privacy erasure preserves lifecycle fencing and stream control dispatch', 
   expect((await accept(b, request)).status).toBe('COMMITTED');
   const snapshot = await b.t.run(ctx => ctx.db.query('federationOutbox').withIndex('visit', q => q.eq('envelope.visitId', 'visit-1')).collect());
   expect(snapshot.some(item => item.envelope.type === 'SESSION_RESYNC' && item.envelope.payload.mode === 'snapshot')).toBe(true);
+});
+
+
+test.each(['RESERVED', 'COMPLETED'])('late signed confirmation for %s Host retains its typed lease refusal through the registered HTTP route', async state => {
+  const { a, b, credentialEncrypted } = await setup();
+  await seedVisit(b, a, 'host', state);
+  await b.t.run(async ctx => {
+    const ledger = (await ctx.db.query('visitLedger').unique())!;
+    await ctx.db.patch(ledger._id, { leaseExpiry: Date.now() - 1 });
+  });
+  const confirm = visitMessage(a, b, 'VISIT_CONFIRM', 1);
+  const packet = await signPacket(confirm, a.keys.privateKeyEncrypted, credentialEncrypted);
+  await expect(b.t.action(actionRef('transport/receiveMessage'), { packet }))
+    .rejects.toMatchObject({ data: 'VISIT_LEASE_EXPIRED' });
+  const response = await b.t.fetch('/federation/v1/messages', { method: 'POST', body: JSON.stringify(packet) });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: 'VISIT_LEASE_EXPIRED' });
+  expect(await b.t.run(ctx => ctx.db.query('federationInbox').collect())).toEqual([]);
+  expect((await b.t.run(ctx => ctx.db.query('visitLedger').unique()))?.state).toBe(state);
+});
+
+test.each([
+  { data: 'VISIT_LEASE_EXPIRED', message: '[Request ID: private-request] Server Error\nUncaught ConvexError: VISIT_LEASE_EXPIRED\n    at private-stack', expected: 'VISIT_LEASE_EXPIRED' },
+  { data: { code: 'VISIT_LEASE_EXPIRED', privateToken: 'private-value' }, message: 'PRIVATE_DIAGNOSTIC', expected: 'FEDERATION_REJECTED' },
+  { data: 'PRIVATE_DIAGNOSTIC', message: 'PRIVATE_DIAGNOSTIC', expected: 'FEDERATION_REJECTED' },
+  { data: undefined, message: '[Request ID: private-request] Uncaught Error: VISIT_LEASE_EXPIRED\n    at private-stack', expected: 'FEDERATION_REJECTED' },
+  { data: undefined, message: 'REMOTE_EVENT_RATE_EXCEEDED wrapped-private-detail', expected: 'REMOTE_EVENT_RATE_EXCEEDED' },
+])('registered HTTP route filters cross-syscall error data case %#', async ({ data, message, expected }) => {
+  const router = httpRouter(); registerFederationRoutes(router);
+  const registered = router.lookup('/federation/v1/messages', 'POST')![0] as any;
+  const oldConvex = Object.getOwnPropertyDescriptor(globalThis, 'Convex');
+  const calls: string[] = [];
+  Object.defineProperty(globalThis, 'Convex', { configurable: true, value: {
+    asyncSyscall: async (operation: string) => {
+      calls.push(operation);
+      // The real Convex syscall layer reconstructs ConvexError and decodes data.
+      // Its message deliberately includes wrapper text that must not be parsed.
+      throw { message, ...(data === undefined ? {} : { data: convexToJson(data) }) };
+    },
+  } });
+  try {
+    const response = await registered.invokeHttpAction(new Request('https://town.example/federation/v1/messages', {
+      method: 'POST', body: '{}',
+    }));
+    expect(calls).toEqual(['1.0/actions/action']);
+    expect(response.status).toBe(expected === 'REMOTE_EVENT_RATE_EXCEEDED' ? 429 : 400);
+    expect(response.headers.get('Retry-After')).toBe(expected === 'REMOTE_EVENT_RATE_EXCEEDED' ? '1' : null);
+    expect(await response.json()).toEqual({ error: expected });
+  } finally {
+    if (oldConvex) Object.defineProperty(globalThis, 'Convex', oldConvex);
+    else delete (globalThis as any).Convex;
+  }
 });

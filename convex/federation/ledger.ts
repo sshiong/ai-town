@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalMutation, mutation, query, MutationCtx } from '../maintenanceFunctions';
 import { Doc } from '../_generated/dataModel';
 import { requireAdmin } from './security';
@@ -55,7 +55,7 @@ export async function assertVisitAuthority(ctx: MutationCtx, message: Federation
   const senderEpoch = ledger.role === 'home' ? ledger.hostDeploymentEpoch : ledger.homeDeploymentEpoch;
   const recipientEpoch = ledger.role === 'home' ? ledger.homeDeploymentEpoch : ledger.hostDeploymentEpoch;
   if (senderEpoch !== message.senderDeploymentEpoch || recipientEpoch !== message.expectedRecipientDeploymentEpoch) throw new Error('VISIT_DEPLOYMENT_MISMATCH');
-  if (['OBSERVATION', 'DECISION', 'VISIT_CONFIRM', 'VISIT_RENEW'].includes(message.type) && ledger.leaseExpiry <= Date.now()) throw new Error('VISIT_LEASE_EXPIRED');
+  if (['OBSERVATION', 'DECISION', 'VISIT_CONFIRM', 'VISIT_RENEW'].includes(message.type) && ledger.leaseExpiry <= Date.now()) throw new ConvexError('VISIT_LEASE_EXPIRED');
   if (['OBSERVATION', 'DECISION', 'VISIT_CONFIRM', 'VISIT_RENEW'].includes(message.type))
     await assertClock(ctx.db, await identity(ctx));
   // The fencing token is checked on all lifecycle messages. Runtime decisions are

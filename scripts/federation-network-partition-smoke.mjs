@@ -19,6 +19,7 @@ export const partitionClientOptions = {
 
 const check = (condition, code) => { if (!condition) throw new Error(code); };
 const terminal = visit => ['COMPLETED', 'REJECTED'].includes(visit.state);
+const SCENARIOS = ['one-way-denies-new-visit', 'two-way-lease-safe-return', 'late-signed-confirm-rejected'];
 const root = fileURLToPath(new URL('../', import.meta.url));
 function external(path) {
   check(isAbsolute(path ?? ''), 'ABSOLUTE_EXTERNAL_PATH_REQUIRED');
@@ -34,6 +35,9 @@ function origin(value) {
 export function validatePartitionConfig(config) {
   check(config?.dedicatedNetworkPartitionLab === true && /^[a-z0-9-]{1,40}$/.test(config.labId ?? '') &&
     config.towns?.length === 2, 'DEDICATED_PARTITION_LAB_REQUIRED');
+  check(config.scenarios === undefined || Array.isArray(config.scenarios) && config.scenarios.length > 0 &&
+    new Set(config.scenarios).size === config.scenarios.length && config.scenarios.every(value => SCENARIOS.includes(value)),
+  'INVALID_SCENARIO_SELECTION');
   const ports = new Set(), ids = new Set();
   for (const [i, town] of config.towns.entries()) {
     const role = ['home', 'host'][i];
@@ -102,7 +106,8 @@ export async function runNetworkPartitionSmoke(config, ops, startGate = startNet
   const beforeHome = await ops.world(home, resident.worldId);
   check(![beforeHome, beforeHost].some(world => world.players.some(player => player.remoteVisitor)) &&
     beforeHome.players.filter(player => player.id === resident.playerId).length === 1, 'INITIAL_PRESENCE_INVALID');
-  const report = { kind: 'network-partition', startedAt: ops.now(), outcome: 'running', scenarios: [], cleanup: 'pending' };
+  const selected = config.scenarios ?? SCENARIOS;
+  const report = { kind: 'network-partition', requestedScenarios: [...selected], startedAt: ops.now(), outcome: 'running', scenarios: [], cleanup: 'pending' };
   let visitId, startAttempted = false, failure, finishing = false;
   const save = () => ops.persist(report);
   const current = async () => {
@@ -158,75 +163,88 @@ export async function runNetworkPartitionSmoke(config, ops, startGate = startNet
     for (const [i, town] of config.towns.entries()) gates.push(await startGate({ ...town.gate,
       fromTownId: config.towns[1-i].townId, toTownId: town.townId }));
     await ready();
-    // Host -> Home ingress is cut; Home -> Host remains live.
-    gates[0].setMode('blocked');
-    const failedDirection = await ops.probe(host, home.townId);
-    const workingDirection = await ops.probe(home, host.townId);
-    check(failedDirection?.channelState === 'PAIRED_BUT_NOT_REACHABLE' &&
-      ['TRANSPORT_READY', 'TRANSPORT_TESTING'].includes(workingDirection?.channelState), 'ONE_WAY_PROBE_EVIDENCE_MISSING');
-    await wait('ONE_WAY_NOT_READY_TIMEOUT', current, states => states[0].peers.some(peer =>
-      peer.townId === host.townId && peer.channelState !== 'TRANSPORT_READY'), initial[0].settings.timePolicy.probeFreshnessMs + 10_000);
-    let rejected = false;
-    try { await start(); } catch (error) {
-      check(String(error?.message).includes('DIRECT_PEER_NOT_MUTUALLY_REACHABLE'), 'UNEXPECTED_START_REJECTION'); rejected = true;
+    if (selected.includes('one-way-denies-new-visit')) {
+      // Host -> Home ingress is cut; Home -> Host remains live.
+      gates[0].setMode('blocked');
+      const failedDirection = await ops.probe(host, home.townId);
+      const workingDirection = await ops.probe(home, host.townId);
+      check(failedDirection?.channelState === 'PAIRED_BUT_NOT_REACHABLE' &&
+        ['TRANSPORT_READY', 'TRANSPORT_TESTING'].includes(workingDirection?.channelState), 'ONE_WAY_PROBE_EVIDENCE_MISSING');
+      await wait('ONE_WAY_NOT_READY_TIMEOUT', current, states => states[0].peers.some(peer =>
+        peer.townId === host.townId && peer.channelState !== 'TRANSPORT_READY'), initial[0].settings.timePolicy.probeFreshnessMs + 10_000);
+      let rejected = false;
+      try { await start(); } catch (error) {
+        check(String(error?.message).includes('DIRECT_PEER_NOT_MUTUALLY_REACHABLE'), 'UNEXPECTED_START_REJECTION'); rejected = true;
+      }
+      check(rejected && gates[0].evidence.blocked > 0, 'ONE_WAY_START_NOT_REJECTED');
+      const blockedSample = await presence();
+      check(blockedSample.homeBodies === 1 && blockedSample.hostBodies === 0 &&
+        (await current()).every((state, i) => state.visits.length === initial[i].visits.length), 'REJECTED_START_CHANGED_PRESENCE');
+      startAttempted = false;
+      report.scenarios.push({ scenario: 'one-way-denies-new-visit', failedDirection: failedDirection.channelState,
+        workingDirection: workingDirection.channelState, sample: blockedSample }); await save();
     }
-    check(rejected && gates[0].evidence.blocked > 0, 'ONE_WAY_START_NOT_REJECTED');
-    const blockedSample = await presence();
-    check(blockedSample.homeBodies === 1 && blockedSample.hostBodies === 0 &&
-      (await current()).every((state, i) => state.visits.length === initial[i].visits.length), 'REJECTED_START_CHANGED_PRESENCE');
-    startAttempted = false;
-    report.scenarios.push({ scenario: 'one-way-denies-new-visit', failedDirection: failedDirection.channelState,
-      workingDirection: workingDirection.channelState, sample: blockedSample }); await save();
 
-    await ready(); await start();
-    await wait('ACTIVE_VISIT_TIMEOUT', async () => ({ states: await current(), sample: await presence() }),
-      value => value.states.every(state => ledger(state)?.state === 'ACTIVE') && value.sample.hostBodies === 1 && value.sample.homeBodies === 0);
-    gates.forEach(gate => gate.setMode('blocked'));
-    // In-flight renewals may have committed immediately before the cut. Read the
-    // latest issued lease after aborting sockets; never use the original expiry.
-    await ops.returnVisit(home, visitId);
-    let safeAfter = 0, expiry = 0, earlySamples = 0, firstReturned, firstHostCleaned;
-    await wait('PARTITION_SAFE_RETURN_TIMEOUT', async () => {
-      const states = await current(), sample = await presence(), homeVisit = ledger(states[0]);
-      check(homeVisit && states.every(state => state.settings.clock.healthy), 'LEASE_OR_CLOCK_EVIDENCE_MISSING');
-      expiry = Math.max(expiry, homeVisit.leaseExpiry);
-      safeAfter = Math.max(safeAfter, homeVisit.returnSafety.safeAfter);
-      check(homeVisit.returnSafety.condition !== 'SIGNED_CLEANUP', 'CLEANUP_ACK_CROSSED_PARTITION');
-      if (sample.at < safeAfter) { check(sample.homeBodies === 0, 'HOME_RESUMED_BEFORE_SAFE_DEADLINE'); earlySamples++; }
-      if (sample.hostBodies === 0 && !firstHostCleaned) firstHostCleaned = sample;
-      if (sample.at >= expiry + 90_000) check(sample.hostBodies === 0, 'HOST_BODY_SURVIVED_LEASE_EXPIRY');
-      if (sample.homeBodies === 1) firstReturned = sample;
-      return sample.homeBodies === 1 && sample.hostBodies === 0;
-    }, Boolean, 1_300_000);
-    check(earlySamples > 0 && firstReturned.at >= safeAfter && gates.every(gate => gate.evidence.blocked > 0), 'PARTITION_EVIDENCE_INCOMPLETE');
-    report.scenarios.push({ scenario: 'two-way-lease-safe-return', visitId, leaseExpiry: expiry, safeAfter,
-      earlySamples, firstReturned, firstHostCleaned, evidenceScope: 'sequential-cross-town-samples' }); await save();
-    await ready(); await cleanupVisit();
+    if (selected.includes('two-way-lease-safe-return')) {
+      await ready(); await start();
+      await wait('ACTIVE_VISIT_TIMEOUT', async () => ({ states: await current(), sample: await presence() }),
+        value => value.states.every(state => ledger(state)?.state === 'ACTIVE') && value.sample.hostBodies === 1 && value.sample.homeBodies === 0);
+      gates.forEach(gate => gate.setMode('blocked'));
+      // In-flight renewals may have committed immediately before the cut. Read the
+      // latest issued lease after aborting sockets; never use the original expiry.
+      await ops.returnVisit(home, visitId);
+      let safeAfter = 0, expiry = 0, earlySamples = 0, firstReturned, firstHostCleaned;
+      await wait('PARTITION_SAFE_RETURN_TIMEOUT', async () => {
+        const states = await current(), sample = await presence(), homeVisit = ledger(states[0]);
+        check(homeVisit && states.every(state => state.settings.clock.healthy), 'LEASE_OR_CLOCK_EVIDENCE_MISSING');
+        expiry = Math.max(expiry, homeVisit.leaseExpiry);
+        safeAfter = Math.max(safeAfter, homeVisit.returnSafety.safeAfter);
+        check(homeVisit.returnSafety.condition !== 'SIGNED_CLEANUP', 'CLEANUP_ACK_CROSSED_PARTITION');
+        if (sample.at < safeAfter) { check(sample.homeBodies === 0, 'HOME_RESUMED_BEFORE_SAFE_DEADLINE'); earlySamples++; }
+        if (sample.hostBodies === 0 && !firstHostCleaned) firstHostCleaned = sample;
+        if (sample.at >= expiry + 90_000) check(sample.hostBodies === 0, 'HOST_BODY_SURVIVED_LEASE_EXPIRY');
+        if (sample.homeBodies === 1) firstReturned = sample;
+        return sample.homeBodies === 1 && sample.hostBodies === 0;
+      }, Boolean, 1_300_000);
+      check(earlySamples > 0 && firstReturned.at >= safeAfter && gates.every(gate => gate.evidence.blocked > 0), 'PARTITION_EVIDENCE_INCOMPLETE');
+      report.scenarios.push({ scenario: 'two-way-lease-safe-return', visitId, leaseExpiry: expiry, safeAfter,
+        earlySamples, firstReturned, firstHostCleaned, evidenceScope: 'sequential-cross-town-samples' }); await save();
+      await ready(); await cleanupVisit();
+    }
 
-    await ready(); gates[1].setMode('hold-confirm'); await start();
-    await wait('HELD_CONFIRM_TIMEOUT', () => Promise.resolve(gates[1].evidence.held), value => value?.visitId === visitId);
-    const delayed = gates[1].evidence.held;
-    gates[0].setMode('blocked');
-    const issued = ledger((await current())[0]);
-    check(issued && issued.leaseExpiry > ops.now() && issued.leaseExpiry - ops.now() <= 300_000, 'DELAYED_LEASE_INVALID');
-    check(Number.isSafeInteger(delayed.expiresAt) && delayed.expiresAt > issued.leaseExpiry + 2000,
-      'HELD_ENVELOPE_EXPIRES_BEFORE_LEASE_TEST');
-    let noHostBodySamples = 0;
-    await wait('DELAYED_LEASE_EXPIRY_TIMEOUT', async () => {
-      const sample = await presence(); check(sample.hostBodies === 0, 'HELD_CONFIRM_CREATED_BODY'); noHostBodySamples++;
-      return ops.now() >= issued.leaseExpiry + 2000;
-    }, Boolean, 310_000);
-    check(ops.now() < delayed.expiresAt, 'HELD_ENVELOPE_ALREADY_EXPIRED');
-    const hostBeforeReplay = ledger((await current())[1]);
-    check(hostBeforeReplay && hostBeforeReplay.leaseExpiry <= ops.now(), 'HOST_LEASE_NOT_EXPIRED');
-    const refusal = await gates[1].deliverHeld();
-    check(refusal.status === 400 && refusal.reason === 'VISIT_LEASE_EXPIRED' && refusal.visitId === visitId &&
-      refusal.messageId === delayed.messageId, 'LATE_AUTHORIZATION_NOT_REJECTED');
-    const after = await presence(); check(after.hostBodies === 0, 'LATE_AUTHORIZATION_CREATED_BODY');
-    report.scenarios.push({ scenario: 'late-signed-confirm-rejected', ...refusal, leaseExpiry: issued.leaseExpiry,
-      envelopeExpiresAt: delayed.expiresAt, hostStateBeforeReplay: hostBeforeReplay.state,
-      deliveredAt: ops.now(), noHostBodySamples, after }); await save();
-    await ready(); await cleanupVisit();
+    if (selected.includes('late-signed-confirm-rejected')) {
+      await ready(); gates[1].setMode('hold-confirm'); await start();
+      await wait('HELD_CONFIRM_TIMEOUT', () => Promise.resolve(gates[1].evidence.held), value => value?.visitId === visitId);
+      const delayed = gates[1].evidence.held;
+      gates[0].setMode('blocked');
+      const issued = ledger((await current())[0]);
+      check(issued && issued.leaseExpiry > ops.now() && issued.leaseExpiry - ops.now() <= 300_000, 'DELAYED_LEASE_INVALID');
+      check(Number.isSafeInteger(delayed.expiresAt) && delayed.expiresAt > issued.leaseExpiry + 2000,
+        'HELD_ENVELOPE_EXPIRES_BEFORE_LEASE_TEST');
+      let noHostBodySamples = 0;
+      await wait('DELAYED_LEASE_EXPIRY_TIMEOUT', async () => {
+        const sample = await presence(); check(sample.hostBodies === 0, 'HELD_CONFIRM_CREATED_BODY'); noHostBodySamples++;
+        return ops.now() >= issued.leaseExpiry + 2000;
+      }, Boolean, 310_000);
+      check(ops.now() < delayed.expiresAt, 'HELD_ENVELOPE_ALREADY_EXPIRED');
+      const hostBeforeReplay = ledger((await current())[1]);
+      check(hostBeforeReplay && hostBeforeReplay.leaseExpiry <= ops.now(), 'HOST_LEASE_NOT_EXPIRED');
+      report.lateAuthorizationAttempt = { delivery: 'pending', visitId, messageId: delayed.messageId,
+        leaseExpiry: issued.leaseExpiry, envelopeExpiresAt: delayed.expiresAt, hostStateBeforeReplay: hostBeforeReplay.state };
+      await save();
+      const refusal = await gates[1].deliverHeld();
+      Object.assign(report.lateAuthorizationAttempt, { delivery: 'responded', status: refusal.status, reason: refusal.reason,
+        responseFormat: refusal.responseFormat, responseBytes: refusal.responseBytes,
+        receivedVisitId: refusal.visitId, receivedMessageId: refusal.messageId, deliveredAt: ops.now() });
+      await save();
+      check(refusal.status === 400 && refusal.reason === 'VISIT_LEASE_EXPIRED' && refusal.visitId === visitId &&
+        refusal.messageId === delayed.messageId, 'LATE_AUTHORIZATION_NOT_REJECTED');
+      const after = await presence(); check(after.hostBodies === 0, 'LATE_AUTHORIZATION_CREATED_BODY');
+      report.scenarios.push({ scenario: 'late-signed-confirm-rejected', ...refusal, leaseExpiry: issued.leaseExpiry,
+        envelopeExpiresAt: delayed.expiresAt, hostStateBeforeReplay: hostBeforeReplay.state,
+        deliveredAt: ops.now(), noHostBodySamples, after }); await save();
+      await ready(); await cleanupVisit();
+    }
     report.outcome = 'passed';
   } catch (error) { failure = error; report.outcome = 'failed'; }
   finally {
@@ -288,7 +306,7 @@ async function main() {
       startVisit: (town, args) => call(town, 'mutation', api.federation.ledger.startVisit, args),
       returnVisit: (town, visitId) => call(town, 'mutation', api.federation.ledger.returnVisit, { visitId }),
     });
-    console.log(JSON.stringify({ code: 'NETWORK_PARTITION_PASSED' }));
+    console.log(JSON.stringify({ code: 'NETWORK_PARTITION_PASSED', scenarios: config.scenarios ?? SCENARIOS }));
   } catch (error) {
     const reason = /^[A-Z_]{1,80}$/.test(error?.message ?? '') ? error.message : 'PRIVATE_OPERATION_FAILED';
     if (reportHandle && !reportPersisted) {

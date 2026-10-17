@@ -1,6 +1,6 @@
 import { isTravelRedacted, privatePayloadSummary } from './travelPrivacyGuard';
 import { configuredTimePolicy, observeClock, canResume, readClock } from './timePolicy';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { HttpRouter } from 'convex/server';
 import { action, httpAction, internalAction, internalMutation, internalQuery, query, MutationCtx } from '../maintenanceFunctions';
 import { identity, peer, ready, session, visit } from './store';
@@ -478,7 +478,13 @@ export function registerFederationRoutes(http: HttpRouter) {
       const reason = error instanceof Error ? error.message : 'FEDERATION_REJECTED';
       // Return protocol error codes only; never expose credentials or stack traces.
       const rateLimited = reason.includes('REMOTE_EVENT_RATE_EXCEEDED');
-      const code = rateLimited ? 'REMOTE_EVENT_RATE_EXCEEDED' : /^[A-Z][A-Z0-9_]+$/.test(reason) ? reason : 'FEDERATION_REJECTED';
+      // Convex preserves structured data across nested calls even when its message
+      // contains runtime prefixes/stacks. Allow only this public typed refusal.
+      let code = 'FEDERATION_REJECTED';
+      if (rateLimited) code = 'REMOTE_EVENT_RATE_EXCEEDED';
+      else if (error instanceof ConvexError) {
+        if (error.data === 'VISIT_LEASE_EXPIRED') code = 'VISIT_LEASE_EXPIRED';
+      } else if (/^[A-Z][A-Z0-9_]+$/.test(reason)) code = reason;
       return new Response(JSON.stringify({ error: code }), { status: rateLimited ? 429 : 400, headers: {
         'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...(rateLimited ? { 'Retry-After': '1' } : {}),
       } });
