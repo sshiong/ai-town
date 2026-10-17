@@ -773,3 +773,12 @@ M仍使用SQLite，因原6GiB限额接近占满，本次跨镇验证暂增至7Gi
 
 
 修复后第三场景独立实跑通过（仅该场景，不冒称重跑前两项）：访问525a6e7c-f8ec-4164-b6bc-9994df230b6d，原签名确认cdce4fde-1a8f-4552-b748-1e67a0f574b7；信封仍有效，Host RESERVED，lease后2400ms实际HTTP400精确VISIT_LEASE_EXPIRED，没有创建Host身体。runner退出0，finally正式返乡、关闭gate，cleanup=owned-visits-returned-gates-closed。结合前轮独立的前两项证据，三类网络场景均各有实机证据；并非同一轮完整三场景通过，也不覆盖任意NAT/时钟漂移或长期稳定。
+
+
+### 2026-10-18 真实同身份独立部署冲突隔离
+
+仅新专用实验Home以SIGINT干净停止、一致只读复制数据卷，再立即恢复原Home；新独立克隆C使用独立卷/容器/API，保留同Town/长期密钥/通信凭证。仅C临时故障mutation按精确townId/原instance/epoch及C独有nonce校验后改变deploymentInstanceId，禁用C新访问；这明确是双部署故障布置，不是正规恢复支持双活。C经原生产transport:probe自行签名并通过实际HTTPS发往专用Host，未直接调用observe或手工伪造包。
+
+原runner在REAL_HTTPS_400_NOT_CAPTURED断言失败，失败报告保留，未标为通过。根代理另独立读取API及原运行回执：H/C相同Town/公钥、不同instance，独立容器/卷证据齐备；Host持久OPEN冲突为source=MESSAGE，known=原Home、observed=C，包含真实TRANSPORT_PROBE签名证据；Host QUARANTINED且无READY通道。正式startVisit与setPolicy恢复TRUSTED两项均拒绝TOWN_CLONE_CONFLICT；隔离期间引擎running且currentTime/lastStepTs实际前进。C、复制容器、C卷及临时源码均finally删除并确认不存在，原Home恢复。未证明线上精确HTTP冲突码，也不把原runner失败改成成功；这些不影响已独立证实的持久检测、敏感操作阻断和本地模拟继续运行。
+
+先前脚本要求所有历史outbox必须ACK的额外门槛已移除；仍保留无活跃旅行/容量/人类/自治出访、唯一配对及精确容器身份检查，记录历史待确认消息数量，不删除或合成ACK。清理代理关闭可能留下终态协议重试，这不是活跃身体。复核后通过正式resolve(RETAIN_KNOWN,sourceStopped=true)记录处置并撤销旧凭证，重新正式配对及双向探测成功。配对首次因Host禁用、随后60秒限流拒绝均保留，未绕过限制。后续自然交谈采用300秒lease/900秒trip，断联用30秒短租约不再用于多轮交谈。
