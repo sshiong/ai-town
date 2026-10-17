@@ -805,3 +805,23 @@ M仍使用SQLite，因原6GiB限额接近占满，本次跨镇验证暂增至7Gi
 Git外M空PG目标setup和runbook已准备、Python/内嵌Node语法检查通过；独立端口3520/3521、明确资源所有权及失败清理，显式selfhost deploy，不使用dev/predev。尚未执行setup、创建M PG容器/卷或导入，因此M高RSS仍未解决；此准备不称正式迁移完成。私有归档/身份/口令/运行脚本受限保存，不入Git。
 
 交谈观察器现支持逐镇显式expectedChatProvider/model/origin，非Ollama三项必填；实际居民绑定需精确相等，云要求HTTPS，custom明文仅明确loopback。默认仍本机Ollama4b，报告仅provider/model/origin，无密钥或URL路径；原双方各两条、历史原文、摘要/ACK/返乡与模型保持要求未放宽。根代理20项定向测试、语法/diff通过。当前192.168.7.10:18078连接超时，已请求更新服务地址；实际不同供应商互访仍缺，不能用不同模型、维度或代理别名代替。
+
+
+### 2026-10-18 M保留身份的SQLite到PostgreSQL正式迁移
+
+最终一致RAW导出kn79hvrbjgthc7zjjrb3937wp98gfqza完成：30,589条记录、1,656块、16,964,497字节。源保持暂停和联邦禁用，并按原容器ID正常停止。加密身份包与这份最终归档的签名、身份、epoch、解密及私钥挑战离线预检通过；此前恢复运行后的旧准备快照没有用于正式迁移。
+
+独立PG目标使用2GiB backend、384MiB PostgreSQL、独立卷与网络，无数据库宿主端口。正式migrate导入kn762zsyezp1gy2mvj39j745g98gfhpk达到COMPLETE，回执k971j30aheefks7bcy4zvknsxd8gffa8。独立只读核对全部30,589个SOURCE行及坐标、1,656个签名描述符、12,176个有效映射、10,511个稳定或按恢复语义转换的行、1,657个canonical memories通过；6,577条原消息保留，18,013条历史inputs只留staging，历史快照未重新执行。原Town、公钥、指纹、两名居民的globalId、playerId和agentId、Chat/Embedding profiles及绑定均保持。原档案不携带向量，目标正式补建并通过1,657/1,657个1024维向量覆盖检查。
+
+目标仍MIGRATING_IN、暂停且禁用时，通过公开join/startConversation/writeMessage流程实际观察双方走近、参与交谈及真实NPC模型回复持久化；随后清理测试人物并重新暂停。容器ID和重启计数保持，无OOM。正式prepareTarget、冻结旧源、signHandoff、停旧源、切换TLS、activateTarget、notifyPeer及两轮双向签名探针通过；M保留原身份，instance更新、epoch为3。旧源保持MIGRATING_OUT、停止且restart=no，不允许直接启用旧副本作为回滚。
+
+M当前API/site为3520/3521，HTTPS 3432路由至3521；N仍3516/3517，HTTPS 3434与用户前端5177绑定均保持。M、N恢复原模拟运行状态，M恢复原联邦设置。私有证明包括data-proof、independent-static-proof、model-proof、embedding-coverage、chat-proof、cutover-proof及frontend-and-running；不提交身份包、口令、模型密钥或原始聊天。
+
+按测试清理规则，已删除11个无引用的旧源码副本（约219MiB）、共享原M数据的多余before-worker8旧容器，以及已被更晚完整归档、验证PG和保留旧N源覆盖的旧物理快照raw（约3.95GiB）。快照说明和验证结果保留，旧时间点的原始物理文件不再保留；当前M/N、最新完整备份、独立身份恢复包和冻结旧源均保留，没有全局prune或删除其他项目资源。SQLite历史加载的底层实现未修改，迁移后的运行资源结论须以实际有限观察窗口为准。
+
+
+迁移后M→N真实本机qwen3.5:4b自然交流实测一次通过：visit `34835215-e532-4a51-a2fa-4154a6f9fefb`、conversation `c:41181`，双方各2句。Home/Host持久原文逐项一致、transcript COMPLETE、summary DONE且归属原居民记忆、最终投递认证ACK完成；同globalId/playerId/agentId居民返乡，Home仅一份身体，Host访客已清理。Chat绑定与Embedding配置保持。主任务另读实测结果并重新执行两轮双向探针，核对当前M两名/N三名原居民均在家、两端ACTIVE epoch3且模拟运行、旧SQLite源停止并禁用自动重启，独立后验通过。
+
+自然交流期间另采样145,389ms、13组运行资源：M PG backend采样峰值341.4MiB/2GiB，数据库93.19MiB/384MiB；容器ID和重启计数保持，未OOM，引擎时间前进。该有限窗口覆盖真实跨镇交谈及返乡，不证明长期无增长或任意负载容量。私有证据为 `m-pg-natural-dialogue.private.json`、`bounded-resources.private.json`、`independent-final-proof.private.json`。
+
+M原SQLite历史启动/内存风险已由实际同身份PG迁移替代当前运行路径；没有把旧backend本身宣称已修复。剩余跨实际供应商的P0互操作实测仍缺可用外部服务：本轮原地址 `http://192.168.7.10:18078` 无HTTP响应并连接超时，未修改或冒用用户模型绑定来代替验收。不同Ollama模型、异构Embedding及本轮双PG自然交谈不代替该供应商要求；目标继续保持未完成。
