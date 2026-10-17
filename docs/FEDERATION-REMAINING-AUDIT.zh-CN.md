@@ -746,3 +746,12 @@ M随后同ID恢复，身份/居民名单及原准入设置保持。最终联通�
 本轮重新启动宿主Docker后发现上一轮自然交谈观察进程已消失，该未完成记录不算通过。经正式租约恢复清理遗留访问后，依据当前LAN精确追加/32、签名更新邻居地址；一次更新HTTP400保留失败记录，后续实际签名probe返回200，重试后双方TRANSPORT_READY、clock healthy且无活跃访问，未重配对或放宽网络策略。迁移后重新完整实跑自然NPC交谈，访问83b476a3-96fb-4251-a251-4c00ced837a7、会话c:18568通过：N访客与M当地NPC各2条真实持久消息、两端原文一致、COMPLETE transcript、DONE摘要及认证ACK，原居民返乡，观察器退出0且模型配置保持。根代理随后独立正式API核对两端身份/epoch保持、该访问COMPLETED、全部访问终态、reserved=0、无human/visitor、3名N及2名M原居民均HOME_ACTIVE。不用旧中断记录作证。
 
 M仍使用SQLite，因原6GiB限额接近占满，本次跨镇验证暂增至7GiB并保存原限额，不能称已修复M高RSS或证明长期稳定；N迁移后的短时低RSS也不等于长期稳定。无用户记忆或历史删除。按用户要求已删除废弃PG clone的2个容器、2个卷、1个网络及重复旧N worker容器，保留当前M/N、必要回滚及原始身份/归档备份；现有AI Town私有镜像仍被M使用，不删、不推送。清理后复验当前4个服务容器仍运行。所有凭据、聊天正文、归档与原始回执均在Git外受限目录，仅脱敏记录入库。
+
+
+### 2026-10-18 网络分区验收工具与首轮实机边界
+
+新增独立network-partition gate/runner/说明，不接入用户M/N：要求专用容器精确名称/标签/身份、loopback API/action端口、唯一可信邻居及所有端点经过指定TLS gate；仅在内存暂存原签名确认，报告强制Git外600，单RPC30秒超时且SDK禁用日志。覆盖单向断流后禁止新拜访、双向断联直到实际账本safeAfter返乡、有效信封中迟到VISIT_CONFIRM被真实VISIT_LEASE_EXPIRED拒绝，finally恢复自身故障并正式清理所建访问。13项确定性编排测试通过，包含错误HTTP成功、MESSAGE_EXPIRED、终态ledger、取消/清理失败及超时选项；这些不是实机三场景通过证明。
+
+已创建两个全新独立实验镇，各1原生NPC、Chat4b/qwen1024、独立SQLite卷，正式签名配对。首轮实机单向断联确实拒绝新旅行且身体未改变；随后实际旅行因ACTIVE_VISIT_TIMEOUT失败，finally已返乡、清空预留并关闭gate，未将首轮标为通过。VISIT_RESERVED两端及时COMMITTED，但Home约29秒后才插入federationSuspend，30秒测试lease已到期，没有发送CONFIRM。日志在场景前后有Item expired in queue/overloaded，在截止附近有federationClock OCC；没有直接指向freezeHome的窗口内排队日志，不能确定唯一根因。RUST_BACKTRACE字样是诊断模板，不是Rust panic。实验4worker改为现有运行部署使用的8worker作为受控对照准备，保持原lease及内存限额；尚不称修复调度问题。
+
+另以Playwright实际检查迁移后用户页面：1200×767视口无页面横/纵溢出，canvas底部723.35在视口内；语言为自定义listbox，x/宽度与选择器一致且位于其下4px，原生select数量0，切换中文后截图实际显示中文及完整地图。专用浏览器已关闭。当前仅本机Ollama原qwen模型具已安装Embedding能力，另临时下载all-minilm:22m供不同模型测试，实际旧/api/embeddings返回384维有限向量；首次pull HTTP500、重试成功。尚未据此宣称不同空间切换或跨维度互访通过；该临时模型将在测试后删除，用户原Embedding不改。
