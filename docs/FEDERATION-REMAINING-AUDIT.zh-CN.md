@@ -796,3 +796,12 @@ M仍使用SQLite，因原6GiB限额接近占满，本次跨镇验证暂增至7Gi
 ### 2026-10-18 用户M/N后端同步后验
 
 在正式API确认用户M/N无human/visitor/活跃旅行、reserved=0后，使用各自明确selfhost地址将64da00e修复同步到N PG与M（未运行dev/predev）。两端部署CLI成功。部署前因宿主Docker中断留下clock不健康；实际docker UTC与宿主差小于3秒、无活跃访问后，正式confirmClockRecovery，再做两轮新签名双向probe。根代理后验确认两端Town/instance/epoch、worldId、原player/agent名单、modelSettings及bindings精确保持，clock healthy、TRANSPORT_READY、engine.running=true；引擎时滞样本N805ms/M70ms，用户5177页面HTTP200。未重新配对、重建用户居民或变更其Embedding。以上为同步后短时检查，仍不证明M SQLite高RSS及长期运行问题已解决。
+
+
+### 2026-10-18 M存储迁移准备与真实提供商观察器
+
+本轮开始Docker daemon再次停止，恢复后M冷启动约1.895GiB/7GiB、N PG约366.5MiB/2GiB；仅为短时样本，不否认历史M高RSS。只在M无human/visitor/活跃旅行及reserved0后，正式导出独立加密身份包并完成签名、AES-GCM解密与私钥挑战，身份/绑定保持。随后正式暂停模拟和准入取得新RAW一致快照：30,560条记录、1,656块、16,947,601字节；只读下载原签名和分块字符串，不跑全量哈希循环。归档与身份包的离线生产预检通过，明确未检查块内容/sourceShutdown/targetState/signedHandoff。finally已恢复原enabled=true及engine运行，未冻结源、未签handoff、未建立第二权威。首次收尾probe因并发队列拒绝失败，有限重试后新签名双向READY、clock healthy、身份/world/名单/主模型绑定保持、前端200。
+
+Git外M空PG目标setup和runbook已准备、Python/内嵌Node语法检查通过；独立端口3520/3521、明确资源所有权及失败清理，显式selfhost deploy，不使用dev/predev。尚未执行setup、创建M PG容器/卷或导入，因此M高RSS仍未解决；此准备不称正式迁移完成。私有归档/身份/口令/运行脚本受限保存，不入Git。
+
+交谈观察器现支持逐镇显式expectedChatProvider/model/origin，非Ollama三项必填；实际居民绑定需精确相等，云要求HTTPS，custom明文仅明确loopback。默认仍本机Ollama4b，报告仅provider/model/origin，无密钥或URL路径；原双方各两条、历史原文、摘要/ACK/返乡与模型保持要求未放宽。根代理20项定向测试、语法/diff通过。当前192.168.7.10:18078连接超时，已请求更新服务地址；实际不同供应商互访仍缺，不能用不同模型、维度或代理别名代替。
