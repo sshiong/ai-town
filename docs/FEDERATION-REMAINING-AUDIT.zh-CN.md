@@ -770,3 +770,6 @@ M仍使用SQLite，因原6GiB限额接近占满，本次跨镇验证暂增至7Gi
 第三场景首轮失败后增加断言前持久响应元数据及显式third-only，18项脚本回归通过，避免重跑前两项。实际重跑确认有效签名信封尚未过期、Host RESERVED、lease+2497ms投递返回HTTP400，但码为FEDERATION_REJECTED。生产普通Error经过嵌套runMutation/runAction后message包含包装，HTTP过滤丢掉精确拒绝码。现仅租约分支改ConvexError固定string data，HTTP只放行已知VISIT_LEASE_EXPIRED数据；未知typed内容仍generic，原429行为保持，不从堆栈正则抽取。根代理完整transport文件71项通过，含真实签名RESERVED/COMPLETED链路与SDK syscall包装错误/敏感data过滤。Convex tsc及diff检查通过。扩大到历史2500记忆扫描的检查主动中断，未称全套通过；本次8项修复回归独立完成。
 
 修复首次部署时宿主Docker停止、socket消失，未部署成功；恢复daemon并启动同ID专用镇后，两端显式selfhost部署成功。一次时钟确认脚本漏参数造成测试Home token出现在校验输出，已正式轮换且更新私有配置；用户M/N token未涉。两端UTC实查并正常confirmClockRecovery，第三场景修复后重跑仍须结果，不把部署或单测通过替代实机通过。当前专用资源仍供后续验收使用，结束后按AGENTS删除。
+
+
+修复后第三场景独立实跑通过（仅该场景，不冒称重跑前两项）：访问525a6e7c-f8ec-4164-b6bc-9994df230b6d，原签名确认cdce4fde-1a8f-4552-b748-1e67a0f574b7；信封仍有效，Host RESERVED，lease后2400ms实际HTTP400精确VISIT_LEASE_EXPIRED，没有创建Host身体。runner退出0，finally正式返乡、关闭gate，cleanup=owned-visits-returned-gates-closed。结合前轮独立的前两项证据，三类网络场景均各有实机证据；并非同一轮完整三场景通过，也不覆盖任意NAT/时钟漂移或长期稳定。
