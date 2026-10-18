@@ -832,3 +832,18 @@ M原SQLite历史启动/内存风险已由实际同身份PG迁移替代当前运�
 用户明确当前模型服务为本机Ollama，应检查127本地入口。实际读取 `http://127.0.0.1:11434/api/tags` 成功，qwen3.5:4b及qwen3-embedding:0.6b均存在；127.0.0.1:18078没有Ollama tags响应。当前M/N有效主Chat及所有居民绑定均为ollama/qwen3.5:4b，active Embedding均为ollama/qwen3-embedding:0.6b、1024维；容器经 `http://host.docker.internal:11434` 访问宿主同一Ollama，不应把容器loopback错误改成宿主loopback。逐镇正式Chat和Embedding探测均成功，主配置、居民绑定及活跃空间不变。
 
 旧192.168.7.10:18078不再作为当前用户指定模型的运行入口，其超时不能认定本机模型联调受阻。此前关于缺外部服务的结论只涉及原方案跨实际供应商验收，不能表述成当前本机小镇不可用；本轮本机核对也不扩大为跨实际供应商验证完成。私有脱敏证据为 `local-origin-confirmation-20261018.private.json`。
+
+
+### 2026-10-18 实际跨供应商闭环与本轮交付收尾
+
+用户提供SiliconFlow接口及指定DeepSeek-V4-Flash后，认证模型列表、裸API及正式应用Chat探测均成功。新增可选Chat配置`enableThinking`，显式false/true分别传给支持该字段的服务，未设置不附加字段，已有`reasoningEffort`保持；固定居民路由、普通/分块备份均保留该选项。管理面板新增默认/开启/关闭三态与中文文案。完整models测试24项、语言4项分别通过，备份2项定向回归、构建、Convex类型检查及变更文件lint通过。扩大模型回归时发现旧coverage fixture绕过正式resume，已补FAILED拒绝及正式恢复断言，未放宽生产覆盖门禁。
+
+新建两台独立测试镇：Home使用SiliconFlow `deepseek-ai/DeepSeek-V4-Flash` Chat（关闭思考）和本机Qwen Embedding；Host使用本机`qwen3.5:4b` Chat和SiliconFlow `BAAI/bge-m3` Embedding。两边均1024维，凭据按独立环境变量配置、模型绑定固定。专用环境使用规范独立CA及完整公共根信任包，保留严格证书验证；首轮证书扩展和信任包错误的诊断与修复摘要保留，未关闭校验或修改用户M/N信任环境。
+
+真实自然交谈一次通过：visit `be6bb204-2f1e-4e36-8555-95b5de322856`、conversation `c:30`，双方各2句，持久Home/Host原文逐项相同，transcript COMPLETE、summary DONE、认证ACK及原居民返乡均成立。独立正式API再验绑定/身份/身体与真实会话记忆；Home10份、Host2份自然记忆分别具有10/10、2/2有效向量，正式非空VALIDATION DONE，真实query样本分别3、2。另以已存向量做索引身份检索均命中score1，这不是额外外部query调用。Home最初因并发限流仅5/10，经唯一一次正式resumeRebuild恢复到10/10且清除failure后才进行最终验证；未插入合成记忆、未静默换模型。模型权重来源证据仍UNKNOWN，正常重新生成和检索通过不代表可信跨Profile向量复用。
+
+原方案§13.1的同镇Chat/Embedding独立提供商及§29.2的不同实际供应商互访缺口已由上述真实运行证据关闭，前文“缺可用外部接口”仅为历史状态。具体脱敏结果见[evidence/cross-provider-20261018.json](evidence/cross-provider-20261018.json)。这证明指定模型组合的本次闭环，不扩大为任意供应商或长期容量保证；P1/P2后续范围保持原标注。
+
+M/N原地址因本机LAN改变而失效，已通过保留原身份/epoch3的正式地址更新、证书补SAN、UTC确认与签名探针恢复到192.168.2.9。思考选项补丁aa5a894已精确selfhost发布到M3520/N3516，并只同步用户前端两处修改；严格后验确认原2/3居民及global/player/agent IDs、全部模型/空间/绑定/设置和后端容器ID/StartedAt保持，主模型仍本机4b、原Qwen Embedding不变。根代理最终重新验证两端ACTIVE、clock健康、无访客、原居民在家、模拟运行及新鲜双向READY；浏览器实际检查中文思考三态和1200×767地图可见，未保存测试模型配置。
+
+验收后已通过正式API禁入/暂停并按精确ID与owner清理3个专用容器、2卷、1网，逐项复查不存在；共用镜像与用户模型保留。临时凭据、provider密钥文件、测试CA私钥/信任包、失败attempts和无用途日志已精简，保留约束访问的必要证明与脱敏摘要。API密钥未提交仓库。当前P0交付范围不再有此前独立审查列出的未完成项。

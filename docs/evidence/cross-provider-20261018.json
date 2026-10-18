@@ -1,0 +1,101 @@
+{
+  "date": "2026-10-18",
+  "scope": "Actual SiliconFlow and local Ollama interoperability with fresh independent towns",
+  "codeCommit": "aa5a894",
+  "dialogue": {
+    "visitId": "be6bb204-2f1e-4e36-8555-95b5de322856",
+    "conversationId": "c:30",
+    "attempt": 1,
+    "visitorUtterances": 2,
+    "hostUtterances": 2,
+    "rawTranscriptIdentical": true,
+    "transcriptState": "COMPLETE",
+    "summaryState": "DONE",
+    "authenticatedACK": true,
+    "originalResidentsReturned": true
+  },
+  "towns": [
+    {
+      "role": "home",
+      "chat": {
+        "vendor": "SiliconFlow",
+        "provider": "custom",
+        "origin": "https://api.siliconflow.cn",
+        "model": "deepseek-ai/DeepSeek-V4-Flash",
+        "enableThinking": false
+      },
+      "embedding": {
+        "vendor": "Ollama",
+        "provider": "ollama",
+        "model": "qwen3-embedding:0.6b",
+        "dimensions": 1024,
+        "memoryCount": 10,
+        "vectorCount": 10,
+        "sampleCount": 3,
+        "validationPhase": "DONE",
+        "storedVectorIdentityRetrievalHit": true,
+        "liveQueryPipelineValidatedByFormalScan": true,
+        "queryScore": 1,
+        "evidenceStatus": "UNKNOWN"
+      }
+    },
+    {
+      "role": "host",
+      "chat": {
+        "vendor": "Ollama",
+        "provider": "ollama",
+        "model": "qwen3.5:4b",
+        "reasoningEffort": "none"
+      },
+      "embedding": {
+        "vendor": "SiliconFlow",
+        "provider": "custom",
+        "origin": "https://api.siliconflow.cn",
+        "model": "BAAI/bge-m3",
+        "dimensions": 1024,
+        "memoryCount": 2,
+        "vectorCount": 2,
+        "sampleCount": 2,
+        "validationPhase": "DONE",
+        "storedVectorIdentityRetrievalHit": true,
+        "liveQueryPipelineValidatedByFormalScan": true,
+        "queryScore": 1,
+        "evidenceStatus": "UNKNOWN"
+      }
+    }
+  ],
+  "profilesBindingsAndSpacesPreserved": true,
+  "syntheticMemoryFixturesInserted": false,
+  "recovery": {
+    "homeInitialVectorCount": 5,
+    "homeMemoryCount": 10,
+    "cause": "Concurrent request limit",
+    "formalResumeCount": 1,
+    "finalHomeVectorCount": 10
+  },
+  "tlsCertificateVerificationDisabled": false,
+  "cleanup": {
+    "testContainersRemoved": 3,
+    "testVolumesRemoved": 2,
+    "testNetworksRemoved": 1,
+    "providerCredentialFileRemoved": true,
+    "sharedImagesAndUserModelsRetained": true
+  },
+  "userRelease": {
+    "M_N_IdentitiesAndEpoch3Preserved": true,
+    "M_N_ResidentCounts": [
+      2,
+      3
+    ],
+    "defaultChat": "ollama/qwen3.5:4b",
+    "defaultEmbedding": "ollama/qwen3-embedding:0.6b/1024",
+    "currentLanAddressesRepaired": true,
+    "thinkingOptionDeployed": true,
+    "chineseThinkingOptionsVerifiedInBrowser": true,
+    "mapFitsViewport": true
+  },
+  "limits": [
+    "Embedding weight provenance remains UNKNOWN; no cross-provider vector reuse claimed.",
+    "One actual conversation and bounded validation do not establish arbitrary provider or long-term load guarantees."
+  ]
+}
