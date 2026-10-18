@@ -719,11 +719,11 @@ test('model policies survive town restore while call receipts and usage buckets 
     const chat = (await ctx.db.query('chatProfiles').unique())!;
     const embedding = (await ctx.db.query('embeddingProfiles').unique())!;
     const binding = (await ctx.db.query('residentModelBindings').unique())!;
-    await ctx.db.patch(chat._id, { dailyRequestLimit: 12 });
+    await ctx.db.patch(chat._id, { dailyRequestLimit: 12, enableThinking: false, reasoningEffort: 'none' });
     await ctx.db.patch(embedding._id, { dailyRequestLimit: 8 });
     await ctx.db.patch(binding._id, { requestQuotas: { chat: 3, embedding: null } });
     await ctx.db.insert('chatProfiles', { ...Object.fromEntries(Object.entries(chat).filter(([k]) => !k.startsWith('_'))),
-      name: 'Paused unused profile', disabled: true, dailyRequestLimit: 0 } as never);
+      name: 'Paused unused profile', disabled: true, dailyRequestLimit: 0, enableThinking: true } as never);
     const providerKey = providerUsageKey(chat);
     await ctx.db.insert('modelProviderQuotas', { kind: 'CHAT', providerKey, maxRequestsPerDay: 20, updatedAt: 1 });
     await ctx.db.insert('modelCallReceipts', { kind: 'CHAT', profileId: chat._id, providerKey, day: 0, startedAt: 1 });
@@ -737,6 +737,7 @@ test('model policies survive town restore while call receipts and usage buckets 
   expect(decodeRow(bundle.sections.modelProviderQuotas[0])).toMatchObject({ providerKey, maxRequestsPerDay: 20 });
   const resident = await t.action(action('federation/backup:exportResident'), { adminToken, worldId, playerId: 'p:0' });
   expect(resident.sections.modelProviderQuotas?.length ?? 0).toBe(0);
+  expect(decodeRow(resident.sections.chatProfiles[0])).toMatchObject({ enableThinking: false, reasoningEffort: 'none' });
   expect(decodeRow(resident.sections.residentModelBindings[0]).requestQuotas).toEqual({ chat: 3, embedding: null });
   await t.run(async ctx => {
     const quota = (await ctx.db.query('modelProviderQuotas').unique())!;
@@ -747,8 +748,8 @@ test('model policies survive town restore while call receipts and usage buckets 
   expect((await t.run(ctx => ctx.db.query('residentModelBindings').unique()))?.requestQuotas).toEqual({ chat: 3, embedding: null });
   expect((await t.run(ctx => ctx.db.query('embeddingProfiles').unique()))?.dailyRequestLimit).toBe(8);
   expect(await t.run(ctx => ctx.db.query('chatProfiles').collect())).toEqual(expect.arrayContaining([
-    expect.objectContaining({ name: 'Fixed Chat', dailyRequestLimit: 12 }),
-    expect.objectContaining({ name: 'Paused unused profile', disabled: true, dailyRequestLimit: 0 }),
+    expect.objectContaining({ name: 'Fixed Chat', dailyRequestLimit: 12, enableThinking: false, reasoningEffort: 'none' }),
+    expect.objectContaining({ name: 'Paused unused profile', disabled: true, dailyRequestLimit: 0, enableThinking: true }),
   ]));
 });
 

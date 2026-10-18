@@ -48,7 +48,13 @@ export default function ModelsPanel({ adminToken }: { adminToken: string }) {
       apiKeyEnv: String(fields.get('apiKeyEnv')).trim() || undefined,
     };
     await task.run(t("Saving profile"), async () => {
-      if (kind === 'chat') await convex.mutation(api.models.profiles.saveChatProfile, connection);
+      if (kind === 'chat') {
+        const thinking = fields.get('enableThinking');
+        await convex.mutation(api.models.profiles.saveChatProfile, {
+          ...connection,
+          ...(thinking === 'true' || thinking === 'false' ? { enableThinking: thinking === 'true' } : {}),
+        });
+      }
       else
         await convex.mutation(api.models.embeddings.saveEmbeddingProfile, {
           ...connection,
@@ -95,6 +101,7 @@ export default function ModelsPanel({ adminToken }: { adminToken: string }) {
                   )}
                   <p className="admin-muted">
                     {profile.provider} · {profile.model}
+                    {profile.enableThinking !== undefined && <> · {t(profile.enableThinking ? 'Thinking enabled' : 'Thinking disabled')}</>}
                   </p>
                   <code>{profile.url}</code>
                   <p className="admin-muted">
@@ -444,6 +451,15 @@ export default function ModelsPanel({ adminToken }: { adminToken: string }) {
               pattern="[A-Z][A-Z0-9_]{0,127}"
             />
           </Field>
+          {kind === 'chat' && (
+            <Field label={t('Thinking mode')} hint={t('Leave the provider default unless this model supports enable_thinking. For SiliconFlow DeepSeek, disable thinking to request direct replies.')} >
+              <select name="enableThinking" defaultValue="">
+                <option value="">{t('Provider default')}</option>
+                <option value="true">{t('Thinking enabled')}</option>
+                <option value="false">{t('Thinking disabled')}</option>
+              </select>
+            </Field>
+          )}
           {kind === 'embedding' && (
             <>
               <Field label={t("Dimensions")}>

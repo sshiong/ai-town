@@ -1,4 +1,9 @@
 export const gameModelMessages: Record<string, string> = {
+  'Thinking mode': '思考模式',
+  'Provider default': '使用服务商默认设置',
+  'Thinking enabled': '开启思考',
+  'Thinking disabled': '关闭思考',
+  'Leave the provider default unless this model supports enable_thinking. For SiliconFlow DeepSeek, disable thinking to request direct replies.': '仅在模型支持 enable_thinking 时指定此选项，否则保留服务商默认设置。SiliconFlow 的 DeepSeek 可选择关闭思考，直接输出回复。',
   'This archive is being cleaned or has been locally sanitized. Rebuild from retained text; its original vector snapshot cannot be reused.': '该归档正在清理或已在本地脱敏，原始向量快照不可复用，请从保留的文本重建。',
   'The archive changed after this vector task started. Rebuild from the current retained text.': '归档在此向量任务启动后发生了变化，请从当前保留的文本重建。',
   "Saving profile": "正在保存配置",

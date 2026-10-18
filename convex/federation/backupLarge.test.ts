@@ -879,7 +879,7 @@ test('chunked restore retains provider/profile/resident policy without exporting
   await t.run(async ctx => {
     const profile = (await ctx.db.query('chatProfiles').unique())!;
     const binding = (await ctx.db.query('residentModelBindings').unique())!;
-    await ctx.db.patch(profile._id, { dailyRequestLimit: 6 });
+    await ctx.db.patch(profile._id, { dailyRequestLimit: 6, enableThinking: false, reasoningEffort: 'none' });
     await ctx.db.patch(binding._id, { requestQuotas: { chat: 2, embedding: 0 } });
     await ctx.db.insert('modelProviderQuotas', { kind: 'CHAT', providerKey: '["custom","https://chat.example"]', maxRequestsPerDay: 9, updatedAt: 1 });
   });
@@ -891,7 +891,7 @@ test('chunked restore retains provider/profile/resident policy without exporting
   await t.mutation(mutation('startApply'), { adminToken, jobId });
   await drive(t, jobId, 'import', 'COMPLETE');
   expect(await t.run(ctx => ctx.db.query('modelProviderQuotas').unique())).toMatchObject({ maxRequestsPerDay: 9 });
-  expect(await t.run(ctx => ctx.db.query('chatProfiles').unique())).toMatchObject({ dailyRequestLimit: 6 });
+  expect(await t.run(ctx => ctx.db.query('chatProfiles').unique())).toMatchObject({ dailyRequestLimit: 6, enableThinking: false, reasoningEffort: 'none' });
   expect(await t.run(ctx => ctx.db.query('residentModelBindings').unique())).toMatchObject({ requestQuotas: { chat: 2, embedding: 0 } });
 });
 

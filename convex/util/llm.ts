@@ -8,6 +8,7 @@ export interface ChatConfig {
   url: string;
   chatModel: string;
   reasoningEffort?: 'none';
+  enableThinking?: boolean;
   stopWords: string[];
   apiKey?: string;
 }
@@ -139,6 +140,7 @@ export async function chatCompletion(
   body = {
     ...body,
     ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
+    ...(config.enableThinking !== undefined ? { enable_thinking: config.enableThinking } : {}),
   };
   const stopWords = body.stop ? (typeof body.stop === 'string' ? [body.stop] : body.stop) : [];
   if (config.stopWords) stopWords.push(...config.stopWords);

@@ -264,6 +264,7 @@ export function profileChatConfig(profile: Doc<'chatProfiles'>): ChatConfig {
     chatModel: profile.model,
     stopWords: profile.stopWords,
     reasoningEffort: profile.reasoningEffort,
+    enableThinking: profile.enableThinking,
     apiKey,
     modelUsage: { profileId: profile._id },
   };

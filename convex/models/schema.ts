@@ -11,6 +11,7 @@ export const provider = v.union(
   v.literal('custom'),
 );
 export const chatOptions = {
+  enableThinking: v.optional(v.boolean()),
   reasoningEffort: v.optional(v.literal('none')),
 };
 export const connectionFields = {

@@ -6,7 +6,7 @@ import schema from '../schema';
 import { embeddingFingerprint, verifiedCompatible, validateVector } from './compatibility';
 import { cacheNamespace } from '../agent/embeddingsCache';
 import { memorySourceDigest } from './embeddingDataRevision';
-import { bindResident, profileChatConfig } from './profiles';
+import { bindResident, profileChatConfig, chatConfigForResident, chatConfigForGlobalAgent } from './profiles';
 import { ensureEmbeddingSpace, profileEmbeddingConfig } from './embeddings';
 import { chatCompletion, fetchEmbeddingBatch, ollamaFetchEmbedding } from '../util/llm';
 import { recallHomeMemories } from '../federation/decision';
@@ -210,7 +210,18 @@ test('embedding switch requires complete coverage and validation, with old vecto
     return { worldId, profileId, old, next, memoryId };
   });
   const incomplete = await t.mutation(mutation('models/embeddings:finishBuild'), { spaceId: ids.next });
-  expect((await drainScan(t, incomplete))?.failure).toContain('EMBEDDING_COVERAGE_INCOMPLETE');
+  // This manual driver deliberately advances scans without the scheduled repair
+  // worker: missing coverage exhausts its bounded budget and requires explicit resume.
+  expect(await drainScan(t, incomplete)).toMatchObject({
+    phase: 'FAILED', restarts: 3, failure: expect.stringContaining('EMBEDDING_COVERAGE_INCOMPLETE'),
+  });
+  expect((await t.query(query('models/embeddings:getRoute'), { spaceId: ids.next })).space.status).toBe('FAILED');
+  expect((await t.query(query('models/embeddings:getRoute'), {})).space._id).toBe(ids.old);
+  await expect(t.action(makeFunctionReference<'action'>('models/embeddings:validateSpace'), {
+    adminToken, spaceId: ids.next,
+  })).rejects.toThrow('EMBEDDING_SPACE_NOT_AVAILABLE');
+  await t.mutation(mutation('models/embeddings:resumeRebuild'), { adminToken, spaceId: ids.next });
+  expect((await t.query(query('models/embeddings:getRoute'), { spaceId: ids.next })).space.status).toBe('BUILDING');
   await t.mutation(mutation('models/embeddings:putVector'), {
     spaceId: ids.next,
     memoryId: ids.memoryId,
@@ -218,7 +229,8 @@ test('embedding switch requires complete coverage and validation, with old vecto
     embedding: [0, 1],
   });
   await stampFixtureVectors(t);
-  await drainScan(t, await t.mutation(mutation('models/embeddings:finishBuild'), { spaceId: ids.next }));
+  expect(await drainScan(t, await t.mutation(mutation('models/embeddings:finishBuild'), { spaceId: ids.next })))
+    .toMatchObject({ phase: 'DONE', memoryCount: 1, vectorCount: 1 });
   await expect(
     t.mutation(mutation('models/embeddings:activateSpace'), { adminToken, spaceId: ids.next }),
   ).rejects.toThrow('EMBEDDING_SPACE_NOT_VALIDATED');
@@ -783,7 +795,7 @@ test('empty Chat output reports safe provider metadata without executing or expo
   );
   const error = await chatCompletion(
     { messages: [{ role: 'user', content: 'private prompt' }], max_tokens: 350 },
-    { provider: 'custom', url: 'https://chat.example', chatModel: 'claw', stopWords: [] },
+    { provider: 'custom', url: 'https://chat.example', chatModel: 'claw', stopWords: [], enableThinking: false },
   ).catch((error: Error) => error);
   expect(error).toBeInstanceOf(Error);
   expect(String(error)).toContain('EMPTY_CHAT_RESPONSE');
@@ -1045,4 +1057,45 @@ test('native Ollama embeddings send the configured bearer credential without cha
   expect(JSON.parse(requests[0].init?.body as string)).toEqual({model: 'qwen3-embedding:0.6b', prompt: 'unchanged prompt'});
   await ollamaFetchEmbedding('unchanged prompt', {...config, apiKey: undefined});
   expect(requests[1].init?.headers).not.toHaveProperty('Authorization');
+});
+
+
+test.each([false, true, undefined])('explicit Chat enableThinking %s survives storage, probe and fixed resident routes', async enableThinking => {
+  const t = convexTest(schema, modules);
+  const adminToken = process.env.FEDERATION_ADMIN_TOKEN!;
+  const worldId = await t.run(ctx => ctx.db.insert('worlds', { nextId: 2, players: [], agents: [], conversations: [] }));
+  const request = jest.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+    new Response(JSON.stringify({ choices: [{ message: { content: 'OK', reasoning_content: 'private reasoning' } }] })));
+  const first = await t.mutation(mutation('models/profiles:saveChatProfile'), {
+    adminToken, name: 'Fixed cloud', provider: 'custom', url: 'https://cloud.example/v1',
+    model: 'fixed-cloud', ...(enableThinking === undefined ? {} : { enableThinking }),
+  });
+  expect((await t.run(ctx => ctx.db.query('chatProfiles').unique()))?.enableThinking).toBe(enableThinking);
+  await t.action(makeFunctionReference<'action'>('models/profiles:probeChat'), { adminToken, chatProfileId: first });
+  await t.run(ctx => bindResident(ctx, worldId, 'p:0' as never, 'town:test/agent:fixed'));
+  const second = await t.mutation(mutation('models/profiles:saveChatProfile'), {
+    adminToken, name: 'Different main', provider: 'custom', url: 'https://other.example', model: 'other',
+    enableThinking: true, reasoningEffort: 'none',
+  });
+  await t.action(makeFunctionReference<'action'>('models/profiles:probeChat'), { adminToken, chatProfileId: second });
+  await t.mutation(mutation('models/profiles:setMain'), { adminToken, chatProfileId: second });
+  for (const route of [
+    () => t.action(ctx => chatConfigForResident(ctx, worldId, 'p:0' as never)),
+    () => t.action(ctx => chatConfigForGlobalAgent(ctx, 'town:test/agent:fixed')),
+  ]) {
+    const config = await route();
+    expect(config).toMatchObject({ chatModel: 'fixed-cloud', url: 'https://cloud.example/v1' });
+    expect(config.enableThinking).toBe(enableThinking);
+    expect(config.reasoningEffort).toBeUndefined();
+    await expect(chatCompletion({ messages: [{ role: 'user', content: 'Hello' }] }, config))
+      .resolves.toMatchObject({ content: 'OK' });
+  }
+  const bodies = request.mock.calls.map(call => JSON.parse(call[1]!.body as string));
+  for (const body of bodies.filter(body => body.model === 'fixed-cloud')) {
+    if (enableThinking === undefined) expect(body).not.toHaveProperty('enable_thinking');
+    else expect(body).toHaveProperty('enable_thinking', enableThinking);
+    expect(body).not.toHaveProperty('reasoning_effort');
+  }
+  expect(bodies.find(body => body.model === 'other')).toMatchObject({ enable_thinking: true, reasoning_effort: 'none' });
+  expect(request.mock.calls[0][0]).toBe('https://cloud.example/v1/chat/completions');
 });
