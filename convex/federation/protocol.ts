@@ -80,7 +80,7 @@ export function validateEnvelope(message: FederationMessage, now = Date.now(), p
   const recovery = allowRecoveryTime && ['VISIT_RETURN', 'VISIT_CLEANED', 'VISIT_REJECT', 'SESSION_RESYNC', 'STREAM_NACK', 'CONVERSATION_ENDED'].includes(message.type);
   if (!Number.isSafeInteger(message.sentAt) || !Number.isSafeInteger(message.expiresAt) ||
     message.expiresAt <= message.sentAt || message.expiresAt - message.sentAt > 10 * 60_000 ||
-    !recovery && (message.sentAt > now + policy.clockSkewMs || message.expiresAt <= now || message.expiresAt > now + 10 * 60_000)) throw new Error('MESSAGE_EXPIRED');
+    !recovery && (message.sentAt > now + policy.clockSkewMs || message.expiresAt <= now || message.expiresAt > now + 10 * 60_000 + policy.clockSkewMs)) throw new Error('MESSAGE_EXPIRED');
   if (!message.payload || typeof message.payload !== 'object' || Array.isArray(message.payload)) throw new Error('INVALID_PAYLOAD');
   if (new TextEncoder().encode(canonicalJson(message)).byteLength > MESSAGE_MAX_BYTES) throw new Error('MESSAGE_TOO_LARGE');
   if (message.type === 'TRANSPORT_PROBE') {

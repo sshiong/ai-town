@@ -1,7 +1,7 @@
 import { action, httpAction, internalMutation, mutation } from '../maintenanceFunctions';
 import { v } from 'convex/values';
 import { constantTimeEqual, deriveCredential, digest, ephemeralKeys, mac, openSecret, requireAdmin, sealSecret, sign, validatePairingSecret, verifyMac, verifySignature } from './security';
-import { PROTOCOL, normalizeEndpoint, normalizeEndpointCandidates, endpointGeneration, nextEndpointGeneration } from './protocol';
+import { CLOCK_SKEW_MS, PROTOCOL, normalizeEndpoint, normalizeEndpointCandidates, endpointGeneration, nextEndpointGeneration } from './protocol';
 import { actionRef, mutationRef, queryRef } from './refs';
 import { directRequest, readRequest } from './direct';
 import { identity, peer, session } from './store';
@@ -45,7 +45,7 @@ export const storeOutbound = internalMutation({ args: { request: v.any(), endpoi
 export const receiveRequest = internalMutation({ args: { request: v.any(), proof: v.string() }, handler: async (ctx, args) => {
   const local = await identity(ctx); const request = args.request;
   if (!local?.enabled || !local.allowIncomingPairRequests || local.mode !== 'ACTIVE') throw new Error('PAIR_REQUESTS_DISABLED');
-  if (request.targetTownId !== local.townId || request.townId === local.townId || request.protocol !== PROTOCOL || !request.pairRequestId || request.pairRequestId.length > 100 || !request.townId || request.townId.length > 200 || typeof request.townName !== 'string' || request.townName.length > 80 || typeof request.nonce !== 'string' || !request.nonce || request.nonce.length > 200 || request.expiresAt <= Date.now() || request.expiresAt > Date.now() + 10 * 60_000 || !Number.isSafeInteger(request.deploymentEpoch) || request.deploymentEpoch < 1) throw new Error('INVALID_PAIR_REQUEST');
+  if (request.targetTownId !== local.townId || request.townId === local.townId || request.protocol !== PROTOCOL || !request.pairRequestId || request.pairRequestId.length > 100 || !request.townId || request.townId.length > 200 || typeof request.townName !== 'string' || request.townName.length > 80 || typeof request.nonce !== 'string' || !request.nonce || request.nonce.length > 200 || request.expiresAt <= Date.now() || request.expiresAt > Date.now() + 10 * 60_000 + CLOCK_SKEW_MS || !Number.isSafeInteger(request.sentAt) || !Number.isSafeInteger(request.expiresAt) || request.sentAt > Date.now() + CLOCK_SKEW_MS || request.expiresAt <= request.sentAt || request.expiresAt - request.sentAt > 10 * 60_000 || !Number.isSafeInteger(request.deploymentEpoch) || request.deploymentEpoch < 1) throw new Error('INVALID_PAIR_REQUEST');
   normalizeEndpointCandidates(request.endpoint, request.endpointCandidates);
   const existing = await pairById(ctx, request.pairRequestId);
   if (existing) {
@@ -217,7 +217,7 @@ export const updateEndpoint = action({
 
 export const consumePairNonce = internalMutation({ args: { pairRequestId: v.string(), townId: v.string(), nonce: v.string(), expiresAt: v.number() }, handler: async (ctx, args) => {
   const pair = await pairById(ctx, args.pairRequestId);
-  if (!pair || pair.direction !== 'INBOUND' || pair.request.townId !== args.townId || !args.nonce || args.nonce.length > 200 || args.expiresAt <= Date.now() || args.expiresAt > Date.now() + 10 * 60_000) throw new Error('INVALID_PAIR_CONTROL');
+  if (!pair || pair.direction !== 'INBOUND' || pair.request.townId !== args.townId || !args.nonce || args.nonce.length > 200 || args.expiresAt <= Date.now() || args.expiresAt > Date.now() + 10 * 60_000 + CLOCK_SKEW_MS) throw new Error('INVALID_PAIR_CONTROL');
   const existing = await ctx.db.query('federationReplayNonces').withIndex('nonce', q => q.eq('peerTownId', args.townId).eq('nonce', args.nonce)).unique();
   if (existing && existing.expiresAt > Date.now()) throw new Error('REPLAYED_NONCE');
   if (existing) await ctx.db.delete(existing._id);
@@ -255,7 +255,7 @@ export function registerPairingRoutes(http: import('convex/server').HttpRouter) 
       if (!['status', 'confirm', 'cancel'].includes(input.operation) || !input.body || typeof input.body.pairRequestId !== 'string') throw new Error('INVALID_PAIR_OPERATION');
       const body = input.body, data = await ctx.runQuery(queryRef('store/context'), { pairRequestId: body.pairRequestId });
       const pair = data.pair, local = data.identity;
-      if (!pair || !local || pair.direction !== 'INBOUND' || body.townId !== pair.request.townId || !await verifySignature(body, input.signature, pair.request.publicKey) || body.expiresAt <= Date.now() || body.expiresAt > Date.now() + 10 * 60_000) throw new Error('INVALID_PAIR_SIGNATURE');
+      if (!pair || !local || pair.direction !== 'INBOUND' || body.townId !== pair.request.townId || !await verifySignature(body, input.signature, pair.request.publicKey) || body.expiresAt <= Date.now() || body.expiresAt > Date.now() + 10 * 60_000 + CLOCK_SKEW_MS) throw new Error('INVALID_PAIR_SIGNATURE');
       if (input.operation === 'status' || input.operation === 'cancel') {
         await ctx.runMutation(mutationRef('peers/consumePairNonce'), { pairRequestId: pair.pairRequestId, townId: body.townId, nonce: body.nonce, expiresAt: body.expiresAt });
         const cancellation = input.operation === 'cancel' ? await ctx.runMutation(mutationRef('peers/receiveCancellation'), { pairRequestId: pair.pairRequestId }) : null;

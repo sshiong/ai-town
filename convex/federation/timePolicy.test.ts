@@ -6,7 +6,7 @@ import { mutationRef } from './refs';
 import { validateEnvelope, PROTOCOL } from './protocol';
 import { ready } from './store';
 
-const modules = { '../_generated/server.ts': () => import('../_generated/server'), '../federation/admin.ts': () => import('./admin') };
+const modules = { '../_generated/server.ts': () => import('../_generated/server'), '../federation/admin.ts': () => import('./admin'), '../federation/peers.ts': () => import('./peers') };
 const token = 'time-policy-test-admin-token-32bytes';
 beforeEach(() => { jest.useFakeTimers(); process.env.FEDERATION_ADMIN_TOKEN = token; });
 afterEach(() => jest.useRealTimers());
@@ -136,4 +136,31 @@ test.each(['backward', 'gap'])('a new %s anomaly revokes UTC return-only confirm
   await t.run(ctx => observeClock(ctx, null, abnormal));
   expect(await t.run(ctx => readClock(ctx.db, null, startedAt + configuredTimePolicy().clockObservationGapMs + 2))).toMatchObject({ healthy: false, returnClockHealthy: false });
   expect((await t.run(ctx => ctx.db.query('federationClock').unique()))?.returnClockConfirmedAt).toBeUndefined();
+});
+
+// Independent hosts need not share the exact millisecond, even with working NTP.
+test('maximum-lifetime envelopes tolerate bounded positive UTC skew without extending lifetime', () => {
+  const now = Date.now(), policy = configuredTimePolicy();
+  const envelope = { protocol: PROTOCOL, messageId: 'message', fromTownId: 'home', toTownId: 'host', senderDeploymentInstanceId: 'instance',
+    senderDeploymentEpoch: 1, expectedRecipientDeploymentEpoch: 1, type: 'TRANSPORT_PROBE', payload: { probeId: 'probe', nonce: 'nonce' },
+    sentAt: now + 500, expiresAt: now + 600500, nonce: 'nonce', credentialId: 'credential' };
+  expect(() => validateEnvelope(envelope, now)).not.toThrow();
+  expect(() => validateEnvelope({ ...envelope, sentAt: now + policy.clockSkewMs, expiresAt: now + 600000 + policy.clockSkewMs }, now)).not.toThrow();
+  expect(() => validateEnvelope({ ...envelope, sentAt: now + policy.clockSkewMs + 1, expiresAt: now + 600001 + policy.clockSkewMs }, now)).toThrow('MESSAGE_EXPIRED');
+  expect(() => validateEnvelope({ ...envelope, expiresAt: envelope.expiresAt + 1 }, now)).toThrow('MESSAGE_EXPIRED');
+  expect(() => validateEnvelope({ ...envelope, sentAt: now - 600000, expiresAt: now }, now)).toThrow('MESSAGE_EXPIRED');
+});
+
+test('pair offers accept a slightly faster sender but reject excessive skew and lifetime', async () => {
+  const t = convexTest(schema, modules), now = Date.now();
+  await t.run(ctx => ctx.db.insert('federationIdentity', { townId: 'host', townName: 'Host', endpoint: 'https://host.example/federation/v1',
+    publicKey: 'public', privateKeyEncrypted: 'private', fingerprint: 'fingerprint', deploymentInstanceId: 'instance', deploymentEpoch: 1,
+    enabled: true, allowIncomingPairRequests: true, allowUnencryptedHttp: false, allowPublicHttp: false,
+    maxVisitors: 1, maxVisitDurationMs: 300000, mode: 'ACTIVE', createdAt: now }));
+  const request = { targetTownId: 'host', townId: 'home', townName: 'Home', protocol: PROTOCOL, pairRequestId: 'slight-skew',
+    nonce: 'nonce', sentAt: now + 500, expiresAt: now + 600500, deploymentEpoch: 1, endpoint: 'https://home.example/federation/v1' };
+  await expect(t.mutation(mutationRef('peers/receiveRequest'), { request, proof: 'proof' })).resolves.toEqual({ state: 'PENDING_APPROVAL' });
+  for (const invalid of [{ sentAt: now + 30001, expiresAt: now + 630001 }, { expiresAt: request.expiresAt + 1 }, { expiresAt: NaN }]) {
+    await expect(t.mutation(mutationRef('peers/receiveRequest'), { request: { ...request, ...invalid }, proof: 'proof' })).rejects.toThrow('INVALID_PAIR_REQUEST');
+  }
 });
